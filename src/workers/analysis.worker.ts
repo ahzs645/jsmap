@@ -123,6 +123,56 @@ async function buildZip(jobId: string): Promise<void> {
   }
 }
 
+async function buildPackage(jobId: string): Promise<void> {
+  const runtime = runtimes.get(jobId);
+
+  if (!runtime) {
+    postMessageToClient({
+      type: 'package-error',
+      jobId,
+      error: 'No completed result was found for this job.',
+    });
+    return;
+  }
+
+  try {
+    const zip = new JSZip();
+    const sourceFilesById = new Map(runtime.files.map((file) => [file.id, file]));
+
+    for (const file of runtime.result.reconstruction.files) {
+      if (!file.generated && file.sourceFileId) {
+        const sourceFile = sourceFilesById.get(file.sourceFileId);
+
+        if (sourceFile) {
+          zip.file(file.path, sourceFile.content);
+          continue;
+        }
+      }
+
+      zip.file(file.path, file.content ?? '');
+    }
+
+    const bytes = await zip.generateAsync({ type: 'uint8array' });
+    const buffer = bytes.slice().buffer;
+
+    postMessageToClient(
+      {
+        type: 'package-ready',
+        jobId,
+        fileName: `${sanitizeArchiveName(runtime.result.reconstruction.packageName)}-reconstructed.zip`,
+        buffer,
+      },
+      [buffer],
+    );
+  } catch (error) {
+    postMessageToClient({
+      type: 'package-error',
+      jobId,
+      error: error instanceof Error ? error.message : 'Could not build reconstructed package.',
+    });
+  }
+}
+
 async function buildExport(
   jobId: string,
   format: 'json' | 'tsv' | 'html',
@@ -234,6 +284,9 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
     }
     case 'build-zip':
       await buildZip(message.jobId);
+      return;
+    case 'build-package':
+      await buildPackage(message.jobId);
       return;
     case 'build-export':
       await buildExport(message.jobId, message.format);

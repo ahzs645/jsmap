@@ -60,6 +60,7 @@ export interface AnalysisWarning {
 export type PackageEvidenceType =
   | 'node-modules-path'
   | 'import-specifier'
+  | 'source-map-source'
   | 'package-manifest'
   | 'manifest-dependency';
 
@@ -81,6 +82,63 @@ export interface InferredPackage {
   recoveredBytes: number;
   importCount: number;
   evidence: PackageEvidence[];
+}
+
+export type ReconstructionKind = 'react-app' | 'npm-package';
+export type ReconstructionFramework = 'react' | 'generic';
+export type ReconstructionDependencySource =
+  | 'recovered-manifest'
+  | 'package-evidence'
+  | 'react-template'
+  | 'tooling';
+
+export interface ReconstructedManifest {
+  name: string;
+  version: string;
+  private: boolean;
+  type?: 'module';
+  main?: string;
+  module?: string;
+  scripts: Record<string, string>;
+  dependencies: Record<string, string>;
+  devDependencies: Record<string, string>;
+  peerDependencies: Record<string, string>;
+}
+
+export interface ReconstructionDependency {
+  name: string;
+  version: string;
+  source: ReconstructionDependencySource;
+}
+
+export interface ReconstructionEntrypoint {
+  path: string;
+  role: 'app' | 'library';
+  generated: boolean;
+  description: string;
+}
+
+export interface ReconstructionOutputFile {
+  path: string;
+  generated: boolean;
+  description: string;
+  sourceFileId?: string;
+  content?: string;
+}
+
+export interface PackageReconstruction {
+  packageName: string;
+  displayName: string;
+  kind: ReconstructionKind;
+  framework: ReconstructionFramework;
+  usesTypeScript: boolean;
+  recoveredManifestPath?: string;
+  manifest: ReconstructedManifest;
+  entrypoints: ReconstructionEntrypoint[];
+  dependencies: ReconstructionDependency[];
+  devDependencies: ReconstructionDependency[];
+  files: ReconstructionOutputFile[];
+  notes: string[];
 }
 
 export type BundleBreakdownCategory =
@@ -141,6 +199,7 @@ export interface AnalysisResult {
   findings: SensitiveFinding[];
   lookupSources: LookupSourceOption[];
   packages: InferredPackage[];
+  reconstruction: PackageReconstruction;
   warnings: AnalysisWarning[];
   bundle: BundleAnalysis | null;
   stats: SourceMapStats;
@@ -197,6 +256,10 @@ export type WorkerRequest =
       jobId: string;
     }
   | {
+      type: 'build-package';
+      jobId: string;
+    }
+  | {
       type: 'build-export';
       jobId: string;
       format: 'json' | 'tsv' | 'html';
@@ -236,6 +299,17 @@ export type WorkerResponse =
     }
   | {
       type: 'zip-error';
+      jobId: string;
+      error: string;
+    }
+  | {
+      type: 'package-ready';
+      jobId: string;
+      fileName: string;
+      buffer: ArrayBuffer;
+    }
+  | {
+      type: 'package-error';
       jobId: string;
       error: string;
     }

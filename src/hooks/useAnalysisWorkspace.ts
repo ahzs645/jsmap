@@ -18,8 +18,8 @@ import type {
   WorkerResponse,
 } from '../types/analysis';
 
-type ActiveTab = 'files' | 'findings' | 'lookups';
-type ExtendedActiveTab = ActiveTab | 'bundle';
+type ActiveTab = 'files' | 'findings' | 'lookups' | 'packages';
+type ExtendedActiveTab = ActiveTab | 'bundle' | 'packages';
 
 interface JobRecord {
   request: AnalysisJobRequest;
@@ -256,6 +256,20 @@ export function useAnalysisWorkspace() {
           error: message.error,
         });
         break;
+      case 'package-ready': {
+        const blob = new Blob([message.buffer], {
+          type: 'application/zip',
+        });
+        saveAs(blob, message.fileName);
+        break;
+      }
+      case 'package-error':
+        dispatch({
+          type: 'job-error',
+          jobId: message.jobId,
+          error: message.error,
+        });
+        break;
       case 'export-ready': {
         const blob = new Blob([message.buffer], {
           type: message.mimeType,
@@ -452,6 +466,16 @@ export function useAnalysisWorkspace() {
 
       workerRef.current.postMessage({
         type: 'build-zip',
+        jobId,
+      });
+    },
+    downloadPackage(jobId: string) {
+      if (!workerRef.current) {
+        return;
+      }
+
+      workerRef.current.postMessage({
+        type: 'build-package',
         jobId,
       });
     },

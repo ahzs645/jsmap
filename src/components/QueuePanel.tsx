@@ -1,4 +1,5 @@
 import { formatCount } from '../lib/format';
+import type { ModeConfig } from '../lib/modes';
 import type { JobStatus } from '../types/analysis';
 
 interface QueueItem {
@@ -11,6 +12,7 @@ interface QueueItem {
 }
 
 interface QueuePanelProps {
+  modeConfig: ModeConfig;
   jobs: QueueItem[];
   selectedJobId: string | null;
   isProcessing: boolean;
@@ -41,6 +43,7 @@ function getStatusLabel(status: JobStatus): string {
 }
 
 export function QueuePanel({
+  modeConfig,
   jobs,
   selectedJobId,
   isProcessing,
@@ -56,7 +59,7 @@ export function QueuePanel({
     <section className="queue-panel">
       <div className="queue-header">
         <div>
-          <h2>Worker Queue</h2>
+          <h2>{modeConfig.queueTitle}</h2>
           <p>
             {formatCount(jobs.length, 'job')} in batch.
             {' '}
@@ -82,7 +85,7 @@ export function QueuePanel({
 
       {jobs.length === 0 ? (
         <div className="empty-state compact">
-          <p>Add files, pasted content, or URLs to start building a batch.</p>
+          <p>{modeConfig.queueEmpty}</p>
         </div>
       ) : (
         <div className="queue-list">

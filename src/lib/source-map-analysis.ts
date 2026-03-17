@@ -13,6 +13,7 @@ import type {
 import { buildBundleAnalysis } from './bundle-analysis';
 import { scanFiles } from './findings';
 import { inferPackages } from './package-analysis';
+import { buildPackageReconstruction } from './package-reconstruction';
 import { sanitizePath } from './path-utils';
 import { SourceMapConsumer, ensureSourceMapConsumer } from './source-map-consumer';
 import { normalizeSourceMapJson } from './source-map-json';
@@ -144,6 +145,15 @@ export async function analyzeDiscoveredMap(
     const totalSize = files.reduce((sum, file) => sum + file.size, 0);
     const findings = scanFiles(files);
     const packages = inferPackages(files);
+    const reconstruction = buildPackageReconstruction({
+      label: job.label,
+      files,
+      packages,
+      mapJson: discovered.mapJson,
+      mapUrl: discovered.mapUrl,
+      generatedCode: discovered.generatedCode,
+      generatedUrl: discovered.generatedUrl,
+    });
     const { bundle, warnings } =
       typeof (consumer as SourceMapConsumerInstance & { computeColumnSpans?: () => void }).computeColumnSpans === 'function'
         ? buildBundleAnalysis(
@@ -167,6 +177,7 @@ export async function analyzeDiscoveredMap(
         originalSource: file.originalSource,
       })),
       packages,
+      reconstruction,
       warnings,
       bundle,
       stats: {

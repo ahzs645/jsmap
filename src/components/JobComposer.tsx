@@ -1,6 +1,8 @@
 import { useRef, useState, type DragEvent } from 'react';
+import type { ModeConfig } from '../lib/modes';
 
 interface JobComposerProps {
+  modeConfig: ModeConfig;
   onAddFiles: (files: File[]) => void;
   onAddTextJob: (text: string, textKind: 'auto' | 'map' | 'js', label: string) => void;
   onAddUrlJobs: (urls: string[], headers: Record<string, string>) => void;
@@ -29,6 +31,7 @@ function parseHeaderLines(input: string): Record<string, string> {
 }
 
 export function JobComposer({
+  modeConfig,
   onAddFiles,
   onAddTextJob,
   onAddUrlJobs,
@@ -105,8 +108,8 @@ export function JobComposer({
     <section className="composer">
       <div className="composer-card">
         <div className="composer-heading">
-          <h2>Batch Ingest</h2>
-          <p>Queue multiple `.map`, `.json`, and `.js` files for worker-based processing.</p>
+          <h2>{modeConfig.composerTitle}</h2>
+          <p>{modeConfig.composerDescription}</p>
         </div>
         <button
           className={`drop-zone${isDragActive ? ' active' : ''}`}
@@ -147,7 +150,7 @@ export function JobComposer({
         <div className="composer-card">
           <div className="composer-heading">
             <h2>Paste</h2>
-            <p>Drop in raw map JSON or a minified bundle with a `sourceMappingURL` comment.</p>
+            <p>{modeConfig.pasteDescription}</p>
           </div>
           <div className="segmented-control">
             {(['auto', 'map', 'js'] as const).map((option) => (
@@ -175,7 +178,7 @@ export function JobComposer({
         <div className="composer-card">
           <div className="composer-heading">
             <h2>Fetch URLs</h2>
-            <p>One URL per line. Remote JS inputs will inspect `SourceMap` headers and `sourceMappingURL` comments.</p>
+            <p>{modeConfig.urlDescription}</p>
           </div>
           <textarea
             className="paste-area compact"

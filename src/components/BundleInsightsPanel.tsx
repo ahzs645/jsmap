@@ -2,6 +2,7 @@ import { formatBytes, formatPercent } from '../lib/format';
 import type { AnalysisResult, BundleTreemapNode } from '../types/analysis';
 
 interface BundleInsightsPanelProps {
+  isDeobfuscationMode?: boolean;
   result: AnalysisResult;
   onSelectFile: (fileId: string) => void;
   onOpenFilesTab: () => void;
@@ -84,6 +85,7 @@ function TreemapNode({
 }
 
 export function BundleInsightsPanel({
+  isDeobfuscationMode = false,
   result,
   onSelectFile,
   onOpenFilesTab,
@@ -96,8 +98,12 @@ export function BundleInsightsPanel({
       <div className="bundle-panel">
         <div className="bundle-toolbar">
           <div>
-            <h2>Bundle Attribution</h2>
-            <p>Generated bundle content was not available for this job.</p>
+            <h2>{isDeobfuscationMode ? 'Bundle-to-Source Attribution' : 'Bundle Attribution'}</h2>
+            <p>
+              {isDeobfuscationMode
+                ? 'Generated bundle content was not available, so the reconstructed package relies only on source-map contents.'
+                : 'Generated bundle content was not available for this job.'}
+            </p>
           </div>
           <div className="actions-bar">
             <button className="btn btn-secondary" type="button" onClick={() => onDownloadExport('json')}>
@@ -120,8 +126,12 @@ export function BundleInsightsPanel({
     <div className="bundle-panel">
       <div className="bundle-toolbar">
         <div>
-          <h2>Bundle Attribution</h2>
-          <p>Treemap tiles and rows are clickable when they map to a recovered source file.</p>
+          <h2>{isDeobfuscationMode ? 'Bundle-to-Source Attribution' : 'Bundle Attribution'}</h2>
+          <p>
+            {isDeobfuscationMode
+              ? 'Use this view to trace reconstructed package files back to generated bundle ownership.'
+              : 'Treemap tiles and rows are clickable when they map to a recovered source file.'}
+          </p>
         </div>
         <div className="actions-bar">
           <button className="btn btn-secondary" type="button" onClick={() => onDownloadExport('json')}>

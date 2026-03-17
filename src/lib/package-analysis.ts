@@ -84,6 +84,8 @@ interface PackageAccumulator {
   evidenceKeys: Set<string>;
   primaryFileId?: string;
   hasNodeModulesPath: boolean;
+  hasSourceMapSource: boolean;
+  hasVersionedSourceMapSource: boolean;
   hasManifest: boolean;
   hasManifestDependency: boolean;
 }
@@ -98,6 +100,8 @@ function createAccumulator(name: string): PackageAccumulator {
     evidence: [],
     evidenceKeys: new Set<string>(),
     hasNodeModulesPath: false,
+    hasSourceMapSource: false,
+    hasVersionedSourceMapSource: false,
     hasManifest: false,
     hasManifestDependency: false,
   };
@@ -163,6 +167,110 @@ function normalizePackageSpecifier(specifier: string): string | null {
 
   const [root] = cleaned.split('/');
   return normalizePackageName(root ?? '');
+}
+
+function stripSourceMapPrefixes(source: string): string {
+  let normalized = source.trim();
+
+  while (normalized.startsWith('ssg:')) {
+    normalized = normalized.slice(4);
+  }
+
+  return normalized;
+}
+
+function parseUrl(value: string): URL | null {
+  try {
+    return new URL(value);
+  } catch {
+    return null;
+  }
+}
+
+interface SourceReferenceMatch {
+  name: string;
+  version?: string;
+  detail: string;
+  recordFile: boolean;
+}
+
+function getFramerModuleLabel(url: URL): string {
+  const lastSegment = url.pathname.split('/').filter(Boolean).pop() ?? '';
+  return lastSegment.replace(/\.[a-z0-9]+$/i, '') || 'unknown';
+}
+
+function getPackageMatchesFromSourceReference(source: string): SourceReferenceMatch[] {
+  const normalized = stripSourceMapPrefixes(source);
+
+  if (!normalized) {
+    return [];
+  }
+
+  if (normalized.startsWith('framer:toplevel:')) {
+    return [
+      {
+        name: 'framer',
+        detail: normalized,
+        recordFile: true,
+      },
+    ];
+  }
+
+  const url = parseUrl(normalized);
+
+  if (!url) {
+    return [];
+  }
+
+  const npmMatch = /(?:^|\/)npm:((?:@[^/]+\/)?[^@/]+)@([^/]+)/.exec(url.pathname);
+
+  if (npmMatch) {
+    const name = normalizePackageName(npmMatch[1]);
+    const version = npmMatch[2]?.trim();
+
+    if (name) {
+      return [
+        {
+          name,
+          version: version || undefined,
+          detail: `${name}${version ? `@${version}` : ''} via ${url.hostname}`,
+          recordFile: true,
+        },
+      ];
+    }
+  }
+
+  if (url.hostname === 'framer.com' || url.hostname.endsWith('.framer.com')) {
+    const framerMatch = /^\/m\/([^/]+)\/[^@]+@([^/?#]+)/.exec(url.pathname);
+    const name = normalizePackageName(framerMatch?.[1] ?? '');
+    const version = framerMatch?.[2]?.trim();
+
+    if (name) {
+      return [
+        {
+          name,
+          version: version || undefined,
+          detail: `${name}${version ? `@${version}` : ''} via ${url.hostname}`,
+          recordFile: true,
+        },
+      ];
+    }
+  }
+
+  if (
+    url.hostname === 'framerusercontent.com' ||
+    url.hostname.endsWith('.framerusercontent.com')
+  ) {
+    return [
+      {
+        name: 'framer',
+        detail: `site module ${getFramerModuleLabel(url)}`,
+        recordFile: true,
+      },
+    ];
+  }
+
+  return [];
 }
 
 function pushEvidence(
@@ -249,6 +357,32 @@ function scanImportSpecifiers(
 
       pushEvidence(entry, 'import-specifier', file, specifier);
     }
+  }
+}
+
+function scanSourceReference(
+  file: SourceFile,
+  packages: Map<string, PackageAccumulator>,
+): void {
+  for (const match of getPackageMatchesFromSourceReference(file.originalSource)) {
+    const entry = getAccumulator(packages, match.name);
+
+    entry.hasSourceMapSource = true;
+
+    if (match.version) {
+      entry.version = entry.version ?? match.version;
+      entry.hasVersionedSourceMapSource = true;
+    }
+
+    if (!entry.primaryFileId) {
+      entry.primaryFileId = file.id;
+    }
+
+    if (match.recordFile) {
+      recordRecoveredFile(entry, file);
+    }
+
+    pushEvidence(entry, 'source-map-source', file, match.detail);
   }
 }
 
@@ -358,11 +492,19 @@ function scanManifestFile(
 }
 
 function getConfidence(entry: PackageAccumulator): 'high' | 'medium' | 'low' {
-  if (entry.hasManifest || entry.hasNodeModulesPath) {
+  if (
+    entry.hasManifest ||
+    entry.hasNodeModulesPath ||
+    entry.hasVersionedSourceMapSource
+  ) {
     return 'high';
   }
 
-  if (entry.hasManifestDependency || entry.importSpecifiers.size > 1) {
+  if (
+    entry.hasManifestDependency ||
+    entry.importSpecifiers.size > 1 ||
+    entry.hasSourceMapSource
+  ) {
     return 'medium';
   }
 
@@ -399,6 +541,7 @@ export function inferPackages(files: SourceFile[]): InferredPackage[] {
       }
     }
 
+    scanSourceReference(file, packages);
     scanImportSpecifiers(file, packages);
     scanManifestFile(file, packages);
   }
