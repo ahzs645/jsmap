@@ -1152,9 +1152,34 @@
   color: var(--accent);
 }
 
+.package-chip.source {
+  background: rgba(17, 37, 43, 0.08);
+  color: var(--text);
+}
+
 .package-chip.requested {
   background: rgba(255, 168, 76, 0.14);
   color: var(--warning);
+}
+
+.package-chip.resolution.exact {
+  background: rgba(17, 148, 91, 0.14);
+  color: var(--success);
+}
+
+.package-chip.resolution.declared {
+  background: rgba(255, 168, 76, 0.14);
+  color: var(--warning);
+}
+
+.package-chip.resolution.inferred {
+  background: rgba(7, 145, 123, 0.14);
+  color: var(--accent);
+}
+
+.package-chip.resolution.ecosystem {
+  background: rgba(17, 37, 43, 0.08);
+  color: var(--text);
 }
 
 .package-chip.confidence.high {
@@ -1178,6 +1203,13 @@
   gap: 12px;
   margin-top: 14px;
   color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.package-origin-line {
+  margin: 12px 0 0;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 600;
 }
@@ -1219,6 +1251,16 @@
 .package-evidence-type.import-specifier {
   background: rgba(7, 145, 123, 0.14);
   color: var(--accent);
+}
+
+.package-evidence-type.source-map-source {
+  background: rgba(17, 148, 91, 0.14);
+  color: var(--success);
+}
+
+.package-evidence-type.site-module-source {
+  background: rgba(17, 37, 43, 0.08);
+  color: var(--text);
 }
 
 .package-evidence-type.manifest-dependency {

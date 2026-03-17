@@ -296,7 +296,7 @@ function sortRecord(record: Record<string, string>): Record<string, string> {
 }
 
 function toDependencyVersion(pkg: InferredPackage): string {
-  return pkg.requestedVersions[0] ?? pkg.version ?? '*';
+  return pkg.version ?? pkg.requestedVersions[0] ?? '*';
 }
 
 function addDependency(
@@ -591,7 +591,7 @@ export function buildPackageReconstruction({
   }
 
   for (const pkg of packages) {
-    if (pkg.name === packageName || pkg.confidence === 'low') {
+    if (pkg.name === packageName || pkg.resolution === 'ecosystem' || pkg.confidence === 'low') {
       continue;
     }
 

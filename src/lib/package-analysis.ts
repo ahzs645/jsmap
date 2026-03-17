@@ -2,6 +2,7 @@ import type {
   InferredPackage,
   PackageEvidence,
   PackageEvidenceType,
+  PackageResolution,
   SourceFile,
 } from '../types/analysis';
 
@@ -73,35 +74,60 @@ interface ManifestLike {
   optionalDependencies?: ManifestDependencyMap;
 }
 
+interface PackageCoordinate {
+  name: string;
+  version: string;
+}
+
 interface PackageAccumulator {
   name: string;
   version?: string;
+  versionSource?: PackageEvidenceType;
+  versionPriority: number;
   requestedVersions: Set<string>;
-  recoveredFileIds: Set<string>;
-  recoveredBytes: number;
+  exactFileIds: Set<string>;
+  exactBytes: number;
+  relatedFileIds: Set<string>;
+  relatedBytes: number;
   importSpecifiers: Set<string>;
   evidence: PackageEvidence[];
   evidenceKeys: Set<string>;
   primaryFileId?: string;
+  sourceHosts: Set<string>;
   hasNodeModulesPath: boolean;
   hasSourceMapSource: boolean;
   hasVersionedSourceMapSource: boolean;
+  hasSiteModuleSource: boolean;
   hasManifest: boolean;
   hasManifestDependency: boolean;
+}
+
+interface SourceReferenceMatch {
+  name: string;
+  detail: string;
+  evidenceType: Extract<PackageEvidenceType, 'source-map-source' | 'site-module-source'>;
+  scope: Extract<PackageResolution, 'exact' | 'ecosystem'>;
+  host?: string;
+  version?: string;
 }
 
 function createAccumulator(name: string): PackageAccumulator {
   return {
     name,
+    versionPriority: 0,
     requestedVersions: new Set<string>(),
-    recoveredFileIds: new Set<string>(),
-    recoveredBytes: 0,
+    exactFileIds: new Set<string>(),
+    exactBytes: 0,
+    relatedFileIds: new Set<string>(),
+    relatedBytes: 0,
     importSpecifiers: new Set<string>(),
     evidence: [],
     evidenceKeys: new Set<string>(),
+    sourceHosts: new Set<string>(),
     hasNodeModulesPath: false,
     hasSourceMapSource: false,
     hasVersionedSourceMapSource: false,
+    hasSiteModuleSource: false,
     hasManifest: false,
     hasManifestDependency: false,
   };
@@ -159,9 +185,11 @@ function normalizePackageSpecifier(specifier: string): string | null {
 
   if (cleaned.startsWith('@')) {
     const [scope, name] = cleaned.split('/');
+
     if (!scope || !name) {
       return null;
     }
+
     return normalizePackageName(`${scope}/${name}`);
   }
 
@@ -187,16 +215,64 @@ function parseUrl(value: string): URL | null {
   }
 }
 
-interface SourceReferenceMatch {
-  name: string;
-  version?: string;
-  detail: string;
-  recordFile: boolean;
+function matchesHost(url: URL, host: string): boolean {
+  return url.hostname === host || url.hostname.endsWith(`.${host}`);
 }
 
 function getFramerModuleLabel(url: URL): string {
   const lastSegment = url.pathname.split('/').filter(Boolean).pop() ?? '';
   return lastSegment.replace(/\.[a-z0-9]+$/i, '') || 'unknown';
+}
+
+function getNpmCoordinateFromPath(pathname: string): PackageCoordinate | null {
+  const patterns = [
+    /(?:^|\/)npm:((?:@[^/]+\/)?[^@/]+)@([^/]+)/,
+    /^\/npm\/((?:@[^/]+\/)?[^@/]+)@([^/]+)/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = pattern.exec(pathname);
+
+    if (!match) {
+      continue;
+    }
+
+    const name = normalizePackageName(match[1]);
+    const version = match[2]?.trim();
+
+    if (name && version) {
+      return {
+        name,
+        version,
+      };
+    }
+  }
+
+  return null;
+}
+
+function getGenericCdnCoordinate(url: URL): SourceReferenceMatch | null {
+  const exactStartMatch = /^\/((?:@[^/]+\/)?[^@/]+)@([^/]+)(?:\/|$)/.exec(url.pathname);
+
+  if (!exactStartMatch) {
+    return null;
+  }
+
+  const name = normalizePackageName(exactStartMatch[1]);
+  const version = exactStartMatch[2]?.trim();
+
+  if (!name || !version) {
+    return null;
+  }
+
+  return {
+    name,
+    version,
+    detail: `${name}@${version} via ${url.hostname}`,
+    evidenceType: 'source-map-source',
+    scope: 'exact',
+    host: url.hostname,
+  };
 }
 
 function getPackageMatchesFromSourceReference(source: string): SourceReferenceMatch[] {
@@ -210,8 +286,9 @@ function getPackageMatchesFromSourceReference(source: string): SourceReferenceMa
     return [
       {
         name: 'framer',
-        detail: normalized,
-        recordFile: true,
+        detail: 'published Framer site entrypoint',
+        evidenceType: 'site-module-source',
+        scope: 'ecosystem',
       },
     ];
   }
@@ -222,52 +299,65 @@ function getPackageMatchesFromSourceReference(source: string): SourceReferenceMa
     return [];
   }
 
-  const npmMatch = /(?:^|\/)npm:((?:@[^/]+\/)?[^@/]+)@([^/]+)/.exec(url.pathname);
+  if (matchesHost(url, 'framer.com')) {
+    const framerRegistryMatch = /^\/m\/([^/]+)\/[^@]+@([^/?#]+)/.exec(url.pathname);
+    const name = normalizePackageName(framerRegistryMatch?.[1] ?? '');
+    const version = framerRegistryMatch?.[2]?.trim();
 
-  if (npmMatch) {
-    const name = normalizePackageName(npmMatch[1]);
-    const version = npmMatch[2]?.trim();
-
-    if (name) {
+    if (name && version) {
       return [
         {
           name,
-          version: version || undefined,
-          detail: `${name}${version ? `@${version}` : ''} via ${url.hostname}`,
-          recordFile: true,
+          version,
+          detail: `${name}@${version} via ${url.hostname}`,
+          evidenceType: 'source-map-source',
+          scope: 'exact',
+          host: url.hostname,
         },
       ];
     }
   }
 
-  if (url.hostname === 'framer.com' || url.hostname.endsWith('.framer.com')) {
-    const framerMatch = /^\/m\/([^/]+)\/[^@]+@([^/?#]+)/.exec(url.pathname);
-    const name = normalizePackageName(framerMatch?.[1] ?? '');
-    const version = framerMatch?.[2]?.trim();
-
-    if (name) {
-      return [
-        {
-          name,
-          version: version || undefined,
-          detail: `${name}${version ? `@${version}` : ''} via ${url.hostname}`,
-          recordFile: true,
-        },
-      ];
-    }
-  }
-
-  if (
-    url.hostname === 'framerusercontent.com' ||
-    url.hostname.endsWith('.framerusercontent.com')
-  ) {
+  if (matchesHost(url, 'framerusercontent.com')) {
     return [
       {
         name: 'framer',
         detail: `site module ${getFramerModuleLabel(url)}`,
-        recordFile: true,
+        evidenceType: 'site-module-source',
+        scope: 'ecosystem',
+        host: url.hostname,
       },
     ];
+  }
+
+  const npmCoordinate = getNpmCoordinateFromPath(url.pathname);
+
+  if (npmCoordinate) {
+    return [
+      {
+        name: npmCoordinate.name,
+        version: npmCoordinate.version,
+        detail: `${npmCoordinate.name}@${npmCoordinate.version} via ${url.hostname}`,
+        evidenceType: 'source-map-source',
+        scope: 'exact',
+        host: url.hostname,
+      },
+    ];
+  }
+
+  if (
+    matchesHost(url, 'unpkg.com') ||
+    matchesHost(url, 'cdn.jsdelivr.net') ||
+    matchesHost(url, 'esm.sh') ||
+    matchesHost(url, 'esm.run') ||
+    matchesHost(url, 'skypack.dev') ||
+    matchesHost(url, 'cdn.skypack.dev')
+  ) {
+    const match = getGenericCdnCoordinate(url);
+
+    if (match) {
+      return [match];
+    }
   }
 
   return [];
@@ -278,6 +368,10 @@ function pushEvidence(
   type: PackageEvidenceType,
   file: SourceFile,
   detail: string,
+  options?: {
+    host?: string;
+    version?: string;
+  },
 ): void {
   const evidenceKey = `${type}:${file.id}:${detail}`;
 
@@ -292,6 +386,8 @@ function pushEvidence(
     fileId: file.id,
     filePath: file.path,
     detail,
+    host: options?.host,
+    version: options?.version,
   });
 }
 
@@ -309,17 +405,56 @@ function getAccumulator(
   return entry;
 }
 
-function recordRecoveredFile(
+function setPrimaryFile(entry: PackageAccumulator, file: SourceFile): void {
+  if (!entry.primaryFileId) {
+    entry.primaryFileId = file.id;
+  }
+}
+
+function recordExactFile(
   entry: PackageAccumulator,
   file: SourceFile,
 ): void {
-  if (!entry.recoveredFileIds.has(file.id)) {
-    entry.recoveredFileIds.add(file.id);
-    entry.recoveredBytes += file.size;
+  if (!entry.exactFileIds.has(file.id)) {
+    entry.exactFileIds.add(file.id);
+    entry.exactBytes += file.size;
   }
 
-  if (!entry.primaryFileId) {
-    entry.primaryFileId = file.id;
+  setPrimaryFile(entry, file);
+}
+
+function recordRelatedFile(
+  entry: PackageAccumulator,
+  file: SourceFile,
+): void {
+  if (!entry.relatedFileIds.has(file.id) && !entry.exactFileIds.has(file.id)) {
+    entry.relatedFileIds.add(file.id);
+    entry.relatedBytes += file.size;
+  }
+
+  setPrimaryFile(entry, file);
+}
+
+function updateVersion(
+  entry: PackageAccumulator,
+  version: string | undefined,
+  source: PackageEvidenceType,
+  priority: number,
+): void {
+  const normalized = version?.trim();
+
+  if (!normalized || priority < entry.versionPriority) {
+    return;
+  }
+
+  entry.version = normalized;
+  entry.versionSource = source;
+  entry.versionPriority = priority;
+}
+
+function addSourceHost(entry: PackageAccumulator, host: string | undefined): void {
+  if (host) {
+    entry.sourceHosts.add(host);
   }
 }
 
@@ -350,11 +485,7 @@ function scanImportSpecifiers(
 
       const entry = getAccumulator(packages, packageName);
       entry.importSpecifiers.add(specifier);
-
-      if (!entry.primaryFileId) {
-        entry.primaryFileId = file.id;
-      }
-
+      setPrimaryFile(entry, file);
       pushEvidence(entry, 'import-specifier', file, specifier);
     }
   }
@@ -367,22 +498,26 @@ function scanSourceReference(
   for (const match of getPackageMatchesFromSourceReference(file.originalSource)) {
     const entry = getAccumulator(packages, match.name);
 
-    entry.hasSourceMapSource = true;
+    addSourceHost(entry, match.host);
+    setPrimaryFile(entry, file);
 
-    if (match.version) {
-      entry.version = entry.version ?? match.version;
-      entry.hasVersionedSourceMapSource = true;
+    if (match.scope === 'exact') {
+      entry.hasSourceMapSource = true;
+      recordExactFile(entry, file);
+      updateVersion(entry, match.version, match.evidenceType, 90);
+
+      if (match.version) {
+        entry.hasVersionedSourceMapSource = true;
+      }
+    } else {
+      entry.hasSiteModuleSource = true;
+      recordRelatedFile(entry, file);
     }
 
-    if (!entry.primaryFileId) {
-      entry.primaryFileId = file.id;
-    }
-
-    if (match.recordFile) {
-      recordRecoveredFile(entry, file);
-    }
-
-    pushEvidence(entry, 'source-map-source', file, match.detail);
+    pushEvidence(entry, match.evidenceType, file, match.detail, {
+      host: match.host,
+      version: match.version,
+    });
   }
 }
 
@@ -408,17 +543,17 @@ function recordManifestPackage(
   const entry = getAccumulator(packages, packageName);
   const version = typeof manifest.version === 'string' ? manifest.version.trim() : '';
 
-  if (version) {
-    entry.version = entry.version ?? version;
-  }
-
   entry.hasManifest = true;
-  recordRecoveredFile(entry, file);
+  recordExactFile(entry, file);
+  updateVersion(entry, version, 'package-manifest', 100);
   pushEvidence(
     entry,
     'package-manifest',
     file,
     version ? `package.json (${version})` : 'package.json',
+    {
+      version: version || undefined,
+    },
   );
 }
 
@@ -448,10 +583,7 @@ function recordManifestDependencies(
 
       const entry = getAccumulator(packages, packageName);
       entry.hasManifestDependency = true;
-
-      if (!entry.primaryFileId) {
-        entry.primaryFileId = file.id;
-      }
+      setPrimaryFile(entry, file);
 
       if (typeof requestedVersion === 'string' && requestedVersion.trim()) {
         entry.requestedVersions.add(requestedVersion.trim());
@@ -491,33 +623,95 @@ function scanManifestFile(
   recordManifestDependencies(file, manifest, packages);
 }
 
-function getConfidence(entry: PackageAccumulator): 'high' | 'medium' | 'low' {
-  if (
-    entry.hasManifest ||
-    entry.hasNodeModulesPath ||
-    entry.hasVersionedSourceMapSource
-  ) {
-    return 'high';
+function getResolution(entry: PackageAccumulator): PackageResolution {
+  if (entry.hasManifest || entry.hasNodeModulesPath || entry.hasSourceMapSource) {
+    return 'exact';
   }
 
-  if (
-    entry.hasManifestDependency ||
-    entry.importSpecifiers.size > 1 ||
-    entry.hasSourceMapSource
-  ) {
+  if (entry.hasManifestDependency) {
+    return 'declared';
+  }
+
+  if (entry.importSpecifiers.size > 0) {
+    return 'inferred';
+  }
+
+  return 'ecosystem';
+}
+
+function getConfidenceScore(entry: PackageAccumulator): number {
+  let score = 0;
+
+  if (entry.hasManifest) {
+    score = Math.max(score, 100);
+  }
+
+  if (entry.hasNodeModulesPath) {
+    score = Math.max(score, 96);
+  }
+
+  if (entry.hasVersionedSourceMapSource) {
+    score = Math.max(score, 90);
+  } else if (entry.hasSourceMapSource) {
+    score = Math.max(score, 72);
+  }
+
+  if (entry.hasManifestDependency) {
+    score = Math.max(score, 55);
+  }
+
+  if (entry.importSpecifiers.size > 0) {
+    score = Math.max(score, Math.min(48, 18 + entry.importSpecifiers.size * 12));
+  }
+
+  if (entry.hasSiteModuleSource) {
+    score = Math.max(score, Math.min(28, 10 + entry.relatedFileIds.size * 3));
+  }
+
+  return Math.min(score, 100);
+}
+
+function getConfidence(
+  resolution: PackageResolution,
+  score: number,
+): 'high' | 'medium' | 'low' {
+  if (resolution === 'exact') {
+    return score >= 80 ? 'high' : 'medium';
+  }
+
+  if (resolution === 'declared') {
     return 'medium';
+  }
+
+  if (resolution === 'inferred') {
+    return score >= 40 ? 'medium' : 'low';
   }
 
   return 'low';
 }
 
-function getConfidenceScore(confidence: 'high' | 'medium' | 'low'): number {
+function getConfidenceRank(confidence: 'high' | 'medium' | 'low'): number {
   switch (confidence) {
     case 'high':
       return 3;
     case 'medium':
       return 2;
     case 'low':
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function getResolutionRank(resolution: PackageResolution): number {
+  switch (resolution) {
+    case 'exact':
+      return 4;
+    case 'declared':
+      return 3;
+    case 'inferred':
+      return 2;
+    case 'ecosystem':
       return 1;
     default:
       return 0;
@@ -536,7 +730,7 @@ export function inferPackages(files: SourceFile[]): InferredPackage[] {
       if (normalizedName) {
         const entry = getAccumulator(packages, normalizedName);
         entry.hasNodeModulesPath = true;
-        recordRecoveredFile(entry, file);
+        recordExactFile(entry, file);
         pushEvidence(entry, 'node-modules-path', file, file.path);
       }
     }
@@ -548,32 +742,55 @@ export function inferPackages(files: SourceFile[]): InferredPackage[] {
 
   return [...packages.values()]
     .map((entry) => {
-      const confidence = getConfidence(entry);
+      const resolution = getResolution(entry);
+      const confidenceScore = getConfidenceScore(entry);
+      const confidence = getConfidence(resolution, confidenceScore);
+      const recoveredFileCount = entry.exactFileIds.size + entry.relatedFileIds.size;
+      const recoveredBytes = entry.exactBytes + entry.relatedBytes;
 
       return {
         name: entry.name,
         version: entry.version,
+        versionSource: entry.versionSource,
         requestedVersions: [...entry.requestedVersions].sort(),
         confidence,
+        confidenceScore,
+        resolution,
         primaryFileId: entry.primaryFileId,
-        recoveredFileCount: entry.recoveredFileIds.size,
-        recoveredBytes: entry.recoveredBytes,
+        recoveredFileCount,
+        recoveredBytes,
+        exactFileCount: entry.exactFileIds.size,
+        exactBytes: entry.exactBytes,
+        relatedFileCount: entry.relatedFileIds.size,
+        relatedBytes: entry.relatedBytes,
         importCount: entry.importSpecifiers.size,
+        sourceHosts: [...entry.sourceHosts].sort(),
         evidence: entry.evidence,
       } satisfies InferredPackage;
     })
     .sort((left, right) => {
-      const confidenceDelta =
-        getConfidenceScore(right.confidence) - getConfidenceScore(left.confidence);
+      const resolutionDelta = getResolutionRank(right.resolution) - getResolutionRank(left.resolution);
+
+      if (resolutionDelta !== 0) {
+        return resolutionDelta;
+      }
+
+      const confidenceDelta = getConfidenceRank(right.confidence) - getConfidenceRank(left.confidence);
 
       if (confidenceDelta !== 0) {
         return confidenceDelta;
       }
 
-      const fileDelta = right.recoveredFileCount - left.recoveredFileCount;
+      const scoreDelta = right.confidenceScore - left.confidenceScore;
 
-      if (fileDelta !== 0) {
-        return fileDelta;
+      if (scoreDelta !== 0) {
+        return scoreDelta;
+      }
+
+      const exactDelta = right.exactFileCount - left.exactFileCount;
+
+      if (exactDelta !== 0) {
+        return exactDelta;
       }
 
       const importDelta = right.importCount - left.importCount;

@@ -61,8 +61,11 @@ export type PackageEvidenceType =
   | 'node-modules-path'
   | 'import-specifier'
   | 'source-map-source'
+  | 'site-module-source'
   | 'package-manifest'
   | 'manifest-dependency';
+
+export type PackageResolution = 'exact' | 'declared' | 'inferred' | 'ecosystem';
 
 export interface PackageEvidence {
   id: string;
@@ -70,17 +73,27 @@ export interface PackageEvidence {
   fileId?: string;
   filePath: string;
   detail: string;
+  host?: string;
+  version?: string;
 }
 
 export interface InferredPackage {
   name: string;
   version?: string;
+  versionSource?: PackageEvidenceType;
   requestedVersions: string[];
   confidence: 'high' | 'medium' | 'low';
+  confidenceScore: number;
+  resolution: PackageResolution;
   primaryFileId?: string;
   recoveredFileCount: number;
   recoveredBytes: number;
+  exactFileCount: number;
+  exactBytes: number;
+  relatedFileCount: number;
+  relatedBytes: number;
   importCount: number;
+  sourceHosts: string[];
   evidence: PackageEvidence[];
 }
 

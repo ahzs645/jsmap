@@ -1,6 +1,6 @@
 import { useDeferredValue, useMemo, useState } from 'react';
 import { formatBytes } from '../lib/format';
-import type { InferredPackage, PackageEvidenceType } from '../types/analysis';
+import type { InferredPackage, PackageEvidenceType, PackageResolution } from '../types/analysis';
 
 interface PackageLookupPanelProps {
   packages: InferredPackage[];
@@ -29,12 +29,44 @@ function getEvidenceLabel(type: PackageEvidenceType): string {
       return 'import';
     case 'source-map-source':
       return 'source map';
+    case 'site-module-source':
+      return 'site module';
     case 'package-manifest':
       return 'package manifest';
     case 'manifest-dependency':
       return 'manifest dependency';
     default:
       return type;
+  }
+}
+
+function getResolutionLabel(resolution: PackageResolution): string {
+  switch (resolution) {
+    case 'exact':
+      return 'Exact package';
+    case 'declared':
+      return 'Declared dependency';
+    case 'inferred':
+      return 'Import inferred';
+    case 'ecosystem':
+      return 'Ecosystem related';
+    default:
+      return resolution;
+  }
+}
+
+function getVersionSourceLabel(type: PackageEvidenceType | undefined): string | null {
+  switch (type) {
+    case 'node-modules-path':
+      return 'version from node_modules';
+    case 'source-map-source':
+      return 'version from source map';
+    case 'package-manifest':
+      return 'version from package.json';
+    case 'manifest-dependency':
+      return 'version from dependency range';
+    default:
+      return null;
   }
 }
 
@@ -57,6 +89,9 @@ export function PackageLookupPanel({
       const haystack = [
         pkg.name,
         pkg.version ?? '',
+        pkg.resolution,
+        pkg.confidence,
+        ...pkg.sourceHosts,
         ...pkg.requestedVersions,
         ...pkg.evidence.map((evidence) => evidence.detail),
         ...pkg.evidence.map((evidence) => evidence.filePath),
@@ -67,6 +102,7 @@ export function PackageLookupPanel({
   }, [deferredSearch, packages]);
 
   const highConfidenceCount = packages.filter((pkg) => pkg.confidence === 'high').length;
+  const exactCount = packages.filter((pkg) => pkg.resolution === 'exact').length;
 
   if (packages.length === 0) {
     return (
@@ -85,7 +121,11 @@ export function PackageLookupPanel({
           <p>
             {packages.length}
             {' '}
-            inferred packages
+            package candidates
+            {' · '}
+            {exactCount}
+            {' '}
+            exact matches
             {' · '}
             {highConfidenceCount}
             {' '}
@@ -109,11 +149,19 @@ export function PackageLookupPanel({
                 <h3>{pkg.name}</h3>
                 <div className="package-chip-row">
                   {pkg.version && <span className="package-chip version">v{pkg.version}</span>}
+                  <span className={`package-chip resolution ${pkg.resolution}`}>
+                    {getResolutionLabel(pkg.resolution)}
+                  </span>
                   {pkg.requestedVersions.map((version) => (
                     <span key={version} className="package-chip requested">
                       requested {version}
                     </span>
                   ))}
+                  {getVersionSourceLabel(pkg.versionSource) && (
+                    <span className="package-chip source">
+                      {getVersionSourceLabel(pkg.versionSource)}
+                    </span>
+                  )}
                   <span className={`package-chip confidence ${pkg.confidence}`}>
                     {getConfidenceLabel(pkg.confidence)}
                   </span>
@@ -135,10 +183,20 @@ export function PackageLookupPanel({
             </div>
 
             <div className="package-metrics">
-              <span>{pkg.recoveredFileCount} recovered files</span>
+              <span>{pkg.exactFileCount} exact files</span>
+              <span>{pkg.relatedFileCount} related modules</span>
               <span>{formatBytes(pkg.recoveredBytes)}</span>
               <span>{pkg.importCount} import signals</span>
+              <span>score {pkg.confidenceScore}</span>
             </div>
+
+            {pkg.sourceHosts.length > 0 && (
+              <p className="package-origin-line">
+                Origins:
+                {' '}
+                {pkg.sourceHosts.join(', ')}
+              </p>
+            )}
 
             <div className="package-evidence-list">
               {pkg.evidence.map((evidence) => (
