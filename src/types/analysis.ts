@@ -1,0 +1,253 @@
+export type FindingType = 'general' | 'surface' | 'pii';
+export type JobKind = 'local-group' | 'map-file' | 'js-file' | 'text' | 'url';
+export type TextKind = 'auto' | 'map' | 'js';
+export type JobStatus =
+  | 'queued'
+  | 'discovering'
+  | 'parsing'
+  | 'extracting'
+  | 'scanning'
+  | 'ready'
+  | 'error';
+
+export interface AnalysisJobRequest {
+  id: string;
+  label: string;
+  kind: JobKind;
+  file?: File;
+  files?: File[];
+  text?: string;
+  textKind?: TextKind;
+  url?: string;
+  headers?: Record<string, string>;
+  inputSummary?: string;
+}
+
+export interface SourceFile {
+  id: string;
+  path: string;
+  originalSource: string;
+  sourceUrl?: string;
+  content: string;
+  size: number;
+  missingContent: boolean;
+  mappingCount: number;
+}
+
+export interface SensitiveFinding {
+  id: string;
+  fileId: string;
+  filePath: string;
+  line: number;
+  column: number;
+  category: string;
+  type: FindingType;
+  value: string;
+  snippet: string;
+}
+
+export interface LookupSourceOption {
+  fileId: string;
+  label: string;
+  originalSource: string;
+}
+
+export interface AnalysisWarning {
+  code: string;
+  message: string;
+}
+
+export type PackageEvidenceType =
+  | 'node-modules-path'
+  | 'import-specifier'
+  | 'package-manifest'
+  | 'manifest-dependency';
+
+export interface PackageEvidence {
+  id: string;
+  type: PackageEvidenceType;
+  fileId?: string;
+  filePath: string;
+  detail: string;
+}
+
+export interface InferredPackage {
+  name: string;
+  version?: string;
+  requestedVersions: string[];
+  confidence: 'high' | 'medium' | 'low';
+  primaryFileId?: string;
+  recoveredFileCount: number;
+  recoveredBytes: number;
+  importCount: number;
+  evidence: PackageEvidence[];
+}
+
+export type BundleBreakdownCategory =
+  | 'source'
+  | 'unmapped'
+  | 'source-map-comment'
+  | 'eol'
+  | 'no-source';
+
+export interface BundleBreakdownEntry {
+  id: string;
+  path: string;
+  displayPath: string;
+  bytes: number;
+  category: BundleBreakdownCategory;
+  fileId?: string;
+}
+
+export interface BundleTreemapNode {
+  id: string;
+  name: string;
+  label: string;
+  bytes: number;
+  category: 'root' | 'group' | 'source';
+  fileId?: string;
+  children?: BundleTreemapNode[];
+}
+
+export interface BundleAnalysis {
+  totalBytes: number;
+  mappedBytes: number;
+  unmappedBytes: number;
+  eolBytes: number;
+  sourceMapCommentBytes: number;
+  sourceCount: number;
+  breakdown: BundleBreakdownEntry[];
+  treemap: BundleTreemapNode;
+}
+
+export interface SourceMapStats {
+  version: number;
+  totalSize: number;
+  mappingCount: number;
+  namesCount: number;
+  fileCount: number;
+  missingContentCount: number;
+  hasAllSourcesContent: boolean;
+  retrievedFrom: string;
+  resolvedMapUrl?: string;
+  generatedUrl?: string;
+  generatedBundleAvailable: boolean;
+}
+
+export interface AnalysisResult {
+  jobId: string;
+  label: string;
+  files: SourceFile[];
+  findings: SensitiveFinding[];
+  lookupSources: LookupSourceOption[];
+  packages: InferredPackage[];
+  warnings: AnalysisWarning[];
+  bundle: BundleAnalysis | null;
+  stats: SourceMapStats;
+}
+
+export interface GeneratedLookupResult {
+  jobId: string;
+  line: number;
+  column: number;
+  found: boolean;
+  source?: string;
+  filePath?: string;
+  originalLine?: number;
+  originalColumn?: number;
+  name?: string | null;
+}
+
+export interface OriginalLookupMatch {
+  line: number | null;
+  column: number | null;
+  lastColumn: number | null;
+}
+
+export interface OriginalLookupResult {
+  jobId: string;
+  source: string;
+  filePath: string;
+  line: number;
+  column: number;
+  matches: OriginalLookupMatch[];
+}
+
+export type WorkerRequest =
+  | {
+      type: 'process-batch';
+      jobs: AnalysisJobRequest[];
+    }
+  | {
+      type: 'lookup-generated';
+      jobId: string;
+      line: number;
+      column: number;
+    }
+  | {
+      type: 'lookup-original';
+      jobId: string;
+      source: string;
+      filePath: string;
+      line: number;
+      column: number;
+    }
+  | {
+      type: 'build-zip';
+      jobId: string;
+    }
+  | {
+      type: 'build-export';
+      jobId: string;
+      format: 'json' | 'tsv' | 'html';
+    };
+
+export type WorkerResponse =
+  | {
+      type: 'job-progress';
+      jobId: string;
+      status: Exclude<JobStatus, 'queued' | 'ready' | 'error'>;
+      message: string;
+    }
+  | {
+      type: 'job-complete';
+      jobId: string;
+      result: AnalysisResult;
+      message: string;
+    }
+  | {
+      type: 'job-error';
+      jobId: string;
+      error: string;
+    }
+  | {
+      type: 'generated-lookup-result';
+      lookup: GeneratedLookupResult;
+    }
+  | {
+      type: 'original-lookup-result';
+      lookup: OriginalLookupResult;
+    }
+  | {
+      type: 'zip-ready';
+      jobId: string;
+      fileName: string;
+      buffer: ArrayBuffer;
+    }
+  | {
+      type: 'zip-error';
+      jobId: string;
+      error: string;
+    }
+  | {
+      type: 'export-ready';
+      jobId: string;
+      fileName: string;
+      mimeType: string;
+      buffer: ArrayBuffer;
+    }
+  | {
+      type: 'export-error';
+      jobId: string;
+      error: string;
+    };
