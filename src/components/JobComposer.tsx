@@ -1,16 +1,11 @@
 import { useEffect, useRef, useState, type DragEvent } from 'react';
 import type { ModeConfig } from '../lib/modes';
-import type { LocalDeobfuscationBridgeStatus } from '../hooks/useLocalDeobfuscationBridgeStatus';
 
 interface JobComposerProps {
   modeConfig: ModeConfig;
   onAddFiles: (files: File[]) => void;
   onAddTextJob: (text: string, textKind: 'auto' | 'map' | 'js', label: string) => void;
   onAddUrlJobs: (urls: string[], headers: Record<string, string>) => void;
-  showLocalBridgeStatus?: boolean;
-  localBridgeStatus?: LocalDeobfuscationBridgeStatus;
-  localBridgeUrl?: string;
-  localBridgeCapabilities?: string[];
   disabled?: boolean;
 }
 
@@ -40,10 +35,6 @@ export function JobComposer({
   onAddFiles,
   onAddTextJob,
   onAddUrlJobs,
-  showLocalBridgeStatus = false,
-  localBridgeStatus = 'offline',
-  localBridgeUrl,
-  localBridgeCapabilities = [],
   disabled = false,
 }: JobComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -161,24 +152,6 @@ export function JobComposer({
             Add site folder
           </button>
         </div>
-        {showLocalBridgeStatus && (
-          <div className={`bridge-status ${localBridgeStatus}`}>
-            <strong>
-              {localBridgeStatus === 'online'
-                ? 'Local Node bridge online'
-                : localBridgeStatus === 'checking'
-                  ? 'Checking local Node bridge'
-                  : 'Local Node bridge offline'}
-            </strong>
-            <p>
-              {localBridgeStatus === 'online'
-                ? `Bundle-only jobs will use ${localBridgeCapabilities.join(', ') || 'local deobfuscation passes'} before analysis.`
-                : localBridgeStatus === 'checking'
-                  ? `Probing ${localBridgeUrl ?? 'the local bridge'} for deeper deobfuscation support.`
-                  : `Run npm run deobfuscate:bridge to enable webcrack and Wakaru before bundle-only analysis at ${localBridgeUrl ?? 'the local bridge URL'}.`}
-            </p>
-          </div>
-        )}
         <input
           ref={fileInputRef}
           hidden

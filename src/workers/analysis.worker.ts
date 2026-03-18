@@ -11,11 +11,9 @@ import {
   type JobRuntimeState,
 } from '../lib/source-map-analysis';
 import {
-  getLocalDeobfuscationBridgeUrl,
-  probeLocalDeobfuscationBridge,
-  requestLocalDeobfuscation,
-  type LocalDeobfuscationBridgeResponse,
-} from '../lib/local-deobfuscation-bridge';
+  runLocalDeobfuscation,
+  type LocalDeobfuscationResult,
+} from '../lib/local-deobfuscation';
 import { discoverSourceMapInput } from '../lib/source-map-discovery';
 import type {
   AnalysisJobRequest,
@@ -71,7 +69,7 @@ function canFallbackToBundleOnly(job: AnalysisJobRequest): boolean {
   return !isSourceMapLikeInput(job);
 }
 
-function toTransformedSourceFiles(files: LocalDeobfuscationBridgeResponse['files']): SourceFile[] {
+function toTransformedSourceFiles(files: LocalDeobfuscationResult['files']): SourceFile[] {
   return files.map((file) => ({
     id: file.id,
     path: file.path,
@@ -84,12 +82,12 @@ function toTransformedSourceFiles(files: LocalDeobfuscationBridgeResponse['files
   }));
 }
 
-function buildBridgeWarnings(response: LocalDeobfuscationBridgeResponse): AnalysisWarning[] {
+function buildLocalDeobfuscationWarnings(response: LocalDeobfuscationResult): AnalysisWarning[] {
   const warningCount = response.files.reduce((total, file) => total + file.warnings.length, 0);
   const warnings: AnalysisWarning[] = [
     {
-      code: 'local-deobfuscation-bridge',
-      message: `Applied local Node deobfuscation passes to ${response.transformedCount} of ${response.fileCount} files via ${getLocalDeobfuscationBridgeUrl()}.`,
+      code: 'local-deobfuscation',
+      message: `Applied built-in browser deobfuscation passes to ${response.transformedCount} of ${response.fileCount} files.`,
     },
   ];
 
@@ -102,16 +100,16 @@ function buildBridgeWarnings(response: LocalDeobfuscationBridgeResponse): Analys
 
   if (warningCount > 0) {
     warnings.push({
-      code: 'local-bridge-transform-warnings',
-      message: `The local bridge reported ${warningCount} transform warnings. Affected files were left in their best-effort readable form.`,
+      code: 'local-deobfuscation-transform-warnings',
+      message: `Built-in deobfuscation reported ${warningCount} transform warnings. Affected files were left in their best-effort readable form.`,
     });
   }
 
   return warnings;
 }
 
-function describeBridgeResult(response: LocalDeobfuscationBridgeResponse): string {
-  return `Local Node bridge: ${response.transformedCount}/${response.fileCount} files transformed`;
+function describeLocalDeobfuscationResult(response: LocalDeobfuscationResult): string {
+  return `Built-in deobfuscation: ${response.transformedCount}/${response.fileCount} files transformed`;
 }
 
 async function processBatch(jobs: AnalysisJobRequest[]): Promise<void> {
@@ -167,33 +165,29 @@ async function processBatch(jobs: AnalysisJobRequest[]): Promise<void> {
           let scanMessage = 'Scanning uploaded bundle and site snapshot files…';
           let completionSuffix = '';
 
-          const bridgeHealth = await probeLocalDeobfuscationBridge();
+          postMessageToClient({
+            type: 'job-progress',
+            jobId: job.id,
+            status: 'extracting',
+            message: 'Applying built-in deobfuscation passes…',
+          });
 
-          if (bridgeHealth) {
+          try {
+            const deobfuscationResult = await runLocalDeobfuscation(files);
+            analysisFiles = toTransformedSourceFiles(deobfuscationResult.files);
+            retrievedFrom = `${describeLocalDeobfuscationResult(deobfuscationResult)} · ${job.inputSummary ?? job.label}`;
+            warnings = buildLocalDeobfuscationWarnings(deobfuscationResult);
+            scanMessage = 'Scanning deobfuscated bundle and site snapshot files…';
+            if (deobfuscationResult.transformedCount > 0) {
+              completionSuffix = ` Built-in deobfuscation transformed ${deobfuscationResult.transformedCount} files.`;
+            }
+          } catch {
             postMessageToClient({
               type: 'job-progress',
               jobId: job.id,
               status: 'extracting',
-              message: 'Applying local Node deobfuscation bridge…',
+              message: 'Built-in deobfuscation failed; continuing with raw bundle-only analysis…',
             });
-
-            try {
-              const bridgeResult = await requestLocalDeobfuscation(files);
-              analysisFiles = toTransformedSourceFiles(bridgeResult.files);
-              retrievedFrom = `${describeBridgeResult(bridgeResult)} · ${job.inputSummary ?? job.label}`;
-              warnings = buildBridgeWarnings(bridgeResult);
-              scanMessage = 'Scanning bridge-transformed bundle and site snapshot files…';
-              if (bridgeResult.transformedCount > 0) {
-                completionSuffix = ` Local bridge transformed ${bridgeResult.transformedCount} files.`;
-              }
-            } catch {
-              postMessageToClient({
-                type: 'job-progress',
-                jobId: job.id,
-                status: 'extracting',
-                message: 'Local Node bridge failed; continuing with raw bundle-only analysis…',
-              });
-            }
           }
 
           const { result, runtime } = analyzeBundleOnlyFiles(job, analysisFiles, {
