@@ -13,11 +13,36 @@ function getRelativeFilePath(file: File): string {
 }
 
 function isJavaScriptFile(file: File): boolean {
-  return /\.(js|mjs|cjs)$/i.test(file.name);
+  return /\.(js|mjs|cjs|jsx|ts|tsx)$/i.test(file.name);
 }
 
 function isSourceMapFile(file: File): boolean {
   return /\.(map|json)$/i.test(file.name);
+}
+
+function isSnapshotAssetFile(file: File): boolean {
+  return /\.(?:js|mjs|cjs|jsx|ts|tsx|html|css|scss|sass|less|json|txt|svg|astro|md|mdx)$/i.test(
+    file.name,
+  );
+}
+
+function getCommonRoot(paths: string[]): string | null {
+  const roots = new Set(
+    paths
+      .map((path) => path.split('/').filter(Boolean)[0] ?? '')
+      .filter(Boolean),
+  );
+
+  return roots.size === 1 ? [...roots][0] : null;
+}
+
+function shouldBuildSnapshotGroup(entries: Array<{ file: File; path: string }>): boolean {
+  const jsCount = entries.filter((entry) => isJavaScriptFile(entry.file)).length;
+  const mapCount = entries.filter((entry) => /\.map$/i.test(entry.file.name)).length;
+  const hasNestedPaths = entries.some((entry) => entry.path.includes('/'));
+  const hasHtml = entries.some((entry) => /\.(?:html|astro)$/i.test(entry.file.name));
+
+  return jsCount > 0 && mapCount === 0 && (hasNestedPaths || hasHtml);
 }
 
 function makeSummary(files: File[]): string {
@@ -45,7 +70,15 @@ function makeLabel(primaryFile: File, files: File[]): string {
     return `Group: ${primaryFile.name}`;
   }
 
-  return isSourceMapFile(primaryFile) ? `Map: ${primaryFile.name}` : `JS: ${primaryFile.name}`;
+  if (isSourceMapFile(primaryFile)) {
+    return `Map: ${primaryFile.name}`;
+  }
+
+  if (isJavaScriptFile(primaryFile)) {
+    return `JS: ${primaryFile.name}`;
+  }
+
+  return `File: ${primaryFile.name}`;
 }
 
 export function buildLocalFileGroups(files: File[]): LocalFileGroup[] {
@@ -54,7 +87,30 @@ export function buildLocalFileGroups(files: File[]): LocalFileGroup[] {
       file,
       path: getRelativeFilePath(file),
     }))
+    .filter((entry) => isSourceMapFile(entry.file) || isSnapshotAssetFile(entry.file))
     .sort((left, right) => left.path.localeCompare(right.path));
+
+  if (entries.length === 0) {
+    return [];
+  }
+
+  if (shouldBuildSnapshotGroup(entries)) {
+    const snapshotFiles = entries
+      .filter((entry) => isSnapshotAssetFile(entry.file))
+      .map((entry) => entry.file);
+    const primaryFile =
+      entries.find((entry) => isJavaScriptFile(entry.file))?.file ?? entries[0].file;
+    const root = getCommonRoot(entries.map((entry) => entry.path));
+
+    return [
+      {
+        label: `Snapshot: ${root ?? primaryFile.name}`,
+        summary: `${makeSummary(snapshotFiles)} · site snapshot`,
+        primaryFile,
+        files: snapshotFiles,
+      },
+    ];
+  }
 
   const byPath = new Map(entries.map((entry) => [entry.path, entry.file]));
   const visited = new Set<string>();

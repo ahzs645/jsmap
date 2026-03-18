@@ -21,7 +21,8 @@ interface RawSourceMapLike {
   sections?: unknown[];
 }
 
-const SOURCE_MAP_REFERENCE_PATTERN = /\/\/[@#]\s*sourceMappingURL=([^\s]+)/g;
+const SOURCE_MAP_LINE_REFERENCE_PATTERN = /\/\/[@#]\s*sourceMappingURL=([^\s]+)/g;
+const SOURCE_MAP_BLOCK_REFERENCE_PATTERN = /\/\*[@#]\s*sourceMappingURL=([^\s*]+).*?\*\//gs;
 
 function getRelativeFilePath(file: File): string {
   const candidate = (file as File & { webkitRelativePath?: string }).webkitRelativePath;
@@ -88,13 +89,54 @@ function parseSourceMapReference(jsText: string): string | null {
   let lastReference: string | null = null;
   let match: RegExpExecArray | null;
 
-  SOURCE_MAP_REFERENCE_PATTERN.lastIndex = 0;
+  SOURCE_MAP_LINE_REFERENCE_PATTERN.lastIndex = 0;
 
-  while ((match = SOURCE_MAP_REFERENCE_PATTERN.exec(jsText)) !== null) {
+  while ((match = SOURCE_MAP_LINE_REFERENCE_PATTERN.exec(jsText)) !== null) {
+    lastReference = match[1];
+  }
+
+  SOURCE_MAP_BLOCK_REFERENCE_PATTERN.lastIndex = 0;
+
+  while ((match = SOURCE_MAP_BLOCK_REFERENCE_PATTERN.exec(jsText)) !== null) {
     lastReference = match[1];
   }
 
   return lastReference;
+}
+
+function isJavaScriptUrl(url: string): boolean {
+  return /\.(?:js|mjs|cjs)(?:$|[?#])/i.test(url);
+}
+
+function buildCompanionMapUrl(url: string): string | null {
+  if (!isJavaScriptUrl(url)) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(url);
+    parsed.pathname = `${parsed.pathname}.map`;
+    return parsed.toString();
+  } catch {
+    return `${url}.map`;
+  }
+}
+
+async function probeCompanionMapUrl(
+  url: string,
+  headers: Record<string, string> | undefined,
+): Promise<DiscoveredMapInput | null> {
+  const companionUrl = buildCompanionMapUrl(url);
+
+  if (!companionUrl) {
+    return null;
+  }
+
+  try {
+    return await fetchRemoteMap(companionUrl, headers, 'Companion .map probe');
+  } catch {
+    return null;
+  }
 }
 
 function parseRawSourceMap(mapJson: string): RawSourceMapLike {
@@ -280,23 +322,55 @@ async function resolveUrlInput(
       response.headers.get('SourceMap') ?? response.headers.get('X-SourceMap');
 
     if (headerReference) {
-      const result = await resolveReferenceFromJavaScript(
-        headerReference,
+      try {
+        const result = await resolveReferenceFromJavaScript(
+          headerReference,
+          job.headers,
+          response.url,
+          undefined,
+          buildLocalFileLookup(job),
+        );
+
+        return {
+          ...result,
+          generatedUrl: response.url,
+          generatedCode: body,
+          retrievedFrom: 'SourceMap response header',
+        };
+      } catch {
+        const companionMap = await probeCompanionMapUrl(response.url, job.headers);
+
+        if (companionMap) {
+          return {
+            ...companionMap,
+            generatedCode: body,
+            generatedUrl: response.url,
+          };
+        }
+      }
+    }
+
+    try {
+      return await resolveJavaScriptInput(
+        body,
         job.headers,
         response.url,
         undefined,
         buildLocalFileLookup(job),
       );
+    } catch (error) {
+      const companionMap = await probeCompanionMapUrl(response.url, job.headers);
 
-      return {
-        ...result,
-        generatedUrl: response.url,
-        generatedCode: body,
-        retrievedFrom: 'SourceMap response header',
-      };
+      if (companionMap) {
+        return {
+          ...companionMap,
+          generatedCode: body,
+          generatedUrl: response.url,
+        };
+      }
+
+      throw error;
     }
-
-    return resolveJavaScriptInput(body, job.headers, response.url, undefined, buildLocalFileLookup(job));
   }
 }
 

@@ -3,6 +3,7 @@
 import JSZip from 'jszip';
 import { buildAnalysisExport } from '../lib/analysis-export';
 import {
+  analyzeBundleOnlyJob,
   analyzeDiscoveredMap,
   lookupGeneratedPosition,
   lookupOriginalPosition,
@@ -35,6 +36,26 @@ function getExportMetadata(format: 'json' | 'tsv' | 'html'): {
     default:
       return { extension: 'txt', mimeType: 'text/plain;charset=utf-8' };
   }
+}
+
+function isSourceMapLikeInput(job: AnalysisJobRequest): boolean {
+  if (job.kind === 'map-file') {
+    return true;
+  }
+
+  if (job.kind === 'text' && job.textKind === 'map') {
+    return true;
+  }
+
+  if (job.kind === 'local-group' && /\.(map|json)$/i.test(job.file?.name ?? '')) {
+    return true;
+  }
+
+  return false;
+}
+
+function canFallbackToBundleOnly(job: AnalysisJobRequest): boolean {
+  return !isSourceMapLikeInput(job);
 }
 
 async function processBatch(jobs: AnalysisJobRequest[]): Promise<void> {
@@ -74,6 +95,44 @@ async function processBatch(jobs: AnalysisJobRequest[]): Promise<void> {
         message: `Processed ${result.stats.fileCount} files and ${result.findings.length} findings.`,
       });
     } catch (error) {
+      if (canFallbackToBundleOnly(job)) {
+        try {
+          postMessageToClient({
+            type: 'job-progress',
+            jobId: job.id,
+            status: 'extracting',
+            message: 'No usable source map found; switching to bundle-only analysis…',
+          });
+
+          const { result, runtime } = await analyzeBundleOnlyJob(job);
+
+          runtimes.set(job.id, runtime);
+
+          postMessageToClient({
+            type: 'job-progress',
+            jobId: job.id,
+            status: 'scanning',
+            message: 'Scanning uploaded bundle and site snapshot files…',
+          });
+
+          postMessageToClient({
+            type: 'job-complete',
+            jobId: job.id,
+            result,
+            message: `Processed ${result.stats.fileCount} files and ${result.findings.length} findings without a source map.`,
+          });
+          continue;
+        } catch (fallbackError) {
+          postMessageToClient({
+            type: 'job-error',
+            jobId: job.id,
+            error:
+              fallbackError instanceof Error ? fallbackError.message : 'Unknown worker error.',
+          });
+          continue;
+        }
+      }
+
       postMessageToClient({
         type: 'job-error',
         jobId: job.id,

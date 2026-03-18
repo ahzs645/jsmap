@@ -90,7 +90,7 @@ export function PackageReconstructionPanel({
         <section className="reconstruction-card">
           <div className="reconstruction-card-heading">
             <h3>Manifest</h3>
-            <p>{reconstruction.recoveredManifestPath ?? 'Synthesized from source-map evidence'}</p>
+            <p>{reconstruction.recoveredManifestPath ?? 'Synthesized from recovered analysis evidence'}</p>
           </div>
           <div className="reconstruction-manifest-grid">
             <div className="reconstruction-manifest-block">

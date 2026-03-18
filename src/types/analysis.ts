@@ -1,6 +1,7 @@
 export type FindingType = 'general' | 'surface' | 'pii';
 export type JobKind = 'local-group' | 'map-file' | 'js-file' | 'text' | 'url';
 export type TextKind = 'auto' | 'map' | 'js';
+export type AnalysisKind = 'source-map' | 'bundle-only';
 export type JobStatus =
   | 'queued'
   | 'discovering'
@@ -192,6 +193,7 @@ export interface BundleAnalysis {
 }
 
 export interface SourceMapStats {
+  analysisKind: AnalysisKind;
   version: number;
   totalSize: number;
   mappingCount: number;

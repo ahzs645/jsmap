@@ -29,6 +29,15 @@ export function MappingLookupPanel({
   const [originalColumn, setOriginalColumn] = useState('0');
   const selectedSource = sources.find((source) => source.originalSource === originalSource) ?? sources[0];
 
+  if (sources.length === 0) {
+    return (
+      <div className="empty-state">
+        <h3>No source map lookups available</h3>
+        <p>This result was produced without a usable source map, so generated/original position lookups are unavailable.</p>
+      </div>
+    );
+  }
+
   return (
     <div className="lookup-grid">
       <div className="lookup-card">

@@ -101,6 +101,8 @@ export function ResultsPanel({
           <p>
             {result.stats.retrievedFrom}
             {' · '}
+            {result.stats.analysisKind === 'source-map' ? 'source-map recovery' : 'bundle-only analysis'}
+            {' · '}
             {formatCount(result.stats.fileCount, 'file')}
             {' · '}
             {formatBytes(result.stats.totalSize)}

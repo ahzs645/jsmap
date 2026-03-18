@@ -1,4 +1,4 @@
-import { useRef, useState, type DragEvent } from 'react';
+import { useEffect, useRef, useState, type DragEvent } from 'react';
 import type { ModeConfig } from '../lib/modes';
 
 interface JobComposerProps {
@@ -38,12 +38,22 @@ export function JobComposer({
   disabled = false,
 }: JobComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const directoryInputRef = useRef<HTMLInputElement>(null);
   const dragDepthRef = useRef(0);
   const [pasteText, setPasteText] = useState('');
   const [textKind, setTextKind] = useState<'auto' | 'map' | 'js'>('auto');
   const [urlText, setUrlText] = useState('');
   const [headerText, setHeaderText] = useState('');
   const [isDragActive, setIsDragActive] = useState(false);
+
+  useEffect(() => {
+    if (!directoryInputRef.current) {
+      return;
+    }
+
+    directoryInputRef.current.setAttribute('webkitdirectory', '');
+    directoryInputRef.current.setAttribute('directory', '');
+  }, []);
 
   const addDroppedFiles = (files: File[]) => {
     if (files.length === 0) {
@@ -129,15 +139,36 @@ export function JobComposer({
             {isDragActive ? 'Drop files to queue them' : 'Add local files to the queue'}
           </span>
           <span className="drop-zone-hint">
-            Supports multiple source maps and JavaScript bundles. Related JS + `.map` files are grouped automatically.
+            Supports source maps, JavaScript bundles, and downloaded site snapshots. Related JS + `.map` files are grouped automatically.
           </span>
         </button>
+        <div className="actions-bar">
+          <button
+            className="btn btn-secondary"
+            type="button"
+            onClick={() => directoryInputRef.current?.click()}
+            disabled={disabled}
+          >
+            Add site folder
+          </button>
+        </div>
         <input
           ref={fileInputRef}
           hidden
           type="file"
           multiple
-          accept=".map,.json,.js,.mjs,.cjs"
+          accept=".map,.json,.js,.mjs,.cjs,.jsx,.ts,.tsx,.html,.css,.scss,.sass,.less,.txt,.svg,.astro,.md,.mdx"
+          onChange={(event) => {
+            const files = Array.from(event.target.files ?? []);
+            onAddFiles(files);
+            event.currentTarget.value = '';
+          }}
+        />
+        <input
+          ref={directoryInputRef}
+          hidden
+          type="file"
+          multiple
           onChange={(event) => {
             const files = Array.from(event.target.files ?? []);
             onAddFiles(files);

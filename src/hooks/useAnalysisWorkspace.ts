@@ -351,6 +351,10 @@ export function useAnalysisWorkspace() {
 
       const groupedFiles = buildLocalFileGroups(files);
 
+      if (groupedFiles.length === 0) {
+        return;
+      }
+
       dispatch({
         type: 'add-jobs',
         jobs: groupedFiles.map((group) =>

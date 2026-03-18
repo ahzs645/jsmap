@@ -94,15 +94,19 @@ export function BundleInsightsPanel({
   const bundle = result.bundle;
 
   if (!bundle) {
+    const isBundleOnly = result.stats.analysisKind === 'bundle-only';
+
     return (
       <div className="bundle-panel">
         <div className="bundle-toolbar">
           <div>
             <h2>{isDeobfuscationMode ? 'Bundle-to-Source Attribution' : 'Bundle Attribution'}</h2>
             <p>
-              {isDeobfuscationMode
-                ? 'Generated bundle content was not available, so the reconstructed package relies only on source-map contents.'
-                : 'Generated bundle content was not available for this job.'}
+              {isBundleOnly
+                ? 'This job was analyzed without a source map, so byte-accurate bundle attribution is not available.'
+                : isDeobfuscationMode
+                  ? 'Generated bundle content was not available, so the reconstructed package relies only on source-map contents.'
+                  : 'Generated bundle content was not available for this job.'}
             </p>
           </div>
           <div className="actions-bar">
@@ -113,7 +117,11 @@ export function BundleInsightsPanel({
         </div>
         <div className="empty-state">
           <h3>No generated bundle to analyze</h3>
-          <p>Upload the minified JavaScript alongside the map, or use a JS URL instead of a raw map URL, to enable bundle attribution and treemap output.</p>
+          <p>
+            {isBundleOnly
+              ? 'Recover a source map for this target to enable generated/original attribution and treemap output.'
+              : 'Upload the minified JavaScript alongside the map, or use a JS URL instead of a raw map URL, to enable bundle attribution and treemap output.'}
+          </p>
         </div>
       </div>
     );

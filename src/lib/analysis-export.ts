@@ -257,7 +257,7 @@ function buildHtml(result: AnalysisResult): string {
       <section class="panel hero">
         <p>${escapeHtml(result.stats.retrievedFrom)}</p>
         <h1>${escapeHtml(result.label)}</h1>
-        <p>${escapeHtml(result.files.length.toString())} recovered files, ${escapeHtml(result.findings.length.toString())} findings, ${escapeHtml(result.stats.mappingCount.toString())} mappings.</p>
+        <p>${escapeHtml(result.files.length.toString())} recovered files, ${escapeHtml(result.findings.length.toString())} findings, ${escapeHtml(result.stats.mappingCount.toString())} mappings${result.stats.analysisKind === 'bundle-only' ? ' (bundle-only fallback)' : ''}.</p>
       </section>
 
       <section class="panel stats">

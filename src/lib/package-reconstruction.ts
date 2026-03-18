@@ -12,7 +12,7 @@ interface ReconstructionContext {
   label: string;
   files: SourceFile[];
   packages: InferredPackage[];
-  mapJson: string;
+  mapJson?: string;
   mapUrl?: string;
   generatedCode?: string;
   generatedUrl?: string;
@@ -423,6 +423,7 @@ function buildReadme(
   usesTypeScript: boolean,
   notes: string[],
   entrypoints: ReconstructionEntrypoint[],
+  hasSourceMap: boolean,
 ): string {
   const installBlock =
     kind === 'react-app'
@@ -436,7 +437,9 @@ function buildReadme(
       : '- No reliable entrypoint was detected.';
   const noteLines = notes.map((note) => `- ${note}`).join('\n');
 
-  return `# ${deriveDisplayName(packageName) || packageName}\n\nThis workspace was reconstructed from recovered source-map data.\n\n## Start Here\n\n\`\`\`bash\n${installBlock}\n\`\`\`\n\n## Entrypoints\n\n${entrypointLines}\n\n## Notes\n\n${noteLines}\n`;
+  return `# ${deriveDisplayName(packageName) || packageName}\n\nThis workspace was reconstructed from ${
+    hasSourceMap ? 'recovered source-map data' : 'bundle and snapshot analysis'
+  }.\n\n## Start Here\n\n\`\`\`bash\n${installBlock}\n\`\`\`\n\n## Entrypoints\n\n${entrypointLines}\n\n## Notes\n\n${noteLines}\n`;
 }
 
 function buildManifestFile(manifest: ReconstructedManifest): string {
@@ -486,6 +489,7 @@ export function buildPackageReconstruction({
   generatedCode,
   generatedUrl,
 }: ReconstructionContext): PackageReconstruction {
+  const hasSourceMap = Boolean(mapJson);
   const recoveredManifest = findRecoveredManifest(files);
   const manifestName =
     typeof recoveredManifest?.manifest.name === 'string' ? recoveredManifest.manifest.name.trim() : '';
@@ -668,8 +672,16 @@ export function buildPackageReconstruction({
 
   const notes = [
     'Recovered files under node_modules were excluded from the reconstructed package root and should be reinstalled from npm.',
-    'Dependency versions set to `*` were inferred from source-map evidence and need manual verification.',
+    hasSourceMap
+      ? 'Dependency versions set to `*` were inferred from source-map evidence and need manual verification.'
+      : 'Dependency versions set to `*` were inferred from bundle-level signals and need manual verification.',
   ];
+
+  if (!hasSourceMap) {
+    notes.unshift(
+      'No source map was available for this reconstruction, so files represent uploaded bundles or site snapshot assets rather than exact original sources.',
+    );
+  }
 
   if (recoveredManifest) {
     notes.unshift(`Recovered package metadata was found at ${recoveredManifest.file.path} and used as the starting point for the new manifest.`);
@@ -717,15 +729,17 @@ export function buildPackageReconstruction({
     path: ensureUniqueOutputPath('README.md', seenPaths),
     generated: true,
     description: 'Recovery notes and bootstrap instructions.',
-    content: buildReadme(packageName, kind, usesTypeScript, notes, entrypoints),
+    content: buildReadme(packageName, kind, usesTypeScript, notes, entrypoints, hasSourceMap),
   });
 
-  outputFiles.push({
-    path: ensureUniqueOutputPath('recovered-artifacts/source-map.json', seenPaths),
-    generated: true,
-    description: 'Normalized source map used to recover this workspace.',
-    content: `${mapJson.trim()}\n`,
-  });
+  if (mapJson) {
+    outputFiles.push({
+      path: ensureUniqueOutputPath('recovered-artifacts/source-map.json', seenPaths),
+      generated: true,
+      description: 'Normalized source map used to recover this workspace.',
+      content: `${mapJson.trim()}\n`,
+    });
+  }
 
   if (generatedCode) {
     outputFiles.push({
