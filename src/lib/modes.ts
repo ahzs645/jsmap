@@ -59,8 +59,8 @@ export const MODE_CONFIG: Record<AppMode, ModeConfig> = {
     emptyStateTitle: 'No reconstructed package selected',
     emptyStateDescription:
       'Process a queued job or select a completed item to inspect recovered files, package signals, and the reconstructed npm workspace.',
-    primaryDownloadLabel: 'Download reconstructed package',
-    secondaryDownloadLabel: 'Download recovered sources',
+    primaryDownloadLabel: 'Download reconstructed workspace',
+    secondaryDownloadLabel: 'Download recovered source files',
     packageTabLabel: 'Rebuild',
   },
 };

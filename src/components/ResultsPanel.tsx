@@ -33,10 +33,65 @@ interface ResultsPanelProps {
   onLookupOriginal: (jobId: string, source: string, filePath: string, line: number, column: number) => void;
 }
 
+interface DownloadActionCopy {
+  analysisLabel: string;
+  sizeLabel: string;
+  primaryLabel?: string;
+  primaryDescription?: string;
+  secondaryLabel: string;
+  secondaryDescription: string;
+}
+
 function downloadSingleFile(file: SourceFile): void {
   const blob = new Blob([file.content], { type: 'text/plain;charset=utf-8' });
   const name = file.path.split('/').pop() || 'source.txt';
   saveAs(blob, name);
+}
+
+function hasWarning(result: AnalysisResult, code: string): boolean {
+  return result.warnings.some((warning) => warning.code === code);
+}
+
+function getDownloadActionCopy(
+  result: AnalysisResult,
+  modeConfig: ModeConfig,
+  isDeobfuscationMode: boolean,
+): DownloadActionCopy {
+  const usedLocalBridge = hasWarning(result, 'local-deobfuscation-bridge');
+
+  if (!isDeobfuscationMode) {
+    return {
+      analysisLabel: result.stats.analysisKind === 'source-map' ? 'source-map recovery' : 'bundle-only analysis',
+      sizeLabel: result.stats.analysisKind === 'source-map' ? 'Recovered sources' : 'Analyzed files',
+      secondaryLabel: modeConfig.primaryDownloadLabel,
+      secondaryDescription:
+        result.stats.analysisKind === 'source-map'
+          ? 'Recovered source files extracted from the source map.'
+          : 'Files used for analysis, keeping the uploaded layout.',
+    };
+  }
+
+  if (result.stats.analysisKind === 'source-map') {
+    return {
+      analysisLabel: 'source-map recovery',
+      sizeLabel: 'Recovered sources',
+      primaryLabel: modeConfig.primaryDownloadLabel,
+      primaryDescription: 'Best-effort npm-style workspace built from the recovered source files.',
+      secondaryLabel: modeConfig.secondaryDownloadLabel,
+      secondaryDescription: 'Recovered source files exactly as extracted from the source map.',
+    };
+  }
+
+  return {
+    analysisLabel: usedLocalBridge ? 'transformed snapshot analysis' : 'bundle-only analysis',
+    sizeLabel: usedLocalBridge ? 'Transformed snapshot' : 'Analyzed snapshot',
+    primaryLabel: modeConfig.primaryDownloadLabel,
+    primaryDescription: 'Best-effort npm-style workspace synthesized from the analyzed input files.',
+    secondaryLabel: usedLocalBridge ? 'Download transformed snapshot' : 'Download analyzed snapshot',
+    secondaryDescription: usedLocalBridge
+      ? 'Original input paths used for analysis, with readable JavaScript transforms applied where possible.'
+      : 'Original input paths exactly as analyzed, without source-map recovery.',
+  };
 }
 
 export function ResultsPanel({
@@ -66,12 +121,7 @@ export function ResultsPanel({
     );
   }
 
-  const secondaryDownloadLabel =
-    isDeobfuscationMode && result.stats.analysisKind === 'bundle-only'
-      ? 'Download analyzed sources'
-      : isDeobfuscationMode
-        ? modeConfig.secondaryDownloadLabel
-        : modeConfig.primaryDownloadLabel;
+  const actionCopy = getDownloadActionCopy(result, modeConfig, isDeobfuscationMode);
 
   return (
     <section className="results">
@@ -89,7 +139,7 @@ export function ResultsPanel({
           <strong>{result.stats.mappingCount}</strong>
         </div>
         <div className="stat-card">
-          <span>Recovered sources</span>
+          <span>{actionCopy.sizeLabel}</span>
           <strong>{formatBytes(result.stats.totalSize)}</strong>
         </div>
         <div className="stat-card">
@@ -108,22 +158,28 @@ export function ResultsPanel({
           <p>
             {result.stats.retrievedFrom}
             {' · '}
-            {result.stats.analysisKind === 'source-map' ? 'source-map recovery' : 'bundle-only analysis'}
+            {actionCopy.analysisLabel}
             {' · '}
             {formatCount(result.stats.fileCount, 'file')}
             {' · '}
             {formatBytes(result.stats.totalSize)}
           </p>
         </div>
-        <div className="actions-bar">
-          {isDeobfuscationMode && (
-            <button className="btn btn-primary" type="button" onClick={() => onDownloadPackage(result.jobId)}>
-              {modeConfig.primaryDownloadLabel}
-            </button>
+        <div className="results-actions">
+          {actionCopy.primaryLabel && (
+            <div className="download-action">
+              <button className="btn btn-primary" type="button" onClick={() => onDownloadPackage(result.jobId)}>
+                {actionCopy.primaryLabel}
+              </button>
+              {actionCopy.primaryDescription && <p>{actionCopy.primaryDescription}</p>}
+            </div>
           )}
-          <button className="btn btn-secondary" type="button" onClick={() => onDownloadArchive(result.jobId)}>
-            {secondaryDownloadLabel}
-          </button>
+          <div className="download-action">
+            <button className="btn btn-secondary" type="button" onClick={() => onDownloadArchive(result.jobId)}>
+              {actionCopy.secondaryLabel}
+            </button>
+            <p>{actionCopy.secondaryDescription}</p>
+          </div>
         </div>
       </div>
 
