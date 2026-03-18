@@ -16,6 +16,7 @@ import { scanFiles } from './findings';
 import { inferPackages } from './package-analysis';
 import { buildPackageReconstruction } from './package-reconstruction';
 import { normalizeRelativePath, sanitizePath } from './path-utils';
+import { recoverBundleGraph } from './recovered-bundle-analysis';
 import { SourceMapConsumer, ensureSourceMapConsumer } from './source-map-consumer';
 import { normalizeSourceMapJson } from './source-map-json';
 import type { DiscoveredMapInput } from './source-map-discovery';
@@ -138,6 +139,7 @@ function buildResult(
     generatedUrl?: string;
     hasAllSourcesContent: boolean;
     bundle: AnalysisResult['bundle'];
+    recoveredBundle: AnalysisResult['recoveredBundle'];
     warnings: AnalysisResult['warnings'];
   },
 ): AnalysisResult {
@@ -167,9 +169,11 @@ function buildResult(
       mapUrl: options.mapUrl,
       generatedCode: options.generatedCode,
       generatedUrl: options.generatedUrl,
+      recoveredBundle: options.recoveredBundle,
     }),
     warnings: options.warnings,
     bundle: options.bundle,
+    recoveredBundle: options.recoveredBundle,
     stats: {
       analysisKind: options.analysisKind,
       version: options.version,
@@ -182,7 +186,7 @@ function buildResult(
       retrievedFrom: options.retrievedFrom,
       resolvedMapUrl: options.mapUrl,
       generatedUrl: options.generatedUrl,
-      generatedBundleAvailable: options.bundle != null,
+      generatedBundleAvailable: options.bundle != null || options.recoveredBundle != null,
     },
   };
 }
@@ -280,6 +284,8 @@ export function analyzeBundleOnlyFiles(
 
   const generatedUrl =
     options?.generatedUrl ?? (job.kind === 'url' ? files[0]?.sourceUrl ?? job.url : job.url);
+  const { recoveredBundle, warnings: recoveryWarnings } = recoverBundleGraph(files);
+  warnings.push(...recoveryWarnings);
   const result = buildResult(job, files, {
     analysisKind: 'bundle-only',
     version: 0,
@@ -289,6 +295,7 @@ export function analyzeBundleOnlyFiles(
     generatedUrl,
     hasAllSourcesContent: true,
     bundle: null,
+    recoveredBundle,
     warnings,
   });
 
@@ -413,6 +420,7 @@ export async function analyzeDiscoveredMap(
         consumer.hasContentsOfAllSources() &&
         files.every((file) => !file.missingContent),
       bundle,
+      recoveredBundle: null,
       warnings,
     });
 

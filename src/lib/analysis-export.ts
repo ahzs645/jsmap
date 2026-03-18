@@ -2,6 +2,8 @@ import type {
   AnalysisResult,
   BundleBreakdownEntry,
   BundleTreemapNode,
+  RecoveredBundleEdge,
+  RecoveredBundleModule,
 } from '../types/analysis';
 
 function escapeHtml(value: string): string {
@@ -25,9 +27,27 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
-function toTsvRows(entries: BundleBreakdownEntry[]): string[] {
+function formatConfidence(score: number): string {
+  return `${Math.round(score * 100)}%`;
+}
+
+function toBundleTsvRows(entries: BundleBreakdownEntry[]): string[] {
   return entries.map((entry) =>
     [entry.path, String(entry.bytes), entry.category].join('\t'),
+  );
+}
+
+function toRecoveredModuleTsvRows(modules: RecoveredBundleModule[]): string[] {
+  return modules.map((module) =>
+    [
+      module.syntheticPath,
+      String(module.bytes),
+      module.kind,
+      formatConfidence(module.confidenceScore),
+      module.sourcePath,
+      module.importedSymbols.join(', '),
+      module.exportedSymbols.join(', '),
+    ].join('\t'),
   );
 }
 
@@ -87,9 +107,147 @@ function buildBreakdownTable(entries: BundleBreakdownEntry[]): string {
   `;
 }
 
-function buildHtml(result: AnalysisResult): string {
-  const treeData = serializeTreeData(result.bundle?.treemap ?? null);
+function buildRecoveredModulesTable(modules: RecoveredBundleModule[]): string {
+  if (modules.length === 0) {
+    return '<p class="empty-copy">No pseudo-modules were recovered.</p>';
+  }
+
+  return `
+    <table>
+      <thead>
+        <tr>
+          <th>Pseudo-module</th>
+          <th>Bytes</th>
+          <th>Kind</th>
+          <th>Confidence</th>
+          <th>Source</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${modules
+          .map(
+            (module) => `
+              <tr>
+                <td>${escapeHtml(module.syntheticPath)}</td>
+                <td>${formatBytes(module.bytes)}</td>
+                <td>${escapeHtml(module.kind)}</td>
+                <td>${escapeHtml(formatConfidence(module.confidenceScore))}</td>
+                <td>${escapeHtml(`${module.sourcePath}:${module.startLine}-${module.endLine}`)}</td>
+              </tr>
+            `,
+          )
+          .join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function buildRecoveredEdgeTable(edges: RecoveredBundleEdge[], modules: RecoveredBundleModule[]): string {
+  if (edges.length === 0) {
+    return '<p class="empty-copy">No inter-module symbol edges were inferred.</p>';
+  }
+
+  const moduleById = new Map(modules.map((module) => [module.id, module] as const));
+
+  return `
+    <table>
+      <thead>
+        <tr>
+          <th>From</th>
+          <th>To</th>
+          <th>Kind</th>
+          <th>Symbols</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${edges
+          .map((edge) => {
+            const fromModule = moduleById.get(edge.fromModuleId);
+            const toModule = moduleById.get(edge.toModuleId);
+
+            return `
+              <tr>
+                <td>${escapeHtml(fromModule?.label ?? edge.fromModuleId)}</td>
+                <td>${escapeHtml(toModule?.label ?? edge.toModuleId)}</td>
+                <td>${escapeHtml(edge.kind)}</td>
+                <td>${escapeHtml(edge.symbols.join(', '))}</td>
+              </tr>
+            `;
+          })
+          .join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function buildStatsSection(result: AnalysisResult): string {
   const bundle = result.bundle;
+  const recoveredBundle = result.recoveredBundle;
+
+  if (bundle) {
+    return `
+      <section class="panel stats">
+        <article class="stat">
+          <span>Recovered Sources</span>
+          <strong>${formatBytes(result.stats.totalSize)}</strong>
+        </article>
+        <article class="stat">
+          <span>Generated Bundle</span>
+          <strong>${formatBytes(bundle.totalBytes)}</strong>
+        </article>
+        <article class="stat">
+          <span>Mapped Bytes</span>
+          <strong>${formatBytes(bundle.mappedBytes)}</strong>
+        </article>
+        <article class="stat">
+          <span>Unmapped Bytes</span>
+          <strong>${formatBytes(bundle.unmappedBytes)}</strong>
+        </article>
+      </section>
+    `;
+  }
+
+  if (recoveredBundle) {
+    return `
+      <section class="panel stats">
+        <article class="stat">
+          <span>Analyzed Files</span>
+          <strong>${formatBytes(result.stats.totalSize)}</strong>
+        </article>
+        <article class="stat">
+          <span>JS Chunks</span>
+          <strong>${escapeHtml(recoveredBundle.chunkCount.toString())}</strong>
+        </article>
+        <article class="stat">
+          <span>Pseudo-modules</span>
+          <strong>${escapeHtml(recoveredBundle.moduleCount.toString())}</strong>
+        </article>
+        <article class="stat">
+          <span>Graph Edges</span>
+          <strong>${escapeHtml(recoveredBundle.edgeCount.toString())}</strong>
+        </article>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="panel stats">
+      <article class="stat">
+        <span>Analyzed Files</span>
+        <strong>${formatBytes(result.stats.totalSize)}</strong>
+      </article>
+    </section>
+  `;
+}
+
+function buildHtml(result: AnalysisResult): string {
+  const bundle = result.bundle;
+  const recoveredBundle = result.recoveredBundle;
+  const treeData = serializeTreeData(bundle?.treemap ?? recoveredBundle?.treemap ?? null);
+  const treeTitle = bundle ? 'Treemap' : 'Recovered Treemap';
+  const treeEmptyCopy = bundle
+    ? 'No generated bundle content was available for treemap rendering.'
+    : 'No pseudo-module treemap data was available for this job.';
 
   return `<!doctype html>
 <html lang="en">
@@ -260,24 +418,7 @@ function buildHtml(result: AnalysisResult): string {
         <p>${escapeHtml(result.files.length.toString())} recovered files, ${escapeHtml(result.findings.length.toString())} findings, ${escapeHtml(result.stats.mappingCount.toString())} mappings${result.stats.analysisKind === 'bundle-only' ? ' (bundle-only fallback)' : ''}.</p>
       </section>
 
-      <section class="panel stats">
-        <article class="stat">
-          <span>Recovered Sources</span>
-          <strong>${formatBytes(result.stats.totalSize)}</strong>
-        </article>
-        <article class="stat">
-          <span>Generated Bundle</span>
-          <strong>${bundle ? formatBytes(bundle.totalBytes) : 'Unavailable'}</strong>
-        </article>
-        <article class="stat">
-          <span>Mapped Bytes</span>
-          <strong>${bundle ? formatBytes(bundle.mappedBytes) : 'Unavailable'}</strong>
-        </article>
-        <article class="stat">
-          <span>Unmapped Bytes</span>
-          <strong>${bundle ? formatBytes(bundle.unmappedBytes) : 'Unavailable'}</strong>
-        </article>
-      </section>
+      ${buildStatsSection(result)}
 
       <section class="panel">
         <h2>Warnings</h2>
@@ -285,14 +426,28 @@ function buildHtml(result: AnalysisResult): string {
       </section>
 
       <section class="panel">
-        <h2>Treemap</h2>
-        ${bundle ? '<div id="treemap" class="treemap"></div>' : '<p class="empty-copy">No generated bundle content was available for treemap rendering.</p>'}
+        <h2>${treeTitle}</h2>
+        ${bundle || recoveredBundle ? '<div id="treemap" class="treemap"></div>' : `<p class="empty-copy">${treeEmptyCopy}</p>`}
       </section>
 
-      <section class="panel">
-        <h2>Breakdown</h2>
-        ${buildBreakdownTable(bundle?.breakdown ?? [])}
-      </section>
+      ${bundle ? `
+        <section class="panel">
+          <h2>Breakdown</h2>
+          ${buildBreakdownTable(bundle.breakdown)}
+        </section>
+      ` : ''}
+
+      ${recoveredBundle ? `
+        <section class="panel">
+          <h2>Recovered Modules</h2>
+          ${buildRecoveredModulesTable(recoveredBundle.modules)}
+        </section>
+
+        <section class="panel">
+          <h2>Dependency Edges</h2>
+          ${buildRecoveredEdgeTable(recoveredBundle.edges, recoveredBundle.modules)}
+        </section>
+      ` : ''}
     </main>
 
     <script>
@@ -349,7 +504,13 @@ export function buildAnalysisExport(
     case 'json':
       return JSON.stringify(result, null, 2);
     case 'tsv':
-      return ['Source\tSize\tCategory', ...toTsvRows(result.bundle?.breakdown ?? [])].join('\n');
+      if (result.recoveredBundle && !result.bundle) {
+        return [
+          'Pseudo Module\tBytes\tKind\tConfidence\tSource\tImports\tExports',
+          ...toRecoveredModuleTsvRows(result.recoveredBundle.modules),
+        ].join('\n');
+      }
+      return ['Source\tSize\tCategory', ...toBundleTsvRows(result.bundle?.breakdown ?? [])].join('\n');
     case 'html':
       return buildHtml(result);
     default:

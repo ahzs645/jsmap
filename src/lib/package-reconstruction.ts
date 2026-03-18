@@ -1,6 +1,7 @@
 import type {
   InferredPackage,
   PackageReconstruction,
+  RecoveredBundleGraph,
   ReconstructedManifest,
   ReconstructionDependency,
   ReconstructionEntrypoint,
@@ -16,6 +17,7 @@ interface ReconstructionContext {
   mapUrl?: string;
   generatedCode?: string;
   generatedUrl?: string;
+  recoveredBundle?: RecoveredBundleGraph | null;
 }
 
 interface ManifestLike {
@@ -480,6 +482,23 @@ function buildManifestFile(manifest: ReconstructedManifest): string {
   return safeJsonStringify(payload);
 }
 
+function buildRecoveredBundleGraphArtifact(recoveredBundle: RecoveredBundleGraph): string {
+  return safeJsonStringify({
+    totalBytes: recoveredBundle.totalBytes,
+    chunkCount: recoveredBundle.chunkCount,
+    moduleCount: recoveredBundle.moduleCount,
+    edgeCount: recoveredBundle.edgeCount,
+    helperModuleCount: recoveredBundle.helperModuleCount,
+    averageConfidence: recoveredBundle.averageConfidence,
+    chunks: recoveredBundle.chunks,
+    edges: recoveredBundle.edges,
+    modules: recoveredBundle.modules.map((module) => ({
+      ...module,
+      content: undefined,
+    })),
+  });
+}
+
 export function buildPackageReconstruction({
   label,
   files,
@@ -488,6 +507,7 @@ export function buildPackageReconstruction({
   mapUrl,
   generatedCode,
   generatedUrl,
+  recoveredBundle,
 }: ReconstructionContext): PackageReconstruction {
   const hasSourceMap = Boolean(mapJson);
   const recoveredManifest = findRecoveredManifest(files);
@@ -693,6 +713,12 @@ export function buildPackageReconstruction({
     notes.push(`${missingSources.length} recovered files were missing embedded source content and were replaced with placeholders.`);
   }
 
+  if (recoveredBundle) {
+    notes.push(
+      `Recovered ${recoveredBundle.moduleCount} pseudo-modules across ${recoveredBundle.chunkCount} JavaScript chunks. Treat files under \`src/recovered-modules\` as heuristic slices rather than canonical source files.`,
+    );
+  }
+
   if (kind === 'react-app') {
     const entryPath = entrypoints[0]?.path ?? `src/main.${usesTypeScript ? 'tsx' : 'jsx'}`;
     outputFiles.push({
@@ -748,6 +774,32 @@ export function buildPackageReconstruction({
       description: 'Recovered generated bundle captured during analysis.',
       content: generatedCode.endsWith('\n') ? generatedCode : `${generatedCode}\n`,
     });
+  }
+
+  if (recoveredBundle) {
+    outputFiles.push({
+      path: ensureUniqueOutputPath('recovered-artifacts/module-graph.json', seenPaths),
+      generated: true,
+      description: 'Heuristic pseudo-module graph recovered from bundle-only analysis.',
+      content: buildRecoveredBundleGraphArtifact(recoveredBundle),
+    });
+
+    outputFiles.push({
+      path: ensureUniqueOutputPath('recovered-artifacts/chunk-graph.json', seenPaths),
+      generated: true,
+      description: 'Recovered chunk summaries with entrypoint and runtime-helper metadata.',
+      content: safeJsonStringify(recoveredBundle.chunks),
+    });
+
+    for (const module of recoveredBundle.modules) {
+      outputFiles.push({
+        path: ensureUniqueOutputPath(module.syntheticPath, seenPaths),
+        generated: true,
+        description: `Recovered pseudo-module from ${module.sourcePath}:${module.startLine}-${module.endLine}.`,
+        sourceFileId: module.sourceFileId,
+        content: module.content,
+      });
+    }
   }
 
   return {

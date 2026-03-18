@@ -946,6 +946,10 @@
   gap: 16px;
 }
 
+.bundle-secondary-layout {
+  margin-top: 16px;
+}
+
 .bundle-section {
   display: flex;
   flex-direction: column;
@@ -1058,6 +1062,12 @@
   text-align: left;
 }
 
+.bundle-row-body {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
 .bundle-row:last-child {
   border-bottom: none;
 }
@@ -1090,6 +1100,12 @@
   color: var(--text);
   font-size: 12px;
   font-weight: 600;
+}
+
+.bundle-row-detail {
+  color: rgba(17, 37, 43, 0.72);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .special-breakdown {

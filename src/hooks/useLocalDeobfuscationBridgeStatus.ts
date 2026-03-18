@@ -12,13 +12,11 @@ export function useLocalDeobfuscationBridgeStatus(enabled: boolean): {
   health: LocalDeobfuscationBridgeHealth | null;
   url: string;
 } {
-  const [status, setStatus] = useState<LocalDeobfuscationBridgeStatus>('offline');
+  const [status, setStatus] = useState<LocalDeobfuscationBridgeStatus>(enabled ? 'checking' : 'offline');
   const [health, setHealth] = useState<LocalDeobfuscationBridgeHealth | null>(null);
 
   useEffect(() => {
     if (!enabled) {
-      setStatus('offline');
-      setHealth(null);
       return;
     }
 
@@ -62,8 +60,8 @@ export function useLocalDeobfuscationBridgeStatus(enabled: boolean): {
   }, [enabled]);
 
   return {
-    status,
-    health,
+    status: enabled ? status : 'offline',
+    health: enabled ? health : null,
     url: getLocalDeobfuscationBridgeUrl(),
   };
 }

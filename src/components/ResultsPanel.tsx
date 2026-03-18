@@ -122,6 +122,8 @@ export function ResultsPanel({
   }
 
   const actionCopy = getDownloadActionCopy(result, modeConfig, isDeobfuscationMode);
+  const bundleBytes = result.bundle?.totalBytes ?? result.recoveredBundle?.totalBytes ?? null;
+  const bundleBadgeCount = result.bundle?.sourceCount ?? result.recoveredBundle?.moduleCount ?? 0;
 
   return (
     <section className="results">
@@ -144,7 +146,7 @@ export function ResultsPanel({
         </div>
         <div className="stat-card">
           <span>Bundle</span>
-          <strong>{result.bundle ? formatBytes(result.bundle.totalBytes) : 'N/A'}</strong>
+          <strong>{bundleBytes != null ? formatBytes(bundleBytes) : 'N/A'}</strong>
         </div>
         <div className="stat-card">
           <span>Packages</span>
@@ -214,7 +216,7 @@ export function ResultsPanel({
           onClick={() => onSetTab('bundle')}
         >
           Bundle
-          <span className="badge">{result.bundle?.sourceCount ?? 0}</span>
+          <span className="badge">{bundleBadgeCount}</span>
         </button>
         <button
           type="button"

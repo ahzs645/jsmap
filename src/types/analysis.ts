@@ -155,6 +155,77 @@ export interface PackageReconstruction {
   notes: string[];
 }
 
+export type RecoveredBundleModuleKind =
+  | 'runtime'
+  | 'entry'
+  | 'dynamic-import'
+  | 'vendor'
+  | 'component'
+  | 'state'
+  | 'utility'
+  | 'unknown';
+
+export type RecoveredBundleEdgeKind = 'symbol' | 'shared-helper' | 'dynamic-import';
+
+export interface RecoveredBundleModule {
+  id: string;
+  chunkId: string;
+  sourceFileId: string;
+  sourcePath: string;
+  syntheticPath: string;
+  label: string;
+  kind: RecoveredBundleModuleKind;
+  bytes: number;
+  statementCount: number;
+  startOffset: number;
+  endOffset: number;
+  startLine: number;
+  endLine: number;
+  confidence: 'high' | 'medium' | 'low';
+  confidenceScore: number;
+  declaredSymbols: string[];
+  importedSymbols: string[];
+  exportedSymbols: string[];
+  packageHints: string[];
+  dynamicImports: string[];
+  reasons: string[];
+  dependencyIds: string[];
+  content: string;
+}
+
+export interface RecoveredBundleEdge {
+  id: string;
+  fromModuleId: string;
+  toModuleId: string;
+  kind: RecoveredBundleEdgeKind;
+  symbols: string[];
+}
+
+export interface RecoveredBundleChunk {
+  id: string;
+  path: string;
+  displayPath: string;
+  bytes: number;
+  moduleCount: number;
+  runtimeModuleCount: number;
+  entryModuleIds: string[];
+  dynamicImports: string[];
+  moduleIds: string[];
+}
+
+export interface RecoveredBundleGraph {
+  totalBytes: number;
+  chunkCount: number;
+  moduleCount: number;
+  edgeCount: number;
+  helperModuleCount: number;
+  averageConfidence: number;
+  chunks: RecoveredBundleChunk[];
+  modules: RecoveredBundleModule[];
+  edges: RecoveredBundleEdge[];
+  treemap: BundleTreemapNode;
+}
+
 export type BundleBreakdownCategory =
   | 'source'
   | 'unmapped'
@@ -217,6 +288,7 @@ export interface AnalysisResult {
   reconstruction: PackageReconstruction;
   warnings: AnalysisWarning[];
   bundle: BundleAnalysis | null;
+  recoveredBundle: RecoveredBundleGraph | null;
   stats: SourceMapStats;
 }
 
