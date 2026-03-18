@@ -115,6 +115,16 @@ export function BundleInsightsPanel({
             </button>
           </div>
         </div>
+        {result.warnings.length > 0 && (
+          <div className="bundle-warning-list">
+            {result.warnings.map((warning) => (
+              <article key={warning.code} className="bundle-warning-card">
+                <span>{warning.code}</span>
+                <p>{warning.message}</p>
+              </article>
+            ))}
+          </div>
+        )}
         <div className="empty-state">
           <h3>No generated bundle to analyze</h3>
           <p>

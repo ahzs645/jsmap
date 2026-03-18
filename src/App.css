@@ -207,6 +207,42 @@
   font-size: 13px;
 }
 
+.bridge-status {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.bridge-status strong {
+  color: var(--text-h);
+  font-size: 13px;
+}
+
+.bridge-status p {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.bridge-status.online {
+  border-color: rgba(7, 145, 123, 0.28);
+  background: rgba(7, 145, 123, 0.08);
+}
+
+.bridge-status.offline {
+  border-color: rgba(184, 95, 42, 0.28);
+  background: rgba(184, 95, 42, 0.08);
+}
+
+.bridge-status.checking {
+  border-color: rgba(255, 168, 76, 0.3);
+  background: rgba(255, 168, 76, 0.1);
+}
+
 .segmented-control {
   display: inline-flex;
   padding: 4px;

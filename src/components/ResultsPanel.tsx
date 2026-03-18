@@ -66,6 +66,13 @@ export function ResultsPanel({
     );
   }
 
+  const secondaryDownloadLabel =
+    isDeobfuscationMode && result.stats.analysisKind === 'bundle-only'
+      ? 'Download analyzed sources'
+      : isDeobfuscationMode
+        ? modeConfig.secondaryDownloadLabel
+        : modeConfig.primaryDownloadLabel;
+
   return (
     <section className="results">
       <div className="stats-grid">
@@ -115,7 +122,7 @@ export function ResultsPanel({
             </button>
           )}
           <button className="btn btn-secondary" type="button" onClick={() => onDownloadArchive(result.jobId)}>
-            {isDeobfuscationMode ? modeConfig.secondaryDownloadLabel : modeConfig.primaryDownloadLabel}
+            {secondaryDownloadLabel}
           </button>
         </div>
       </div>

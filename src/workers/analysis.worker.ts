@@ -3,14 +3,27 @@
 import JSZip from 'jszip';
 import { buildAnalysisExport } from '../lib/analysis-export';
 import {
-  analyzeBundleOnlyJob,
+  analyzeBundleOnlyFiles,
   analyzeDiscoveredMap,
+  loadBundleOnlyFiles,
   lookupGeneratedPosition,
   lookupOriginalPosition,
   type JobRuntimeState,
 } from '../lib/source-map-analysis';
+import {
+  getLocalDeobfuscationBridgeUrl,
+  probeLocalDeobfuscationBridge,
+  requestLocalDeobfuscation,
+  type LocalDeobfuscationBridgeResponse,
+} from '../lib/local-deobfuscation-bridge';
 import { discoverSourceMapInput } from '../lib/source-map-discovery';
-import type { AnalysisJobRequest, WorkerRequest, WorkerResponse } from '../types/analysis';
+import type {
+  AnalysisJobRequest,
+  AnalysisWarning,
+  SourceFile,
+  WorkerRequest,
+  WorkerResponse,
+} from '../types/analysis';
 
 const runtimes = new Map<string, JobRuntimeState>();
 
@@ -58,6 +71,49 @@ function canFallbackToBundleOnly(job: AnalysisJobRequest): boolean {
   return !isSourceMapLikeInput(job);
 }
 
+function toTransformedSourceFiles(files: LocalDeobfuscationBridgeResponse['files']): SourceFile[] {
+  return files.map((file) => ({
+    id: file.id,
+    path: file.path,
+    originalSource: file.originalSource,
+    sourceUrl: file.sourceUrl,
+    content: file.content,
+    size: new Blob([file.content]).size,
+    missingContent: file.missingContent,
+    mappingCount: file.mappingCount,
+  }));
+}
+
+function buildBridgeWarnings(response: LocalDeobfuscationBridgeResponse): AnalysisWarning[] {
+  const warningCount = response.files.reduce((total, file) => total + file.warnings.length, 0);
+  const warnings: AnalysisWarning[] = [
+    {
+      code: 'local-deobfuscation-bridge',
+      message: `Applied local Node deobfuscation passes to ${response.transformedCount} of ${response.fileCount} files via ${getLocalDeobfuscationBridgeUrl()}.`,
+    },
+  ];
+
+  if (response.unpackedBundleCount > 0) {
+    warnings.push({
+      code: 'embedded-module-wrappers',
+      message: `Detected embedded module wrappers in ${response.unpackedBundleCount} transformed files.`,
+    });
+  }
+
+  if (warningCount > 0) {
+    warnings.push({
+      code: 'local-bridge-transform-warnings',
+      message: `The local bridge reported ${warningCount} transform warnings. Affected files were left in their best-effort readable form.`,
+    });
+  }
+
+  return warnings;
+}
+
+function describeBridgeResult(response: LocalDeobfuscationBridgeResponse): string {
+  return `Local Node bridge: ${response.transformedCount}/${response.fileCount} files transformed`;
+}
+
 async function processBatch(jobs: AnalysisJobRequest[]): Promise<void> {
   for (const job of jobs) {
     try {
@@ -101,10 +157,49 @@ async function processBatch(jobs: AnalysisJobRequest[]): Promise<void> {
             type: 'job-progress',
             jobId: job.id,
             status: 'extracting',
-            message: 'No usable source map found; switching to bundle-only analysis…',
+            message: 'No usable source map found; preparing bundle-only analysis…',
           });
 
-          const { result, runtime } = await analyzeBundleOnlyJob(job);
+          const files = await loadBundleOnlyFiles(job);
+          let analysisFiles = files;
+          let retrievedFrom = `Bundle-only analysis: ${job.inputSummary ?? job.label}`;
+          let warnings: AnalysisWarning[] = [];
+          let scanMessage = 'Scanning uploaded bundle and site snapshot files…';
+          let completionSuffix = '';
+
+          const bridgeHealth = await probeLocalDeobfuscationBridge();
+
+          if (bridgeHealth) {
+            postMessageToClient({
+              type: 'job-progress',
+              jobId: job.id,
+              status: 'extracting',
+              message: 'Applying local Node deobfuscation bridge…',
+            });
+
+            try {
+              const bridgeResult = await requestLocalDeobfuscation(files);
+              analysisFiles = toTransformedSourceFiles(bridgeResult.files);
+              retrievedFrom = `${describeBridgeResult(bridgeResult)} · ${job.inputSummary ?? job.label}`;
+              warnings = buildBridgeWarnings(bridgeResult);
+              scanMessage = 'Scanning bridge-transformed bundle and site snapshot files…';
+              if (bridgeResult.transformedCount > 0) {
+                completionSuffix = ` Local bridge transformed ${bridgeResult.transformedCount} files.`;
+              }
+            } catch {
+              postMessageToClient({
+                type: 'job-progress',
+                jobId: job.id,
+                status: 'extracting',
+                message: 'Local Node bridge failed; continuing with raw bundle-only analysis…',
+              });
+            }
+          }
+
+          const { result, runtime } = analyzeBundleOnlyFiles(job, analysisFiles, {
+            retrievedFrom,
+            warnings,
+          });
 
           runtimes.set(job.id, runtime);
 
@@ -112,14 +207,14 @@ async function processBatch(jobs: AnalysisJobRequest[]): Promise<void> {
             type: 'job-progress',
             jobId: job.id,
             status: 'scanning',
-            message: 'Scanning uploaded bundle and site snapshot files…',
+            message: scanMessage,
           });
 
           postMessageToClient({
             type: 'job-complete',
             jobId: job.id,
             result,
-            message: `Processed ${result.stats.fileCount} files and ${result.findings.length} findings without a source map.`,
+            message: `Processed ${result.stats.fileCount} files and ${result.findings.length} findings without a source map.${completionSuffix}`,
           });
           continue;
         } catch (fallbackError) {

@@ -3,6 +3,7 @@ import { JobComposer } from './components/JobComposer';
 import { QueuePanel } from './components/QueuePanel';
 import { ResultsPanel } from './components/ResultsPanel';
 import { useAnalysisWorkspace } from './hooks/useAnalysisWorkspace';
+import { useLocalDeobfuscationBridgeStatus } from './hooks/useLocalDeobfuscationBridgeStatus';
 import { MODE_CONFIG, type AppMode } from './lib/modes';
 import './App.css';
 
@@ -12,6 +13,7 @@ function App() {
   const [mode, setMode] = useState<AppMode>('mapper');
   const modeConfig = MODE_CONFIG[mode];
   const isDeobfuscationMode = mode === 'deobfuscator';
+  const bridge = useLocalDeobfuscationBridgeStatus(isDeobfuscationMode);
   const titleSuffix = modeConfig.name.replace(/^Source/, '');
 
   useEffect(() => {
@@ -55,6 +57,10 @@ function App() {
         onAddFiles={workspace.addFiles}
         onAddTextJob={workspace.addTextJob}
         onAddUrlJobs={workspace.addUrlJobs}
+        showLocalBridgeStatus={isDeobfuscationMode}
+        localBridgeStatus={bridge.status}
+        localBridgeUrl={bridge.url}
+        localBridgeCapabilities={bridge.health?.capabilities ?? []}
         disabled={workspace.isProcessing}
       />
 

@@ -1,6 +1,7 @@
 import type {
   AnalysisJobRequest,
   AnalysisResult,
+  AnalysisWarning,
   GeneratedLookupResult,
   OriginalLookupResult,
   SourceFile,
@@ -258,7 +259,51 @@ async function fetchBundleOnlyUrlFile(job: AnalysisJobRequest): Promise<SourceFi
   ];
 }
 
-async function loadBundleOnlyFiles(job: AnalysisJobRequest): Promise<SourceFile[]> {
+export function analyzeBundleOnlyFiles(
+  job: AnalysisJobRequest,
+  files: SourceFile[],
+  options?: {
+    retrievedFrom?: string;
+    generatedUrl?: string;
+    warnings?: AnalysisWarning[];
+  },
+): { result: AnalysisResult; runtime: JobRuntimeState } {
+  const warnings = [...(options?.warnings ?? [])];
+
+  if (!warnings.some((warning) => warning.code === 'no-source-map')) {
+    warnings.push({
+      code: 'no-source-map',
+      message:
+        'No source map was recovered for this input, so lookups and exact source recovery are unavailable. Results are inferred from the uploaded bundle or site snapshot.',
+    });
+  }
+
+  const generatedUrl =
+    options?.generatedUrl ?? (job.kind === 'url' ? files[0]?.sourceUrl ?? job.url : job.url);
+  const result = buildResult(job, files, {
+    analysisKind: 'bundle-only',
+    version: 0,
+    mappingCount: 0,
+    namesCount: 0,
+    retrievedFrom: options?.retrievedFrom ?? `Bundle-only analysis: ${job.inputSummary ?? job.label}`,
+    generatedUrl,
+    hasAllSourcesContent: true,
+    bundle: null,
+    warnings,
+  });
+
+  return {
+    result,
+    runtime: {
+      analysisKind: 'bundle-only',
+      label: job.label,
+      files,
+      result,
+    },
+  };
+}
+
+export async function loadBundleOnlyFiles(job: AnalysisJobRequest): Promise<SourceFile[]> {
   switch (job.kind) {
     case 'local-group':
     case 'js-file': {
@@ -319,34 +364,7 @@ export async function analyzeBundleOnlyJob(
   job: AnalysisJobRequest,
 ): Promise<{ result: AnalysisResult; runtime: JobRuntimeState }> {
   const files = await loadBundleOnlyFiles(job);
-  const generatedUrl = job.kind === 'url' ? files[0]?.sourceUrl ?? job.url : job.url;
-  const result = buildResult(job, files, {
-    analysisKind: 'bundle-only',
-    version: 0,
-    mappingCount: 0,
-    namesCount: 0,
-    retrievedFrom: `Bundle-only analysis: ${job.inputSummary ?? job.label}`,
-    generatedUrl,
-    hasAllSourcesContent: true,
-    bundle: null,
-    warnings: [
-      {
-        code: 'no-source-map',
-        message:
-          'No source map was recovered for this input, so lookups and exact source recovery are unavailable. Results are inferred from the uploaded bundle or site snapshot.',
-      },
-    ],
-  });
-
-  return {
-    result,
-    runtime: {
-      analysisKind: 'bundle-only',
-      label: job.label,
-      files,
-      result,
-    },
-  };
+  return analyzeBundleOnlyFiles(job, files);
 }
 
 export async function analyzeDiscoveredMap(
