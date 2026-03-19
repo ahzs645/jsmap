@@ -9,7 +9,7 @@ export function FindingsPanel({ findings }: FindingsPanelProps) {
     return (
       <div className="empty-state">
         <h3>No findings</h3>
-        <p>No sensitive patterns were detected in the extracted sources.</p>
+        <p>No sensitive patterns or reverse-engineering helper signals were detected in the extracted sources.</p>
       </div>
     );
   }
@@ -32,6 +32,7 @@ export function FindingsPanel({ findings }: FindingsPanelProps) {
             <span className={`finding-type ${finding.type}`}>{finding.type}</span>
           </div>
           <div className="finding-value">{finding.value}</div>
+          {finding.description && <p className="finding-description">{finding.description}</p>}
           <pre className="finding-snippet">{finding.snippet}</pre>
         </article>
       ))}

@@ -312,6 +312,33 @@
   flex-wrap: wrap;
 }
 
+.deobfuscation-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: rgba(217, 123, 43, 0.08);
+  color: var(--text-h);
+}
+
+.deobfuscation-option input {
+  margin-top: 2px;
+}
+
+.deobfuscation-option span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.deobfuscation-option small {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;
@@ -730,6 +757,82 @@
     var(--panel);
 }
 
+.code-viewer-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(7, 145, 123, 0.04);
+}
+
+.code-viewer-tool-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-h);
+  font-size: 13px;
+}
+
+.code-viewer-tool-header span,
+.code-viewer-tool-copy,
+.code-viewer-tool-note {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.code-viewer-tool-copy,
+.code-viewer-tool-note {
+  margin: 0;
+}
+
+.alias-list {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.alias-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 220px);
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.alias-row.invalid {
+  border-color: rgba(215, 94, 58, 0.28);
+}
+
+.alias-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.alias-meta strong {
+  color: var(--text-h);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.alias-meta small {
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.alias-input {
+  max-width: none;
+}
+
 .code-line {
   display: flex;
   align-items: baseline;
@@ -752,6 +855,11 @@
 .code-line-text {
   white-space: pre;
   color: var(--text-h);
+}
+
+.code-alias-token {
+  color: #0f766e;
+  font-weight: 700;
 }
 
 .findings-list {
@@ -820,6 +928,13 @@
   font-family: var(--mono);
   font-size: 13px;
   word-break: break-word;
+}
+
+.finding-description {
+  margin: 10px 0 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .finding-snippet {

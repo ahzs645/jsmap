@@ -57,7 +57,7 @@ function getDownloadActionCopy(
   modeConfig: ModeConfig,
   isDeobfuscationMode: boolean,
 ): DownloadActionCopy {
-  const usedLocalBridge = hasWarning(result, 'local-deobfuscation-bridge');
+  const usedLocalDeobfuscation = hasWarning(result, 'local-deobfuscation');
 
   if (!isDeobfuscationMode) {
     return {
@@ -83,12 +83,12 @@ function getDownloadActionCopy(
   }
 
   return {
-    analysisLabel: usedLocalBridge ? 'transformed snapshot analysis' : 'bundle-only analysis',
-    sizeLabel: usedLocalBridge ? 'Transformed snapshot' : 'Analyzed snapshot',
+    analysisLabel: usedLocalDeobfuscation ? 'transformed snapshot analysis' : 'bundle-only analysis',
+    sizeLabel: usedLocalDeobfuscation ? 'Transformed snapshot' : 'Analyzed snapshot',
     primaryLabel: modeConfig.primaryDownloadLabel,
     primaryDescription: 'Best-effort npm-style workspace synthesized from the analyzed input files.',
-    secondaryLabel: usedLocalBridge ? 'Download transformed snapshot' : 'Download analyzed snapshot',
-    secondaryDescription: usedLocalBridge
+    secondaryLabel: usedLocalDeobfuscation ? 'Download transformed snapshot' : 'Download analyzed snapshot',
+    secondaryDescription: usedLocalDeobfuscation
       ? 'Original input paths used for analysis, with readable JavaScript transforms applied where possible.'
       : 'Original input paths exactly as analyzed, without source-map recovery.',
   };
