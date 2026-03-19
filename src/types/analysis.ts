@@ -11,6 +11,10 @@ export type JobStatus =
   | 'ready'
   | 'error';
 
+export interface DeobfuscationOptions {
+  aggressiveAsync: boolean;
+}
+
 export interface AnalysisJobRequest {
   id: string;
   label: string;
@@ -22,6 +26,7 @@ export interface AnalysisJobRequest {
   url?: string;
   headers?: Record<string, string>;
   inputSummary?: string;
+  deobfuscationOptions?: DeobfuscationOptions;
 }
 
 export interface SourceFile {
@@ -45,6 +50,7 @@ export interface SensitiveFinding {
   type: FindingType;
   value: string;
   snippet: string;
+  description?: string;
 }
 
 export interface LookupSourceOption {

@@ -98,6 +98,13 @@ function buildLocalDeobfuscationWarnings(response: LocalDeobfuscationResult): An
     });
   }
 
+  if (response.capabilities.includes('un-async-await')) {
+    warnings.push({
+      code: 'local-deobfuscation-aggressive-async',
+      message: 'Aggressive async/await lifting was enabled for this job. Review transformed async control flow carefully.',
+    });
+  }
+
   if (warningCount > 0) {
     warnings.push({
       code: 'local-deobfuscation-transform-warnings',
@@ -173,7 +180,10 @@ async function processBatch(jobs: AnalysisJobRequest[]): Promise<void> {
           });
 
           try {
-            const deobfuscationResult = await runLocalDeobfuscation(files);
+            const deobfuscationResult = await runLocalDeobfuscation(
+              files,
+              job.deobfuscationOptions,
+            );
             analysisFiles = toTransformedSourceFiles(deobfuscationResult.files);
             retrievedFrom = `${describeLocalDeobfuscationResult(deobfuscationResult)} · ${job.inputSummary ?? job.label}`;
             warnings = buildLocalDeobfuscationWarnings(deobfuscationResult);

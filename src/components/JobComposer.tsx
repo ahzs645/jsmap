@@ -1,11 +1,21 @@
 import { useEffect, useRef, useState, type DragEvent } from 'react';
 import type { ModeConfig } from '../lib/modes';
+import type { DeobfuscationOptions } from '../types/analysis';
 
 interface JobComposerProps {
   modeConfig: ModeConfig;
-  onAddFiles: (files: File[]) => void;
-  onAddTextJob: (text: string, textKind: 'auto' | 'map' | 'js', label: string) => void;
-  onAddUrlJobs: (urls: string[], headers: Record<string, string>) => void;
+  onAddFiles: (files: File[], deobfuscationOptions?: DeobfuscationOptions) => void;
+  onAddTextJob: (
+    text: string,
+    textKind: 'auto' | 'map' | 'js',
+    label: string,
+    deobfuscationOptions?: DeobfuscationOptions,
+  ) => void;
+  onAddUrlJobs: (
+    urls: string[],
+    headers: Record<string, string>,
+    deobfuscationOptions?: DeobfuscationOptions,
+  ) => void;
   disabled?: boolean;
 }
 
@@ -45,6 +55,11 @@ export function JobComposer({
   const [urlText, setUrlText] = useState('');
   const [headerText, setHeaderText] = useState('');
   const [isDragActive, setIsDragActive] = useState(false);
+  const [aggressiveAsync, setAggressiveAsync] = useState(false);
+
+  const deobfuscationOptions = modeConfig.id === 'deobfuscator'
+    ? { aggressiveAsync }
+    : undefined;
 
   useEffect(() => {
     if (!directoryInputRef.current) {
@@ -60,7 +75,7 @@ export function JobComposer({
       return;
     }
 
-    onAddFiles(files);
+    onAddFiles(files, deobfuscationOptions);
   };
 
   const handleDragEnter = (event: DragEvent<HTMLButtonElement>) => {
@@ -96,6 +111,7 @@ export function JobComposer({
       trimmed,
       textKind,
       textKind === 'js' ? 'Pasted JavaScript' : textKind === 'map' ? 'Pasted Source Map' : 'Pasted Input',
+      deobfuscationOptions,
     );
     setPasteText('');
   };
@@ -110,7 +126,7 @@ export function JobComposer({
       return;
     }
 
-    onAddUrlJobs(urls, parseHeaderLines(headerText));
+    onAddUrlJobs(urls, parseHeaderLines(headerText), deobfuscationOptions);
     setUrlText('');
   };
 
@@ -152,6 +168,19 @@ export function JobComposer({
             Add site folder
           </button>
         </div>
+        {modeConfig.id === 'deobfuscator' && (
+          <label className="deobfuscation-option">
+            <input
+              type="checkbox"
+              checked={aggressiveAsync}
+              onChange={(event) => setAggressiveAsync(event.target.checked)}
+            />
+            <span>
+              <strong>Aggressive async lift</strong>
+              <small>Attempts to restore transpiled async helpers back into `async`/`await`. Best-effort only.</small>
+            </span>
+          </label>
+        )}
         <input
           ref={fileInputRef}
           hidden
@@ -160,7 +189,7 @@ export function JobComposer({
           accept=".map,.json,.js,.mjs,.cjs,.jsx,.ts,.tsx,.html,.css,.scss,.sass,.less,.txt,.svg,.astro,.md,.mdx"
           onChange={(event) => {
             const files = Array.from(event.target.files ?? []);
-            onAddFiles(files);
+            onAddFiles(files, deobfuscationOptions);
             event.currentTarget.value = '';
           }}
         />
@@ -171,7 +200,7 @@ export function JobComposer({
           multiple
           onChange={(event) => {
             const files = Array.from(event.target.files ?? []);
-            onAddFiles(files);
+            onAddFiles(files, deobfuscationOptions);
             event.currentTarget.value = '';
           }}
         />

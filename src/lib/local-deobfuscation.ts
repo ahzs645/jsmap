@@ -1,11 +1,11 @@
 import { runTransformationRules } from '@wakaru/unminify';
 import { unpack } from '@wakaru/unpacker';
-import { webcrack } from 'webcrack';
-import type { SourceFile } from '../types/analysis';
+import type { DeobfuscationOptions, SourceFile } from '../types/analysis';
 
 const JS_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx']);
 
-// Keep the browser worker execution-free: no target-code evaluation, no native VM dependency.
+// Keep the browser worker execution-free and browser-safe: no target-code evaluation,
+// no native VM dependency, and no Node-only deobfuscation packages.
 const WAKARU_BROWSER_RULES = [
   'un-boolean',
   'un-undefined',
@@ -39,6 +39,10 @@ const WAKARU_BROWSER_RULES = [
   'prettier',
 ] as const;
 
+const WAKARU_AGGRESSIVE_BROWSER_RULES = [
+  'un-async-await',
+] as const;
+
 export interface LocalDeobfuscationWarning {
   stage: string;
   message: string;
@@ -60,6 +64,22 @@ export interface LocalDeobfuscationResult {
   transformedCount: number;
   unpackedBundleCount: number;
   files: LocalDeobfuscationFile[];
+}
+
+function mergeDeobfuscationOptions(
+  options?: Partial<DeobfuscationOptions>,
+): DeobfuscationOptions {
+  return {
+    aggressiveAsync: options?.aggressiveAsync ?? false,
+  };
+}
+
+function getWakaruRules(options?: Partial<DeobfuscationOptions>): string[] {
+  const resolved = mergeDeobfuscationOptions(options);
+
+  return resolved.aggressiveAsync
+    ? [...WAKARU_BROWSER_RULES, ...WAKARU_AGGRESSIVE_BROWSER_RULES]
+    : [...WAKARU_BROWSER_RULES];
 }
 
 function normalizeCode(content: string): string {
@@ -92,6 +112,7 @@ async function withMutedConsoleError<T>(callback: () => Promise<T>): Promise<T> 
 async function transformJavaScript(
   relativePath: string,
   content: string,
+  options?: Partial<DeobfuscationOptions>,
 ): Promise<LocalDeobfuscationFile> {
   const steps: string[] = [];
   const warnings: LocalDeobfuscationWarning[] = [];
@@ -99,31 +120,10 @@ async function transformJavaScript(
   let moduleCount = 0;
 
   try {
-    const result = await webcrack(output, {
-      jsx: true,
-      unminify: true,
-      unpack: false,
-      deobfuscate: false,
-      mangle: false,
-    });
-    const normalized = normalizeCode(result.code);
-
-    if (normalized && normalized !== normalizeCode(output)) {
-      output = normalized;
-      steps.push('webcrack');
-    }
-  } catch (error) {
-    warnings.push({
-      stage: 'webcrack',
-      message: error instanceof Error ? error.message : 'Unknown webcrack error.',
-    });
-  }
-
-  try {
     const result = await withMutedConsoleError(() =>
       runTransformationRules(
         { path: relativePath, source: output },
-        [...WAKARU_BROWSER_RULES],
+        getWakaruRules(options),
       ),
     );
     const normalized = normalizeCode(result.code);
@@ -167,7 +167,9 @@ async function transformJavaScript(
 
 export async function runLocalDeobfuscation(
   files: SourceFile[],
+  options?: Partial<DeobfuscationOptions>,
 ): Promise<LocalDeobfuscationResult> {
+  const resolvedOptions = mergeDeobfuscationOptions(options);
   const processedAt = new Date().toISOString();
   const outputFiles: LocalDeobfuscationFile[] = [];
   let transformedCount = 0;
@@ -185,7 +187,7 @@ export async function runLocalDeobfuscation(
       continue;
     }
 
-    const transformed = await transformJavaScript(file.path, file.content);
+    const transformed = await transformJavaScript(file.path, file.content, resolvedOptions);
     if (transformed.changed) {
       transformedCount += 1;
     }
@@ -207,7 +209,12 @@ export async function runLocalDeobfuscation(
   return {
     ok: true,
     processor: 'browser-worker',
-    capabilities: ['webcrack', 'wakaru', 'wakaru-unpacker', 'smart-rename'],
+    capabilities: [
+      'wakaru',
+      'wakaru-unpacker',
+      'smart-rename',
+      ...(resolvedOptions.aggressiveAsync ? ['un-async-await'] : []),
+    ],
     processedAt,
     fileCount: outputFiles.length,
     transformedCount,

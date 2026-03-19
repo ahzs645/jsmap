@@ -11,6 +11,7 @@ import { buildLocalFileGroups } from '../lib/file-groups';
 import type {
   AnalysisJobRequest,
   AnalysisResult,
+  DeobfuscationOptions,
   GeneratedLookupResult,
   JobStatus,
   OriginalLookupResult,
@@ -344,7 +345,7 @@ export function useAnalysisWorkspace() {
     isProcessing: state.isProcessing,
     generatedLookup: state.generatedLookup,
     originalLookup: state.originalLookup,
-    addFiles(files: File[]) {
+    addFiles(files: File[], deobfuscationOptions?: DeobfuscationOptions) {
       if (files.length === 0) {
         return;
       }
@@ -363,11 +364,17 @@ export function useAnalysisWorkspace() {
             file: group.primaryFile,
             files: group.files,
             inputSummary: group.summary,
+            deobfuscationOptions,
           }),
         ),
       });
     },
-    addTextJob(text: string, textKind: 'auto' | 'map' | 'js', label: string) {
+    addTextJob(
+      text: string,
+      textKind: 'auto' | 'map' | 'js',
+      label: string,
+      deobfuscationOptions?: DeobfuscationOptions,
+    ) {
       dispatch({
         type: 'add-jobs',
         jobs: [
@@ -375,11 +382,16 @@ export function useAnalysisWorkspace() {
             kind: 'text',
             text,
             textKind,
+            deobfuscationOptions,
           }),
         ],
       });
     },
-    addUrlJobs(urls: string[], headers: Record<string, string>) {
+    addUrlJobs(
+      urls: string[],
+      headers: Record<string, string>,
+      deobfuscationOptions?: DeobfuscationOptions,
+    ) {
       const jobs = urls
         .map((url) => url.trim())
         .filter(Boolean)
@@ -388,6 +400,7 @@ export function useAnalysisWorkspace() {
             kind: 'url',
             url,
             headers,
+            deobfuscationOptions,
           }),
         );
 

@@ -4,6 +4,9 @@ interface PatternDefinition {
   category: string;
   regex: RegExp;
   type: FindingType;
+  description?: string;
+  dedupeByValue?: boolean;
+  maxFindings?: number;
 }
 
 const MAX_FINDINGS_PER_PATTERN = 40;
@@ -60,6 +63,48 @@ const PATTERNS: PatternDefinition[] = [
     category: 'Phone Number',
     regex: /\b((?:\+\d{1,2}\s?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})\b/g,
     type: 'pii',
+  },
+];
+
+const HEURISTIC_PATTERNS: PatternDefinition[] = [
+  {
+    category: 'Short-Circuit Default Assignment',
+    regex: /void 0\s*===\s*([A-Za-z_$][\w$]*)\s*&&\s*\(\s*\1\s*=/g,
+    type: 'general',
+    dedupeByValue: false,
+    maxFindings: 20,
+    description:
+      'Minified code often encodes fallback/default assignment as `void 0 === x && (x = ...)`.',
+  },
+  {
+    category: 'Comma Operator Chain',
+    regex:
+      /(?:void 0\s*===\s*[A-Za-z_$][\w$]*\s*&&\s*\([^)]*\)\s*,\s*)+void 0\s*===\s*[A-Za-z_$][\w$]*\s*&&\s*\([^)]*\)/g,
+    type: 'general',
+    dedupeByValue: false,
+    maxFindings: 12,
+    description:
+      'This is a compressed comma-expression chain. Read it as sequential statements whose last expression returns a value.',
+  },
+  {
+    category: 'TypeScript Async Helper',
+    regex:
+      /(?:__awaiter|__generator)\b|return\s+[A-Za-z_$][\w$]*\(\s*this\s*,\s*void 0\s*,\s*void 0\s*,\s*function\s*\(\)\s*\{\s*return\s+(?:__generator|[A-Za-z_$][\w$]*)\s*\(\s*this\s*,\s*function\s*\(/g,
+    type: 'general',
+    dedupeByValue: false,
+    maxFindings: 24,
+    description:
+      'This usually marks transpiled `async`/`await` control flow. The surrounding switch/case labels often represent awaited steps.',
+  },
+  {
+    category: 'TypeScript Class Helper',
+    regex:
+      /(?:__extends\b|Object\.defineProperty\(\s*[A-Za-z_$][\w$]*\.prototype\s*,\s*["'][^"']+["']\s*,\s*\{\s*get\s*:\s*function\b|[A-Za-z_$][\w$]*\.prototype\.[A-Za-z_$][\w$]*\s*=\s*function\b)/g,
+    type: 'general',
+    dedupeByValue: false,
+    maxFindings: 24,
+    description:
+      'This usually marks transpiled class inheritance, prototype methods, or accessors.',
   },
 ];
 
@@ -120,6 +165,86 @@ function getMatchOffset(match: RegExpExecArray, value: string): number {
   return match.index + Math.max(relativeIndex, 0);
 }
 
+function pushFinding(
+  findings: SensitiveFinding[],
+  file: SourceFile,
+  lineStarts: number[],
+  pattern: PatternDefinition,
+  match: RegExpExecArray,
+): void {
+  const value = getMatchValue(match);
+  const offset = getMatchOffset(match, value);
+  const lineIndex = findLineIndex(lineStarts, offset);
+
+  findings.push({
+    id: `${file.id}:${pattern.category}:${offset}`,
+    fileId: file.id,
+    filePath: file.path,
+    line: lineIndex + 1,
+    column: offset - lineStarts[lineIndex] + 1,
+    category: pattern.category,
+    type: pattern.type,
+    value,
+    snippet: getLineSnippet(file.content, lineStarts, lineIndex),
+    description: pattern.description,
+  });
+}
+
+function scanPatternGroup(
+  file: SourceFile,
+  lineStarts: number[],
+  findings: SensitiveFinding[],
+  patterns: PatternDefinition[],
+): boolean {
+  for (const pattern of patterns) {
+    pattern.regex.lastIndex = 0;
+
+    const seen = new Set<string>();
+    let countForPattern = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = pattern.regex.exec(file.content)) !== null) {
+      const value = getMatchValue(match);
+
+      if (!value) {
+        if (match.index === pattern.regex.lastIndex) {
+          pattern.regex.lastIndex += 1;
+        }
+        continue;
+      }
+
+      if (pattern.dedupeByValue !== false && seen.has(value)) {
+        if (match.index === pattern.regex.lastIndex) {
+          pattern.regex.lastIndex += 1;
+        }
+        continue;
+      }
+
+      pushFinding(findings, file, lineStarts, pattern, match);
+
+      seen.add(value);
+      countForPattern += 1;
+
+      if (
+        findings.length >= MAX_FINDINGS_TOTAL ||
+        countForPattern >= (pattern.maxFindings ?? MAX_FINDINGS_PER_PATTERN)
+      ) {
+        break;
+      }
+
+      if (match.index === pattern.regex.lastIndex) {
+        pattern.regex.lastIndex += 1;
+      }
+    }
+
+    if (findings.length >= MAX_FINDINGS_TOTAL) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export function scanFiles(files: SourceFile[]): SensitiveFinding[] {
   const findings: SensitiveFinding[] = [];
 
@@ -129,54 +254,11 @@ export function scanFiles(files: SourceFile[]): SensitiveFinding[] {
     }
 
     const lineStarts = getLineStarts(file.content);
-
-    for (const pattern of PATTERNS) {
-      pattern.regex.lastIndex = 0;
-
-      const seen = new Set<string>();
-      let countForPattern = 0;
-      let match: RegExpExecArray | null;
-
-      while ((match = pattern.regex.exec(file.content)) !== null) {
-        const value = getMatchValue(match);
-
-        if (!value || seen.has(value)) {
-          if (match.index === pattern.regex.lastIndex) {
-            pattern.regex.lastIndex += 1;
-          }
-          continue;
-        }
-
-        const offset = getMatchOffset(match, value);
-        const lineIndex = findLineIndex(lineStarts, offset);
-
-        findings.push({
-          id: `${file.id}:${pattern.category}:${offset}`,
-          fileId: file.id,
-          filePath: file.path,
-          line: lineIndex + 1,
-          column: offset - lineStarts[lineIndex] + 1,
-          category: pattern.category,
-          type: pattern.type,
-          value,
-          snippet: getLineSnippet(file.content, lineStarts, lineIndex),
-        });
-
-        seen.add(value);
-        countForPattern += 1;
-
-        if (findings.length >= MAX_FINDINGS_TOTAL || countForPattern >= MAX_FINDINGS_PER_PATTERN) {
-          break;
-        }
-
-        if (match.index === pattern.regex.lastIndex) {
-          pattern.regex.lastIndex += 1;
-        }
-      }
-
-      if (findings.length >= MAX_FINDINGS_TOTAL) {
-        return findings;
-      }
+    if (scanPatternGroup(file, lineStarts, findings, PATTERNS)) {
+      return findings;
+    }
+    if (scanPatternGroup(file, lineStarts, findings, HEURISTIC_PATTERNS)) {
+      return findings;
     }
   }
 
