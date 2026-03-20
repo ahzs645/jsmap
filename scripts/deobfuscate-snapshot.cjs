@@ -9,7 +9,7 @@ const {
 
 function printUsage() {
   console.error(
-    'Usage: npm run deobfuscate:snapshot -- <input-dir> [output-dir] [--force]',
+    'Usage: npm run deobfuscate:snapshot -- <input-dir> [output-dir] [--force] [--reconstruct]',
   );
 }
 
@@ -47,7 +47,8 @@ async function ensureParentDirectory(targetPath) {
 async function main() {
   const args = process.argv.slice(2);
   const force = args.includes('--force');
-  const positional = args.filter((arg) => arg !== '--force');
+  const reconstruct = args.includes('--reconstruct');
+  const positional = args.filter((arg) => arg !== '--force' && arg !== '--reconstruct');
   const inputDir = positional[0];
 
   if (!inputDir) {
@@ -146,6 +147,25 @@ async function main() {
       `Output: ${absoluteOutputDir}`,
     ].join(' '),
   );
+
+  if (reconstruct) {
+    const reconstructDir = `${absoluteOutputDir}-reconstructed`;
+    const reconstructArgs = [reconstructDir];
+    if (force) reconstructArgs.push('--force');
+
+    // Run reconstruction on the deobfuscated output
+    const { execFileSync } = require('node:child_process');
+    try {
+      execFileSync(
+        process.execPath,
+        [path.join(__dirname, 'reconstruct-site.cjs'), absoluteOutputDir, ...reconstructArgs],
+        { stdio: 'inherit' },
+      );
+    } catch (error) {
+      console.error('Reconstruction failed:', error.message);
+      process.exitCode = 1;
+    }
+  }
 }
 
 main().catch((error) => {

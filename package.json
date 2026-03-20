@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "deobfuscate:bridge": "node scripts/deobfuscation-bridge.cjs",
     "deobfuscate:snapshot": "node scripts/deobfuscate-snapshot.cjs",
+    "reconstruct:site": "node scripts/reconstruct-site.cjs",
     "fixtures:rollup": "node scripts/build-rollup-recovery-fixtures.mjs",
     "lint": "eslint .",
     "preview": "vite preview",

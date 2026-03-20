@@ -325,6 +325,89 @@ export interface OriginalLookupResult {
   matches: OriginalLookupMatch[];
 }
 
+// ── Static site reconstruction types ──
+
+export type StaticSiteFramework =
+  | 'astro'
+  | 'nextjs'
+  | 'gatsby'
+  | 'nuxt'
+  | 'sveltekit'
+  | 'unknown';
+
+export interface DetectedFramework {
+  name: StaticSiteFramework;
+  version: string | null;
+  confidence: 'high' | 'medium' | 'low';
+  evidence: string[];
+}
+
+export interface ComponentIsland {
+  componentName: string;
+  componentUrl: string;
+  rendererFramework: string;
+  hydrationDirective: string;
+  props: Record<string, unknown>;
+}
+
+export interface ExtractedRoute {
+  filePath: string;
+  route: string;
+  title: string | null;
+  metaTags: Record<string, string>;
+  inlineScripts: string[];
+  linkedScripts: string[];
+  linkedStylesheets: string[];
+  componentIslands: ComponentIsland[];
+  bodyContent: string;
+}
+
+export interface ThirdPartyIntegration {
+  name: string;
+  evidence: string;
+  inferredPackage: string | null;
+  config: string | null;
+}
+
+export interface ExtractedLayoutElements {
+  headElements: string;
+  navigation: string | null;
+  footer: string | null;
+  fontPreloads: string[];
+  thirdPartyIntegrations: ThirdPartyIntegration[];
+  inlineHeadScripts: string[];
+}
+
+export interface ExtractedStyles {
+  customProperties: Record<string, string>;
+  fontFamilies: string[];
+  cssContent: string;
+}
+
+export interface JsBundleRole {
+  path: string;
+  role:
+    | 'client-router'
+    | 'page-script'
+    | 'component-hydration'
+    | 'framework-runtime'
+    | 'vendor'
+    | 'theme'
+    | 'unknown';
+  linkedFromPages: string[];
+}
+
+export interface StaticSiteReconstruction {
+  framework: DetectedFramework;
+  routes: ExtractedRoute[];
+  layout: ExtractedLayoutElements;
+  styles: ExtractedStyles;
+  bundleRoles: JsBundleRole[];
+  outputFiles: ReconstructionOutputFile[];
+  manifest: ReconstructedManifest;
+  notes: string[];
+}
+
 export type WorkerRequest =
   | {
       type: 'process-batch';
