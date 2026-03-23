@@ -283,11 +283,113 @@ function collectStatementDeclarations(statement: AstNode, target: Set<string>): 
   }
 }
 
+/**
+ * CSS unit suffixes and other non-package string patterns that should not
+ * be treated as npm package hints.
+ */
+const CSS_UNIT_REGEX = /^[\d.]+(?:em|rem|px|vh|vw|vmin|vmax|ch|ex|%|s|ms|fr|deg|rad|turn|dpi|dpcm|dppx)?$/;
+const PURE_NUMERIC_REGEX = /^[\d.]+(?:[-.][\d.]+)*$/;
+const MIN_PACKAGE_HINT_LENGTH = 2;
+
+/**
+ * Common words, locale codes, browser names, etc. that appear as string
+ * literals in bundles but are not npm package names.
+ */
+const NON_PACKAGE_WORDS = new Set([
+  // Common English words that match package name regex
+  'abort', 'absolute', 'accept', 'access', 'action', 'active', 'add',
+  'after', 'all', 'allow', 'alpha', 'always', 'android', 'any', 'api',
+  'app', 'apply', 'area', 'array', 'auto', 'available',
+  'back', 'before', 'below', 'between', 'block', 'body', 'bold',
+  'border', 'both', 'bottom', 'box', 'break', 'browser', 'button',
+  'cache', 'call', 'cancel', 'canvas', 'capture', 'center', 'change',
+  'check', 'child', 'chrome', 'class', 'clear', 'click', 'client',
+  'clone', 'close', 'code', 'color', 'column', 'command', 'complete',
+  'connect', 'console', 'content', 'control', 'convert', 'copy',
+  'create', 'current', 'cursor', 'custom', 'cut',
+  'dark', 'data', 'date', 'debug', 'default', 'define', 'delete',
+  'desktop', 'detail', 'dialog', 'direction', 'disabled', 'display',
+  'document', 'done', 'double', 'down', 'drag', 'draw', 'drop',
+  'each', 'edge', 'edit', 'element', 'else', 'emit', 'empty', 'enable',
+  'end', 'enter', 'equal', 'error', 'escape', 'event', 'every',
+  'exist', 'exit', 'expand', 'export', 'extend', 'extra',
+  'fail', 'false', 'feature', 'field', 'file', 'fill', 'filter',
+  'final', 'find', 'firefox', 'first', 'fixed', 'flat', 'flex',
+  'float', 'focus', 'font', 'force', 'form', 'format', 'forward',
+  'frame', 'free', 'from', 'full', 'function',
+  'get', 'global', 'grid', 'group',
+  'handle', 'hash', 'head', 'height', 'help', 'hidden', 'hide',
+  'high', 'hold', 'home', 'host', 'hover', 'html', 'http',
+  'icon', 'image', 'import', 'include', 'index', 'info', 'init',
+  'inline', 'inner', 'input', 'insert', 'inside', 'install', 'item',
+  'join', 'json', 'jump',
+  'keep', 'key', 'kind', 'known',
+  'label', 'lang', 'large', 'last', 'layout', 'lazy', 'left',
+  'length', 'level', 'light', 'like', 'limit', 'line', 'link',
+  'list', 'load', 'local', 'lock', 'log', 'long', 'loop', 'low',
+  'main', 'make', 'manager', 'many', 'map', 'margin', 'mark',
+  'match', 'max', 'media', 'medium', 'merge', 'message', 'meta',
+  'method', 'middle', 'min', 'missing', 'mixed', 'mobile', 'mode',
+  'model', 'module', 'mouse', 'move', 'multi', 'must', 'mute',
+  'name', 'native', 'near', 'need', 'nest', 'network', 'new',
+  'next', 'node', 'none', 'normal', 'not', 'note', 'null', 'number',
+  'object', 'offset', 'once', 'only', 'open', 'option', 'order',
+  'other', 'outer', 'output', 'over', 'overflow', 'own',
+  'pack', 'pad', 'page', 'panel', 'parent', 'parse', 'part', 'pass',
+  'paste', 'path', 'pause', 'pending', 'pick', 'pixel', 'place',
+  'plain', 'play', 'plugin', 'point', 'pointer', 'pop', 'port',
+  'position', 'post', 'prefix', 'press', 'prev', 'print', 'private',
+  'process', 'progress', 'promise', 'property', 'protocol', 'proxy',
+  'public', 'pull', 'push', 'put',
+  'query', 'queue', 'quick', 'quote',
+  'radio', 'raise', 'random', 'range', 'rate', 'raw', 'read',
+  'ready', 'real', 'record', 'redo', 'reduce', 'reference', 'region',
+  'reject', 'relative', 'release', 'reload', 'remote', 'remove',
+  'render', 'repeat', 'replace', 'reply', 'request', 'require',
+  'reset', 'resize', 'resolve', 'response', 'restore', 'result',
+  'retry', 'return', 'reverse', 'right', 'root', 'rotate', 'round',
+  'route', 'row', 'rule', 'run',
+  'safe', 'same', 'save', 'scale', 'schema', 'scope', 'screen',
+  'script', 'scroll', 'search', 'section', 'select', 'self', 'send',
+  'server', 'service', 'session', 'set', 'setup', 'share', 'shift',
+  'short', 'show', 'side', 'sign', 'signal', 'simple', 'single',
+  'site', 'size', 'skip', 'slice', 'slot', 'small', 'snap', 'solid',
+  'some', 'sort', 'source', 'space', 'span', 'spec', 'split',
+  'square', 'stack', 'stage', 'start', 'state', 'static', 'status',
+  'step', 'sticky', 'stop', 'store', 'stream', 'stretch', 'strict',
+  'string', 'stroke', 'strong', 'style', 'submit', 'success',
+  'suffix', 'super', 'support', 'surface', 'swap', 'switch', 'symbol',
+  'sync', 'system',
+  'table', 'tabs', 'tag', 'tail', 'take', 'target', 'task', 'template',
+  'test', 'text', 'then', 'thin', 'this', 'throw', 'time', 'title',
+  'toggle', 'token', 'tool', 'tooltip', 'top', 'total', 'touch',
+  'track', 'transform', 'translate', 'tree', 'trigger', 'trim', 'true',
+  'trust', 'try', 'turn', 'type',
+  'undo', 'union', 'unique', 'unit', 'unknown', 'unset', 'until',
+  'update', 'upload', 'upper', 'url', 'use', 'user', 'utf',
+  'valid', 'value', 'variant', 'version', 'vertical', 'view',
+  'virtual', 'visible', 'visit', 'void',
+  'wait', 'walk', 'warn', 'warning', 'watch', 'water', 'weak',
+  'web', 'weight', 'white', 'whole', 'wide', 'width', 'window',
+  'with', 'word', 'work', 'worker', 'wrap', 'write',
+  'xml',
+  'yield',
+  'zero', 'zone', 'zoom',
+  // Browser engines
+  'blink', 'chromium', 'gecko', 'webkit', 'trident',
+  // Architecture terms
+  'architecture', 'platform',
+]);
+
+/** Matches ISO locale codes like en-US, fr-CA, da-DK */
+const LOCALE_CODE_REGEX = /^[a-z]{2}(?:-[A-Z]{2})?$/;
+
 function normalizePackageHint(candidate: string): string | null {
   const clean = candidate.trim().split('?')[0].split('#')[0];
 
   if (
     !clean ||
+    clean.length < MIN_PACKAGE_HINT_LENGTH ||
     clean.startsWith('.') ||
     clean.startsWith('/') ||
     clean.startsWith('#') ||
@@ -297,6 +399,36 @@ function normalizePackageHint(candidate: string): string | null {
     clean.startsWith('virtual:') ||
     !PACKAGE_SPECIFIER_REGEX.test(clean)
   ) {
+    return null;
+  }
+
+  // Reject CSS values, version strings, and pure numbers
+  if (CSS_UNIT_REGEX.test(clean) || PURE_NUMERIC_REGEX.test(clean)) {
+    return null;
+  }
+
+  // Reject single characters
+  if (clean.length === 1) {
+    return null;
+  }
+
+  // Must start with a letter (or @) to be a valid npm package name
+  if (!clean.startsWith('@') && !/^[a-z]/i.test(clean)) {
+    return null;
+  }
+
+  // Reject common English words and browser names
+  if (NON_PACKAGE_WORDS.has(clean.toLowerCase())) {
+    return null;
+  }
+
+  // Reject locale codes (en-US, fr-CA, etc.)
+  if (LOCALE_CODE_REGEX.test(clean)) {
+    return null;
+  }
+
+  // Reject very short strings (< 4 chars) that aren't scoped packages
+  if (clean.length < 4 && !clean.startsWith('@')) {
     return null;
   }
 
@@ -380,7 +512,13 @@ function visitNode(node: AstNode | null | undefined, scopes: Set<string>[], cont
       return;
     case 'Literal':
       if (typeof node.value === 'string') {
-        maybeTrackPackageHint(node.value, context.packageHints);
+        // Only track string literals that structurally resemble npm package
+        // specifiers (scoped names, hyphenated names). Plain words like
+        // "abort" or "Desktop" are not package hints.
+        const sv = node.value;
+        if (sv.startsWith('@') || (sv.includes('-') && /^[a-z]/.test(sv))) {
+          maybeTrackPackageHint(sv, context.packageHints);
+        }
       }
       return;
     case 'Program':
@@ -1290,6 +1428,92 @@ function expandWebpackFactories(
   }));
 }
 
+/**
+ * Detect the webpack require variable name from a factory function's source.
+ * Webpack factories have the signature: function(module, exports, require) { ... }
+ * The 3rd parameter is the require function, e.g., function(M, e, t) → t is require.
+ */
+function detectWebpackRequireVar(factoryContent: string): string | null {
+  // Arrow: (M,e,t)=>{...}
+  const arrowMatch = /^\(\s*(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*\)\s*=>/.exec(factoryContent);
+  if (arrowMatch) {
+    return arrowMatch[3];
+  }
+
+  // Function: function(M,e,t){...}
+  const funcMatch = /^function\s*\(\s*(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*\)/.exec(factoryContent);
+  if (funcMatch) {
+    return funcMatch[3];
+  }
+
+  return null;
+}
+
+/**
+ * Extract webpack require calls from a factory's source code.
+ * Looks for patterns like: requireVar(12345) where requireVar is the detected
+ * 3rd parameter name.
+ */
+function extractWebpackRequireCalls(factoryContent: string, requireVar: string): string[] {
+  const escaped = requireVar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(`\\b${escaped}\\((\\d{3,})\\)`, 'g');
+  const ids = new Set<string>();
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(factoryContent)) !== null) {
+    ids.add(match[1]);
+  }
+
+  return [...ids];
+}
+
+/**
+ * Detect the kind of a webpack module based on its content patterns,
+ * independent of (potentially noisy) package hints.
+ */
+function classifyWebpackModule(
+  content: string,
+  packageHints: string[],
+  hasJsx: boolean,
+  moduleIndex: number,
+  entryAssigned: boolean,
+): RecoveredBundleModuleKind {
+  // JSX strongly suggests a component
+  if (hasJsx) {
+    return 'component';
+  }
+
+  // React component patterns: multiple hooks in the same factory strongly suggest a component
+  if (/\buse[A-Z]\w+\b/.test(content)) {
+    const hookMatches = content.match(/\buse(?:State|Effect|Ref|Memo|Callback|Context|Reducer|LayoutEffect)\b/g);
+    if (hookMatches && hookMatches.length >= 2) {
+      return 'component';
+    }
+  }
+
+  // State management patterns
+  if (/\breducer\b|\bdispatch\b|\bcreateSlice\b|\bcreateStore\b|\buseReducer\b/i.test(content)) {
+    return 'state';
+  }
+
+  // Has real (non-numeric) package hints → vendor
+  if (packageHints.length > 0) {
+    return 'vendor';
+  }
+
+  // Entry module (first non-classified)
+  if (!entryAssigned && moduleIndex === 0) {
+    return 'entry';
+  }
+
+  // Small utility-like modules with exports
+  if (content.length < 2000 && /\bexports\b/.test(content)) {
+    return 'utility';
+  }
+
+  return 'unknown';
+}
+
 function recoverWebpackChunk(
   file: SourceFile,
   chunkId: string,
@@ -1298,7 +1522,16 @@ function recoverWebpackChunk(
 ): ChunkRecoveryResult {
   const lineOffsets = buildLineOffsets(file.content);
   const modules: ModuleDraft[] = [];
+  const edges: RecoveredBundleEdge[] = [];
   let entryAssigned = false;
+
+  // Map webpack module IDs to internal module IDs for edge building
+  const wpIdToModuleId = new Map<string, string>();
+
+  for (const [moduleIndex, factory] of factories.entries()) {
+    const moduleId = `${chunkId}:module:${String(moduleIndex + 1).padStart(3, '0')}`;
+    wpIdToModuleId.set(factory.moduleId, moduleId);
+  }
 
   for (const [moduleIndex, factory] of factories.entries()) {
     // Parse the factory body to extract symbols and hints
@@ -1326,42 +1559,56 @@ function recoverWebpackChunk(
       hasJsx = info.hasJsx;
     }
 
-    const label = packageHints[0] ??
-      `module-${factory.moduleId}`;
-    const kind = detectModuleKind(label, [{
-      node: { type: 'FunctionExpression', start: 0, end: factory.content.length },
-      bytes: factory.end - factory.start,
-      declaredSymbols,
-      referencedSymbols,
-      dynamicImports,
+    // Detect webpack require calls for edge building
+    const requireVar = detectWebpackRequireVar(factory.content);
+    const wpRequiredIds = requireVar
+      ? extractWebpackRequireCalls(factory.content, requireVar)
+      : [];
+
+    const label = packageHints[0] ?? `module-${factory.moduleId}`;
+    const kind = classifyWebpackModule(
+      factory.content,
       packageHints,
-      helperNames,
       hasJsx,
-      isRuntimeHelper: helperNames.length > 0,
-      isAnchor: false,
-    }], packageHints, moduleIndex, entryAssigned);
+      moduleIndex,
+      entryAssigned,
+    );
 
     if (kind === 'entry') {
       entryAssigned = true;
     }
 
     const syntheticPath = deriveSyntheticPath(file.path, moduleIndex, kind, label, usedPaths);
-    // Higher confidence because we know these are real webpack modules
-    const confidenceScore = Math.max(0.72, scoreModule([{
-      node: { type: 'FunctionExpression', start: 0, end: factory.content.length },
-      bytes: factory.end - factory.start,
-      declaredSymbols,
-      referencedSymbols,
-      dynamicImports,
-      packageHints,
-      helperNames,
-      hasJsx,
-      isRuntimeHelper: helperNames.length > 0,
-      isAnchor: true,
-    }], 0, packageHints.length));
+
+    // Confidence: webpack factories are confirmed module boundaries
+    const factoryBytes = factory.end - factory.start;
+    let confidenceScore = 0.76; // Base: known webpack boundary
+    if (packageHints.length > 0) confidenceScore += 0.08;
+    if (hasJsx) confidenceScore += 0.06;
+    if (wpRequiredIds.length > 0) confidenceScore += 0.04;
+    if (factoryBytes >= 500) confidenceScore += 0.04;
+    confidenceScore = Math.min(0.95, confidenceScore);
+
+    const moduleInternalId = `${chunkId}:module:${String(moduleIndex + 1).padStart(3, '0')}`;
+
+    // Build edges from webpack require calls
+    const dependencyIds: string[] = [];
+    for (const wpId of wpRequiredIds) {
+      const targetModuleId = wpIdToModuleId.get(wpId);
+      if (targetModuleId && targetModuleId !== moduleInternalId) {
+        dependencyIds.push(targetModuleId);
+        edges.push({
+          id: `${moduleInternalId}->${targetModuleId}`,
+          fromModuleId: moduleInternalId,
+          toModuleId: targetModuleId,
+          kind: 'symbol',
+          symbols: [`require(${wpId})`],
+        });
+      }
+    }
 
     modules.push({
-      id: `${chunkId}:module:${String(moduleIndex + 1).padStart(3, '0')}`,
+      id: moduleInternalId,
       chunkId,
       sourceFileId: file.id,
       sourcePath: file.path,
@@ -1377,16 +1624,30 @@ function recoverWebpackChunk(
       confidence: confidenceLabel(confidenceScore),
       confidenceScore,
       declaredSymbols,
-      importedSymbols: [],
+      importedSymbols: wpRequiredIds.map((id) => `wp:${id}`),
       exportedSymbols: [],
       packageHints,
       dynamicImports,
-      reasons: [`Webpack module factory (ID: ${factory.moduleId}) extracted from bundle.`],
-      dependencyIds: [],
+      reasons: [
+        `Webpack module factory (ID: ${factory.moduleId}) extracted from bundle.`,
+        ...(wpRequiredIds.length > 0
+          ? [`Imports ${wpRequiredIds.length} other webpack modules.`]
+          : []),
+      ],
+      dependencyIds,
       sourceCode: factory.content,
       helperNames,
       referencedSymbols,
     });
+  }
+
+  // Mark modules that are imported by others as having exports
+  const importedModuleIds = new Set(edges.map((e) => e.toModuleId));
+  for (const module of modules) {
+    if (importedModuleIds.has(module.id)) {
+      const importerCount = edges.filter((e) => e.toModuleId === module.id).length;
+      module.exportedSymbols = [`imported-by:${importerCount}`];
+    }
   }
 
   // Build pseudo-module content for each module
@@ -1409,7 +1670,7 @@ function recoverWebpackChunk(
   return {
     chunk,
     modules,
-    edges: [],
+    edges,
   };
 }
 

@@ -41,6 +41,33 @@ function isLikelyFalsePositiveSecret(value: string): boolean {
   if (/^\d+$/.test(value)) {
     return true;
   }
+  // Single PascalCase or camelCase word (e.g., "Distance", "RedefinedKey", "selection")
+  // Real secrets typically have underscores, hyphens, or mixed alphanumeric chars
+  if (/^[A-Za-z]+$/.test(value)) {
+    return true;
+  }
+  // UPPER_SNAKE_CASE identifiers (e.g., BROWSER_MAP, PLATFORMS_MAP)
+  if (/^[A-Z][A-Z0-9_]+$/.test(value)) {
+    return true;
+  }
+  // camelCase or PascalCase with underscores (code identifiers, not secrets)
+  // e.g., _initialize, parseParentsV3, _getString, make429Error
+  if (/^_?[a-zA-Z][a-zA-Z0-9]*$/.test(value)) {
+    return true;
+  }
+  // Common code identifiers: includeopt_*, matchopt_*, palette_*, etc.
+  // These are config property names, not secrets
+  if (/^(?:include|match|exclude|palette|config|option|setting|feature|disable|enable|UNSAFE_|MISSING_|__)[_A-Za-z]/i.test(value)) {
+    return true;
+  }
+  // Values that look like function/method names or code identifiers with underscores
+  // e.g., Keyboard_SPACE_getInstance, menu_group, _getString
+  if (/^[A-Za-z_][a-zA-Z0-9]*(?:_[a-zA-Z0-9]+)+$/.test(value)) {
+    // Only allow through values that strongly suggest real credentials
+    if (!/(?:_token$|_key$|_secret$|_password$|_credential$|_api_key)/i.test(value)) {
+      return true;
+    }
+  }
   return false;
 }
 
@@ -92,7 +119,10 @@ const PATTERNS: PatternDefinition[] = [
   },
   {
     category: 'Credit Card',
-    regex: /\b(\d{4}[ -]?\d{4}[ -]?\d{4}[ -]?\d{4})\b/g,
+    // Require spaces or dashes as separators to avoid matching UUID fragments,
+    // hex constants, and math constants. Pure 16-digit sequences without
+    // separators are too noisy in minified code.
+    regex: /\b(\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{4})\b/g,
     type: 'pii',
   },
   {
