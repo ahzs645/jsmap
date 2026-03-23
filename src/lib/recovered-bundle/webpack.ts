@@ -129,7 +129,7 @@ export function findWebpackModuleObjects(program: AstProgram, source: string): W
  * Convert extracted webpack module factories into synthetic SourceFile objects
  * so each factory gets analyzed as a separate module.
  */
-function expandWebpackFactories(
+export function expandWebpackFactories(
   file: SourceFile,
   factories: WebpackModuleFactory[],
 ): SourceFile[] {
@@ -138,7 +138,7 @@ function expandWebpackFactories(
   }
 
   const slug = baseName(file.path).replace(/\.[^.]+$/, '');
-  return factories.map((factory, index) => ({
+  return factories.map((factory, _index) => ({
     id: `${file.id}:wp:${factory.moduleId}`,
     path: `${slug}/wp-module-${factory.moduleId}.js`,
     originalSource: `${file.path}#module-${factory.moduleId}`,

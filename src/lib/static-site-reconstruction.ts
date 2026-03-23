@@ -451,7 +451,7 @@ function buildAstroScaffold(
   routes: ExtractedRoute[],
   layout: ExtractedLayoutElements,
   styles: ExtractedStyles,
-  bundleRoles: JsBundleRole[],
+  _bundleRoles: JsBundleRole[],
 ): { outputFiles: ReconstructionOutputFile[]; manifest: ReconstructedManifest } {
   const outputFiles: ReconstructionOutputFile[] = [];
 
@@ -741,7 +741,7 @@ function buildAstroScaffold(
 function buildTailwindConfig(customProperties: Record<string, string>): string {
   // Extract color-like custom properties into Tailwind theme
   const colors: Record<string, string> = {};
-  for (const [prop, value] of Object.entries(customProperties)) {
+  for (const [prop] of Object.entries(customProperties)) {
     if (/color|bg|text|border|accent|primary|secondary|foreground|background|muted|destructive/i.test(prop)) {
       const name = prop.replace(/^--/, '').replace(/[^a-zA-Z0-9]+/g, '-');
       colors[name] = `var(${prop})`;
@@ -798,7 +798,7 @@ function buildAstroLayout(
   layout: ExtractedLayoutElements,
   indexRoute: ExtractedRoute | undefined,
   hasViewTransitions: boolean,
-  hasTailwind: boolean,
+  _hasTailwind: boolean,
   framework: DetectedFramework,
 ): string {
   const imports: string[] = [];
