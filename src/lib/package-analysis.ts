@@ -458,6 +458,229 @@ function addSourceHost(entry: PackageAccumulator, host: string | undefined): voi
   }
 }
 
+/**
+ * Library fingerprints: detect packages by code patterns that survive
+ * minification (string literals, error messages, unique API shapes).
+ */
+interface LibraryFingerprint {
+  name: string;
+  /** At least one pattern must match */
+  patterns: RegExp[];
+  /** All of these must match (optional, for reducing false positives) */
+  requiredPatterns?: RegExp[];
+  version?: string;
+}
+
+const LIBRARY_FINGERPRINTS: LibraryFingerprint[] = [
+  {
+    name: 'react',
+    patterns: [
+      /\bcreateElement\b.*\b__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED\b/s,
+      /\b__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED\b/,
+      /\bReact\.createElement\b/,
+      /\breact\.production/,
+    ],
+  },
+  {
+    name: 'react-dom',
+    patterns: [
+      /\breact-dom\b/,
+      /\bhydrateRoot\b.*\bcreateRoot\b/s,
+      /\bfindDOMNode\b.*\bunmountComponentAtNode\b/s,
+    ],
+  },
+  {
+    name: 'scheduler',
+    patterns: [
+      /\bscheduler\b.*\bunstable_scheduleCallback\b/s,
+      /\bunstable_IdlePriority\b.*\bunstable_ImmediatePriority\b/s,
+    ],
+  },
+  {
+    name: 'lodash',
+    patterns: [
+      /\b_\.VERSION\b/,
+      /\blodash\b.*\btemplate\b/s,
+      /\b__lodash_hash_undefined__\b/,
+    ],
+  },
+  {
+    name: '@mui/material',
+    patterns: [
+      /\bMUI\b.*\bMaterial/,
+      /\bmuiName\b/,
+      /\bMuiPaper\b/,
+      /\bMuiButton\b/,
+    ],
+  },
+  {
+    name: '@emotion/react',
+    patterns: [
+      /\b__EMOTION_TYPE_PLEASE_DO_NOT_USE__\b/,
+      /\b__emotion_base\b/,
+      /\bemotion-disable-server-rendering-unsafe-selector-warning-please-do-not-use-this-the-warning-exists-for-a-reason\b/,
+    ],
+  },
+  {
+    name: '@emotion/styled',
+    patterns: [
+      /\b__emotion_real\b/,
+      /\b__emotion_base\b.*\bstyled\b/s,
+    ],
+  },
+  {
+    name: 'axios',
+    patterns: [
+      /\bAxiosError\b/,
+      /\bisAxiosError\b/,
+      /\baxios\b.*\bisCancel\b/s,
+    ],
+  },
+  {
+    name: 'moment',
+    patterns: [
+      /\bmoment\b.*\b_isAMomentObject\b/s,
+      /\bmoment\.locale\b/,
+    ],
+  },
+  {
+    name: 'dayjs',
+    patterns: [
+      /\bdayjs\b.*\b\$isDayjsObject\b/s,
+      /\b\$isDayjsObject\b/,
+    ],
+  },
+  {
+    name: 'redux',
+    patterns: [
+      /\bcreateStore\b.*\bcombineReducers\b/s,
+      /\b@@redux\/INIT\b/,
+      /\b__REDUX_DEVTOOLS_EXTENSION__\b/,
+    ],
+  },
+  {
+    name: 'zustand',
+    patterns: [
+      /\bzustand\b/,
+      /\bcreate\b.*\bgetState\b.*\bsetState\b.*\bsubscribe\b/s,
+    ],
+  },
+  {
+    name: 'three',
+    patterns: [
+      /\bTHREE\b.*\bWebGLRenderer\b/s,
+      /\bTHREE\.REVISION\b/,
+    ],
+  },
+  {
+    name: 'fabric',
+    patterns: [
+      /\bfabric\b.*\bCanvas\b.*\bObject\b.*\bRect\b/s,
+      /\bfabric\.version\b/,
+    ],
+  },
+  {
+    name: 'd3',
+    patterns: [
+      /\bd3\b.*\bselectAll\b.*\bscaleLinear\b/s,
+    ],
+  },
+  {
+    name: 'webgl',
+    patterns: [
+      /\bgetContext\b.*\bwebgl2?\b/s,
+      /\bgl\.createProgram\b/,
+      /\bgl\.createShader\b/,
+    ],
+  },
+  {
+    name: 'typescript',
+    patterns: [
+      /\btypescript\b.*\bcreateProgram\b/s,
+      /\bts\.ScriptTarget\b/,
+    ],
+  },
+  {
+    name: 'popper.js',
+    patterns: [
+      /\bPopper\b.*\bcreatePopper\b/s,
+      /\b@popperjs\/core\b/,
+    ],
+  },
+  {
+    name: 'framer-motion',
+    patterns: [
+      /\bframer-motion\b/,
+      /\bAnimatePresence\b.*\bmotion\b/s,
+    ],
+  },
+  {
+    name: 'zod',
+    patterns: [
+      /\bZodError\b.*\bZodType\b/s,
+      /\bZodString\b.*\bZodNumber\b/s,
+    ],
+  },
+  {
+    name: 'immer',
+    patterns: [
+      /\bimmer\b.*\bproduce\b/s,
+      /\b\[Immer\]\b/,
+    ],
+  },
+  {
+    name: 'graphql',
+    patterns: [
+      /\bGraphQLError\b.*\bGraphQLSchema\b/s,
+      /\bGraphQLObjectType\b/,
+    ],
+  },
+  {
+    name: '@apollo/client',
+    patterns: [
+      /\bApolloClient\b.*\bApolloProvider\b/s,
+      /\buseQuery\b.*\buseMutation\b.*\bgql\b/s,
+    ],
+  },
+  {
+    name: 'rxjs',
+    patterns: [
+      /\bObservable\b.*\bSubscription\b.*\bSubject\b/s,
+      /\brxjs\b/,
+    ],
+  },
+];
+
+function scanLibraryFingerprints(
+  file: SourceFile,
+  packages: Map<string, PackageAccumulator>,
+): void {
+  if (!file.content || file.content.length < 100) {
+    return;
+  }
+
+  for (const fingerprint of LIBRARY_FINGERPRINTS) {
+    const matched = fingerprint.patterns.some((pattern) => pattern.test(file.content));
+    if (!matched) {
+      continue;
+    }
+
+    if (fingerprint.requiredPatterns) {
+      const allRequired = fingerprint.requiredPatterns.every((pattern) => pattern.test(file.content));
+      if (!allRequired) {
+        continue;
+      }
+    }
+
+    const entry = getAccumulator(packages, fingerprint.name);
+    recordRelatedFile(entry, file);
+    pushEvidence(entry, 'import-specifier', file, `Library fingerprint match in ${file.path}`);
+    if (fingerprint.version) {
+      updateVersion(entry, fingerprint.version, 'import-specifier', 30);
+    }
+  }
+}
+
 function scanImportSpecifiers(
   file: SourceFile,
   packages: Map<string, PackageAccumulator>,
@@ -738,6 +961,7 @@ export function inferPackages(files: SourceFile[]): InferredPackage[] {
     scanSourceReference(file, packages);
     scanImportSpecifiers(file, packages);
     scanManifestFile(file, packages);
+    scanLibraryFingerprints(file, packages);
   }
 
   return [...packages.values()]

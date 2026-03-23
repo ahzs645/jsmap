@@ -1131,6 +1131,288 @@ function createFallbackRecovery(
   };
 }
 
+/**
+ * Detect webpack/rspack module factory objects and extract individual module
+ * factories as separate synthetic statements. This allows the clustering
+ * pipeline to treat each module factory as a distinct module instead of
+ * collapsing the entire bundle into one.
+ */
+
+interface WebpackModuleFactory {
+  moduleId: string;
+  start: number;
+  end: number;
+  content: string;
+}
+
+function isWebpackFactoryFunction(node: AstNode): boolean {
+  return (
+    node.type === 'FunctionExpression' ||
+    node.type === 'ArrowFunctionExpression'
+  );
+}
+
+/**
+ * Check if an ObjectExpression looks like a webpack modules object:
+ * { 12345: function(e,t,r){...}, 67890: (e,t,r)=>{...} }
+ * All keys are numeric literals and all values are functions.
+ */
+function isWebpackModulesObject(node: AstNode): boolean {
+  if (node.type !== 'ObjectExpression') {
+    return false;
+  }
+
+  const properties = node.properties as AstNode[] | undefined;
+  if (!properties || properties.length < 2) {
+    return false;
+  }
+
+  let factoryCount = 0;
+  for (const prop of properties) {
+    if (prop.type === 'SpreadElement') {
+      continue;
+    }
+    if (prop.type !== 'Property') {
+      continue;
+    }
+    const key = prop.key as AstNode | undefined;
+    const value = prop.value as AstNode | undefined;
+    if (!key || !value) {
+      continue;
+    }
+    // Key must be a numeric literal or identifier (webpack uses both)
+    const isNumericKey =
+      (key.type === 'Literal' && typeof key.value === 'number') ||
+      (key.type === 'Literal' && typeof key.value === 'string' && /^\d+$/.test(key.value as string));
+    if (!isNumericKey) {
+      continue;
+    }
+    if (isWebpackFactoryFunction(value)) {
+      factoryCount += 1;
+    }
+  }
+
+  return factoryCount >= 2;
+}
+
+function extractModuleFactories(node: AstNode, source: string): WebpackModuleFactory[] {
+  const properties = node.properties as AstNode[] | undefined;
+  if (!properties) {
+    return [];
+  }
+
+  const factories: WebpackModuleFactory[] = [];
+  for (const prop of properties) {
+    if (prop.type !== 'Property') {
+      continue;
+    }
+    const key = prop.key as AstNode | undefined;
+    const value = prop.value as AstNode | undefined;
+    if (!key || !value || !isWebpackFactoryFunction(value)) {
+      continue;
+    }
+    const moduleId =
+      key.type === 'Literal' ? String(key.value) : source.slice(key.start, key.end);
+    factories.push({
+      moduleId,
+      start: value.start,
+      end: value.end,
+      content: source.slice(value.start, value.end),
+    });
+  }
+
+  return factories;
+}
+
+/**
+ * Walk the AST looking for webpack module objects. Handles:
+ * - Bootstrap: (()=>{ var o = { 123: function(){}, ... }; ... })()
+ * - Chunk push: webpackChunk.push([["id"], { 123: function(){}, ... }])
+ */
+function findWebpackModuleObjects(program: AstProgram, source: string): WebpackModuleFactory[] {
+  const allFactories: WebpackModuleFactory[] = [];
+
+  function walk(node: AstNode | null | undefined): void {
+    if (!node) {
+      return;
+    }
+
+    if (isWebpackModulesObject(node)) {
+      allFactories.push(...extractModuleFactories(node, source));
+      return; // Don't recurse into the already-extracted properties
+    }
+
+    // Recurse into child nodes
+    for (const [key, value] of Object.entries(node)) {
+      if (key === 'type' || key === 'start' || key === 'end') {
+        continue;
+      }
+      if (Array.isArray(value)) {
+        for (const entry of value) {
+          if (isAstNode(entry)) {
+            walk(entry);
+          }
+        }
+      } else if (isAstNode(value)) {
+        walk(value);
+      }
+    }
+  }
+
+  for (const statement of program.body) {
+    walk(statement);
+  }
+
+  return allFactories;
+}
+
+/**
+ * Convert extracted webpack module factories into synthetic SourceFile objects
+ * so each factory gets analyzed as a separate module.
+ */
+function expandWebpackFactories(
+  file: SourceFile,
+  factories: WebpackModuleFactory[],
+): SourceFile[] {
+  if (factories.length === 0) {
+    return [file];
+  }
+
+  const slug = baseName(file.path).replace(/\.[^.]+$/, '');
+  return factories.map((factory, index) => ({
+    id: `${file.id}:wp:${factory.moduleId}`,
+    path: `${slug}/wp-module-${factory.moduleId}.js`,
+    originalSource: `${file.path}#module-${factory.moduleId}`,
+    content: factory.content,
+    size: byteLength(factory.content),
+    missingContent: false,
+    mappingCount: 0,
+  }));
+}
+
+function recoverWebpackChunk(
+  file: SourceFile,
+  chunkId: string,
+  usedPaths: Set<string>,
+  factories: WebpackModuleFactory[],
+): ChunkRecoveryResult {
+  const lineOffsets = buildLineOffsets(file.content);
+  const modules: ModuleDraft[] = [];
+  let entryAssigned = false;
+
+  for (const [moduleIndex, factory] of factories.entries()) {
+    // Parse the factory body to extract symbols and hints
+    const wrappedSource = `(${factory.content})`;
+    const factoryParsed = parseProgram(wrappedSource);
+
+    let declaredSymbols: string[] = [];
+    let referencedSymbols: string[] = [];
+    let packageHints: string[] = [];
+    let dynamicImports: string[] = [];
+    let helperNames: string[] = [];
+    let hasJsx = false;
+
+    if (factoryParsed.program && factoryParsed.program.body.length > 0) {
+      const topLevel = new Set<string>();
+      for (const stmt of factoryParsed.program.body) {
+        collectStatementDeclarations(stmt, topLevel);
+      }
+      const info = analyzeStatement(factoryParsed.program.body[0], wrappedSource, topLevel);
+      declaredSymbols = info.declaredSymbols;
+      referencedSymbols = info.referencedSymbols;
+      packageHints = info.packageHints;
+      dynamicImports = info.dynamicImports;
+      helperNames = info.helperNames;
+      hasJsx = info.hasJsx;
+    }
+
+    const label = packageHints[0] ??
+      `module-${factory.moduleId}`;
+    const kind = detectModuleKind(label, [{
+      node: { type: 'FunctionExpression', start: 0, end: factory.content.length },
+      bytes: factory.end - factory.start,
+      declaredSymbols,
+      referencedSymbols,
+      dynamicImports,
+      packageHints,
+      helperNames,
+      hasJsx,
+      isRuntimeHelper: helperNames.length > 0,
+      isAnchor: false,
+    }], packageHints, moduleIndex, entryAssigned);
+
+    if (kind === 'entry') {
+      entryAssigned = true;
+    }
+
+    const syntheticPath = deriveSyntheticPath(file.path, moduleIndex, kind, label, usedPaths);
+    // Higher confidence because we know these are real webpack modules
+    const confidenceScore = Math.max(0.72, scoreModule([{
+      node: { type: 'FunctionExpression', start: 0, end: factory.content.length },
+      bytes: factory.end - factory.start,
+      declaredSymbols,
+      referencedSymbols,
+      dynamicImports,
+      packageHints,
+      helperNames,
+      hasJsx,
+      isRuntimeHelper: helperNames.length > 0,
+      isAnchor: true,
+    }], 0, packageHints.length));
+
+    modules.push({
+      id: `${chunkId}:module:${String(moduleIndex + 1).padStart(3, '0')}`,
+      chunkId,
+      sourceFileId: file.id,
+      sourcePath: file.path,
+      syntheticPath,
+      label,
+      kind,
+      bytes: byteLength(factory.content),
+      statementCount: 1,
+      startOffset: factory.start,
+      endOffset: factory.end,
+      startLine: getLineNumber(lineOffsets, factory.start),
+      endLine: getLineNumber(lineOffsets, Math.max(factory.end - 1, factory.start)),
+      confidence: confidenceLabel(confidenceScore),
+      confidenceScore,
+      declaredSymbols,
+      importedSymbols: [],
+      exportedSymbols: [],
+      packageHints,
+      dynamicImports,
+      reasons: [`Webpack module factory (ID: ${factory.moduleId}) extracted from bundle.`],
+      dependencyIds: [],
+      sourceCode: factory.content,
+      helperNames,
+      referencedSymbols,
+    });
+  }
+
+  // Build pseudo-module content for each module
+  for (const module of modules) {
+    module.sourceCode = buildPseudoModuleContent(module);
+  }
+
+  const chunk: RecoveredBundleChunk = {
+    id: chunkId,
+    path: file.path,
+    displayPath: file.path,
+    bytes: byteLength(file.content),
+    moduleCount: modules.length,
+    runtimeModuleCount: modules.filter((m) => m.kind === 'runtime').length,
+    entryModuleIds: modules.filter((m) => m.kind === 'entry').map((m) => m.id),
+    dynamicImports: uniqueList(modules.flatMap((m) => m.dynamicImports)),
+    moduleIds: modules.map((m) => m.id),
+  };
+
+  return {
+    chunk,
+    modules,
+    edges: [],
+  };
+}
+
 function recoverChunk(file: SourceFile, chunkIndex: number, usedPaths: Set<string>): ChunkRecoveryResult {
   const chunkId = `chunk:${chunkIndex + 1}:${file.id}`;
   const parsed = parseProgram(file.content);
@@ -1138,6 +1420,13 @@ function recoverChunk(file: SourceFile, chunkIndex: number, usedPaths: Set<strin
   if (!parsed.program || parsed.program.body.length === 0) {
     return createFallbackRecovery(file, chunkId, usedPaths, parsed.error ?? 'No top-level statements were parsed.');
   }
+
+  // --- Webpack module extraction pre-pass ---
+  const webpackFactories = findWebpackModuleObjects(parsed.program, file.content);
+  if (webpackFactories.length >= 2) {
+    return recoverWebpackChunk(file, chunkId, usedPaths, webpackFactories);
+  }
+  // --- End webpack pre-pass ---
 
   const topLevelSymbols = new Set<string>();
   for (const statement of parsed.program.body) {
@@ -1321,31 +1610,45 @@ function buildRecoveredTreemap(chunks: RecoveredBundleChunk[], modules: Recovere
 }
 
 function finalizeModules(modules: ModuleDraft[]): RecoveredBundleModule[] {
-  return modules.map((module) => ({
-    id: module.id,
-    chunkId: module.chunkId,
-    sourceFileId: module.sourceFileId,
-    sourcePath: module.sourcePath,
-    syntheticPath: module.syntheticPath,
-    label: module.label,
-    kind: module.kind,
-    bytes: module.bytes,
-    statementCount: module.statementCount,
-    startOffset: module.startOffset,
-    endOffset: module.endOffset,
-    startLine: module.startLine,
-    endLine: module.endLine,
-    confidence: module.confidence,
-    confidenceScore: module.confidenceScore,
-    declaredSymbols: module.declaredSymbols,
-    importedSymbols: module.importedSymbols,
-    exportedSymbols: module.exportedSymbols,
-    packageHints: module.packageHints,
-    dynamicImports: module.dynamicImports,
-    reasons: module.reasons,
-    dependencyIds: module.dependencyIds,
-    content: module.sourceCode,
-  }));
+  return modules.map((module) => {
+    const sourceCode = module.sourceCode;
+    const result: RecoveredBundleModule = {
+      id: module.id,
+      chunkId: module.chunkId,
+      sourceFileId: module.sourceFileId,
+      sourcePath: module.sourcePath,
+      syntheticPath: module.syntheticPath,
+      label: module.label,
+      kind: module.kind,
+      bytes: module.bytes,
+      statementCount: module.statementCount,
+      startOffset: module.startOffset,
+      endOffset: module.endOffset,
+      startLine: module.startLine,
+      endLine: module.endLine,
+      confidence: module.confidence,
+      confidenceScore: module.confidenceScore,
+      declaredSymbols: module.declaredSymbols,
+      importedSymbols: module.importedSymbols,
+      exportedSymbols: module.exportedSymbols,
+      packageHints: module.packageHints,
+      dynamicImports: module.dynamicImports,
+      reasons: module.reasons,
+      dependencyIds: module.dependencyIds,
+      content: '', // placeholder, overridden by getter below
+    };
+
+    // Use a lazy getter so content is only materialized when accessed,
+    // reducing memory pressure when many modules exist but only a few
+    // are viewed.
+    Object.defineProperty(result, 'content', {
+      get: () => sourceCode,
+      enumerable: true,
+      configurable: true,
+    });
+
+    return result;
+  });
 }
 
 export function recoverBundleGraph(files: SourceFile[]): {

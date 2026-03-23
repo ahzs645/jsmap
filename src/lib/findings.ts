@@ -7,10 +7,42 @@ interface PatternDefinition {
   description?: string;
   dedupeByValue?: boolean;
   maxFindings?: number;
+  minValueLength?: number;
 }
 
 const MAX_FINDINGS_PER_PATTERN = 40;
 const MAX_FINDINGS_TOTAL = 1000;
+const MIN_SECRET_VALUE_LENGTH = 8;
+
+/**
+ * Values that look like minified identifiers or common JS keywords rather than
+ * real secrets. Matched values shorter than MIN_SECRET_VALUE_LENGTH or contained
+ * in this set are skipped for credential-style patterns.
+ */
+const FALSE_POSITIVE_VALUES = new Set([
+  'true', 'false', 'null', 'undefined', 'void', 'this',
+  'return', 'function', 'object', 'string', 'number', 'boolean',
+  'default', 'value', 'type', 'name', 'data', 'error', 'event',
+  'state', 'props', 'config', 'options', 'params', 'result',
+  'input', 'output', 'index', 'length', 'count', 'size',
+  'width', 'height', 'label', 'title', 'text', 'content',
+  'children', 'parent', 'node', 'element', 'item', 'list',
+  'context', 'module', 'exports', 'require', 'import',
+]);
+
+function isLikelyFalsePositiveSecret(value: string): boolean {
+  if (value.length < MIN_SECRET_VALUE_LENGTH) {
+    return true;
+  }
+  if (FALSE_POSITIVE_VALUES.has(value.toLowerCase())) {
+    return true;
+  }
+  // Pure numeric values are not secrets
+  if (/^\d+$/.test(value)) {
+    return true;
+  }
+  return false;
+}
 
 const PATTERNS: PatternDefinition[] = [
   { category: 'GraphQL Query', regex: /gql`([\s\S]*?)`/gi, type: 'general' },
@@ -18,21 +50,25 @@ const PATTERNS: PatternDefinition[] = [
     category: 'API Token/Key',
     regex: /(api|key|token)["'\s]*[:=]["'\s]*(\w+)["'\s]*/gi,
     type: 'general',
+    minValueLength: MIN_SECRET_VALUE_LENGTH,
   },
   {
     category: 'Auth Credentials',
     regex: /(username|password|passwd|credential)["'\s]*[:=]["'\s]*(\w+)["'\s]*/gi,
     type: 'general',
+    minValueLength: MIN_SECRET_VALUE_LENGTH,
   },
   {
     category: 'Private/Secret Key',
     regex: /(secret|private)[_-]?(key)?["'\s]*[:=]["'\s]*(\w+)["'\s]*/gi,
     type: 'general',
+    minValueLength: MIN_SECRET_VALUE_LENGTH,
   },
   {
     category: 'Database Config',
     regex: /(database|db)[_-]?(url|host|pass|name|user)?["'\s]*[:=]["'\s]*(\w+)["'\s]*/gi,
     type: 'general',
+    minValueLength: MIN_SECRET_VALUE_LENGTH,
   },
   { category: 'Environment Variable', regex: /(process\.env(?:\.[a-zA-Z_]+)?)/g, type: 'general' },
   { category: 'Console Log', regex: /(console\.(?:log|error|warn|debug))\s*\([^)]*\)/g, type: 'general' },
@@ -207,6 +243,13 @@ function scanPatternGroup(
       const value = getMatchValue(match);
 
       if (!value) {
+        if (match.index === pattern.regex.lastIndex) {
+          pattern.regex.lastIndex += 1;
+        }
+        continue;
+      }
+
+      if (pattern.minValueLength && isLikelyFalsePositiveSecret(value)) {
         if (match.index === pattern.regex.lastIndex) {
           pattern.regex.lastIndex += 1;
         }
