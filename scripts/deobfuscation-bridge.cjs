@@ -1,12 +1,18 @@
 #!/usr/bin/env node
 
 const http = require('node:http');
-const { isJavaScriptPath, transformJavaScript } = require('./lib/deobfuscation-pipeline.cjs');
+const {
+  isJavaScriptPath,
+  isCSSPath,
+  isHTMLPath,
+  isTransformablePath,
+  transformFile,
+} = require('./lib/deobfuscation-pipeline.cjs');
 
 const HOST = process.env.DEOBFUSCATION_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.DEOBFUSCATION_BRIDGE_PORT || 4318);
 const MAX_BODY_BYTES = Number(process.env.DEOBFUSCATION_BRIDGE_MAX_BODY_BYTES || 64 * 1024 * 1024);
-const CAPABILITIES = ['webcrack', 'wakaru', 'wakaru-unpacker'];
+const CAPABILITIES = ['webcrack', 'wakaru', 'wakaru-unpacker', 'prettier-css', 'prettier-html', 'rename', 'alias-inline'];
 
 function setCorsHeaders(response) {
   response.setHeader('Access-Control-Allow-Origin', '*');
@@ -81,7 +87,7 @@ async function handleDeobfuscation(request, response) {
   const results = [];
 
   for (const file of files) {
-    if (!isJavaScriptPath(file.path)) {
+    if (!isTransformablePath(file.path)) {
       outputFiles.push({
         ...file,
         changed: false,
@@ -97,7 +103,8 @@ async function handleDeobfuscation(request, response) {
       continue;
     }
 
-    const transformed = await transformJavaScript(file.path, file.content);
+    const kind = isJavaScriptPath(file.path) ? 'js' : isCSSPath(file.path) ? 'css' : isHTMLPath(file.path) ? 'html' : 'copy';
+    const transformed = await transformFile(file.path, file.content);
     if (transformed.changed) {
       transformedCount += 1;
     }
@@ -115,7 +122,7 @@ async function handleDeobfuscation(request, response) {
     });
     results.push({
       path: file.path,
-      kind: 'js',
+      kind,
       changed: transformed.changed,
       originalBytes: Buffer.byteLength(file.content),
       outputBytes: Buffer.byteLength(transformed.code),

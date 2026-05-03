@@ -13,6 +13,8 @@ export type JobStatus =
 
 export interface DeobfuscationOptions {
   aggressiveAsync: boolean;
+  excludePatterns?: string[];
+  renameVariables?: boolean;
 }
 
 export interface AnalysisJobRequest {
@@ -332,6 +334,7 @@ export type StaticSiteFramework =
   | 'nextjs'
   | 'gatsby'
   | 'nuxt'
+  | 'vite-react'
   | 'sveltekit'
   | 'unknown';
 

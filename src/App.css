@@ -339,6 +339,35 @@
   line-height: 1.4;
 }
 
+.deobfuscation-options {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.exclude-details {
+  font-size: 13px;
+  color: var(--text-h);
+}
+
+.exclude-details summary {
+  cursor: pointer;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.exclude-details .paste-area {
+  min-height: 60px;
+  font-size: 12px;
+}
+
+.exclude-details small {
+  display: block;
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 12px;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;

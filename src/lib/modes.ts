@@ -46,7 +46,7 @@ export const MODE_CONFIG: Record<AppMode, ModeConfig> = {
     heroKicker: 'Source code deobfuscation workstation',
     heroDescription:
       'Recover source files from source maps, infer package dependencies, and rebuild a best-effort npm workspace for further review, with built-in browser deobfuscation when maps are missing.',
-    heroBadges: ['Package rebuilds', 'Worker isolated', 'Browser deobfuscation'],
+    heroBadges: ['JS + CSS + HTML', 'Smart renaming', 'Browser deobfuscation'],
     composerTitle: 'Deobfuscation Intake',
     composerDescription:
       'Queue source maps, bundles, or a downloaded site snapshot to recover files and synthesize a reconstructed package workspace.',

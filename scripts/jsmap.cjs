@@ -6,9 +6,16 @@
  * Subcommands:
  *   deobfuscate <input-dir> [output-dir] [options]   Deobfuscate a directory of files
  *   split       <input-file> [output-dir] [--force]   Split a large JS bundle into smaller files
+ *   split-ast   <input-file> [output-dir] [--force]   AST split, with optional deep huge-node fragments
  *   split-wp    <input-file> [output-dir] [--force]   Extract modules from IIFE-wrapped webpack bundles
  *   split-iife  <input-file> [output-dir] [--force]   Split IIFE body into semantic sections
  *   reconstruct <input-dir> [output-dir] [--force]    Reconstruct framework source from deobfuscated output
+ *   recover     <input-dir> [output-dir] [--force]    Generate a recovery workspace with packages
+ *   rebuild     <recovery-dir> [output-dir] [--force] Generate a linked runnable rebuild from recovered chunks
+ *   promote-plan <linked-dir> [--top N]                Rank recovered parts for module promotion
+ *   promote-apply <linked-dir> [--dry-run|--write]     Generate promotion scaffold files
+ *   stats      <recovery-or-linked-dir> [--json]       Summarize recovery size, packages, and leftovers
+ *   recover-workflow <recovery-dir> [linked-dir]       Rebuild, plan, preview, build, and report
  *   analyze     <directory>                            Analyze bundles locally (requires tsx)
  *   process     <input-dir> [output-dir] [--force]    Chain: deobfuscate -> split large files -> reconstruct
  *
@@ -23,6 +30,8 @@ const path = require('node:path');
 
 const SCRIPTS_DIR = __dirname;
 const SIZE_THRESHOLD = 500 * 1024; // 500 KB
+const DEFAULT_MAX_TRANSFORM_BYTES = 5 * 1024 * 1024;
+const LARGE_JS_MODES = new Set(['preserve', 'split-raw', 'full']);
 
 // ── Help ──
 
@@ -37,10 +46,18 @@ Commands:
       Deobfuscate a directory of files.
       Options: --force, --reconstruct, --verbose, --dry-run, --in-place,
                --source-map, --no-rename, --no-aggressive, --exclude <pattern>,
-               --config <path>, --concurrency <N>, --timeout <seconds>
+               --config <path>, --concurrency <N>, --timeout <seconds>,
+               --engine webcrack|wakaru|both, --detect-modules
 
   split <input-file> [output-dir] [--force]
       Split a large JS bundle into smaller named files (line-based).
+
+  split-ast <input-file> [output-dir] [--force] [--summary] [--deep-huge-nodes]
+      [--module-granularity grouped|declarations]
+      Split a large JS bundle at AST top-level boundaries. With
+      --deep-huge-nodes, fragment known embedded compiler payloads for inspection.
+      Use --module-granularity declarations to emit one source-like top-level
+      declaration per file where possible.
 
   split-wp <input-file> [output-dir] [--force] [--flat]
       Extract individual modules from IIFE-wrapped webpack bundles.
@@ -56,6 +73,51 @@ Commands:
   reconstruct <input-dir> [output-dir] [--force]
       Reconstruct framework source project from deobfuscated output.
 
+  recover <input-dir> [output-dir] [--force] [--repair-wasm]
+      Generate a source-oriented recovery workspace:
+        public/                  original captured runtime
+        recovery/deobfuscated/   deobfuscated snapshots
+        src/recovered-chunks/    split inspectable chunks
+        packages/*               inferred package boundaries
+      Large JS files are preserved by default instead of blocking the pipeline.
+      Options: --recovery-mode balanced|inspect-first,
+               --large-js-mode preserve|split-raw|full,
+               --module-granularity grouped|declarations,
+               --engine webcrack|wakaru|both, --timeout <seconds>,
+               --concurrency <N>, --max-transform-mb <N>, --min-split-kb <N>,
+               --max-split-mb <N>.
+
+  rebuild <recovery-dir> [output-dir] [--force]
+      Generate a runnable Vite app from a recovery workspace using linked
+      recovered parts:
+        src/recovered-parts/*       separate split files with @jsmap-link headers
+        recovery-link-plan.json     ordered linkage metadata
+        src/recovered-entry/*       generated runnable entry modules
+      Options: --html <public-html>, --fetch-missing <asset-base-url>
+      Use --fetch-missing when dynamic chunks were not captured locally.
+
+  promote-plan <linked-rebuild-dir> [--top N] [--out <file-prefix>]
+      Read recovery-module-index.json from a linked rebuild and generate a
+      scored module-promotion plan for human/agent extraction work:
+        recovery-promotion-plan.json machine-readable ranked candidates
+        recovery-promotion-plan.md   agent checklist and patch order
+
+  promote-apply <linked-rebuild-dir> [--dry-run|--write] [--limit N]
+      Generate starter facade/wrapper files from recovery-promotion-plan.json.
+      Defaults to a dry-run preview under .jsmap-promote-preview. Use --write
+      to write suggested src/promoted/* files.
+      Options: --actions <comma-list>, --out <preview-dir>
+
+  stats <recovery-or-linked-dir> [--json] [--out <file-prefix>]
+      Summarize recovered part counts, package boundaries, readiness, largest
+      leftover files, linked entry sizes, promotion output, and quality warnings.
+
+  recover-workflow <recovery-dir> [linked-dir] [--force] [--fetch-missing <asset-base-url>]
+      Run the practical human/agent recovery loop in one command:
+        rebuild -> stats -> promote-plan -> promote-apply dry-run
+        -> optional --write build-check -> npm run build -> final stats/report.
+      Options: --limit N, --actions <comma-list>, --write
+
   analyze <directory>
       Analyze bundles locally (requires tsx/node with TS support).
 
@@ -64,6 +126,8 @@ Commands:
         1. Deobfuscate the input directory
         2. Find JS files larger than 500 KB in the output and split them
         3. Run site reconstruction (unless --no-reconstruct)
+      Options: --large-js-mode preserve|split-raw|full, --max-transform-mb <N>,
+               --engine webcrack|wakaru|both, --timeout <seconds>, --concurrency <N>
 
 Options:
   --help, -h    Show this help message
@@ -72,9 +136,18 @@ Options:
 Examples:
   node scripts/jsmap.cjs deobfuscate ./snapshot-output --force --verbose
   node scripts/jsmap.cjs split ./large-bundle.js ./output --force
+  node scripts/jsmap.cjs split-ast ./large-bundle.js ./output --force --summary --deep-huge-nodes
+  node scripts/jsmap.cjs split-ast ./bundle.js ./modules --force --module-granularity declarations
   node scripts/jsmap.cjs split-wp ./bundle.js ./wp-modules --force
   node scripts/jsmap.cjs split-iife ./wp-modules/_webpack-runtime.js ./sections --force
   node scripts/jsmap.cjs reconstruct ./deobfuscated-output
+  node scripts/jsmap.cjs recover ./snapshot-output ./recovered-project --force --repair-wasm
+  node scripts/jsmap.cjs recover ./snapshot-output ./recovered-project --force --recovery-mode inspect-first --large-js-mode split-raw
+  node scripts/jsmap.cjs rebuild ./recovered-project ./recovered-project-linked --force
+  node scripts/jsmap.cjs promote-plan ./recovered-project-linked --top 25
+  node scripts/jsmap.cjs promote-apply ./recovered-project-linked --dry-run --limit 5
+  node scripts/jsmap.cjs stats ./recovered-project-linked
+  node scripts/jsmap.cjs recover-workflow ./recovered-project ./recovered-project-linked --force --fetch-missing https://example.com/assets/ --write
   node scripts/jsmap.cjs process ./snapshot-output ./clean-output --force
 `);
 }
@@ -156,7 +229,16 @@ function formatBytes(bytes) {
 // ── Process command (the pipeline) ──
 
 function runProcess(args) {
-  const flags = { force: false, noReconstruct: false, verbose: false };
+  const flags = {
+    force: false,
+    noReconstruct: false,
+    verbose: false,
+    largeJsMode: 'preserve',
+    maxTransformBytes: DEFAULT_MAX_TRANSFORM_BYTES,
+    engine: 'both',
+    timeout: null,
+    concurrency: null,
+  };
   const positional = [];
 
   for (let i = 0; i < args.length; i++) {
@@ -164,6 +246,11 @@ function runProcess(args) {
     if (arg === '--force') flags.force = true;
     else if (arg === '--no-reconstruct') flags.noReconstruct = true;
     else if (arg === '--verbose' || arg === '-v') flags.verbose = true;
+    else if (arg === '--large-js-mode') flags.largeJsMode = args[++i];
+    else if (arg === '--max-transform-mb') flags.maxTransformBytes = Number(args[++i]) * 1024 * 1024;
+    else if (arg === '--engine') flags.engine = args[++i];
+    else if (arg === '--timeout') flags.timeout = Number(args[++i]);
+    else if (arg === '--concurrency' || arg === '-j') flags.concurrency = Number(args[++i]);
     else if (!arg.startsWith('-')) positional.push(arg);
     else {
       console.error(`process: unknown flag: ${arg}`);
@@ -172,9 +259,20 @@ function runProcess(args) {
     }
   }
 
+  if (!LARGE_JS_MODES.has(flags.largeJsMode)) {
+    console.error(`process: invalid --large-js-mode ${flags.largeJsMode}. Expected preserve, split-raw, or full.`);
+    process.exitCode = 1;
+    return;
+  }
+  if (!['webcrack', 'wakaru', 'both'].includes(flags.engine)) {
+    console.error(`process: invalid --engine ${flags.engine}. Expected webcrack, wakaru, or both.`);
+    process.exitCode = 1;
+    return;
+  }
+
   const inputDir = positional[0];
   if (!inputDir) {
-    console.error('Usage: jsmap process <input-dir> [output-dir] [--force] [--no-reconstruct] [--verbose]');
+    console.error('Usage: jsmap process <input-dir> [output-dir] [--force] [--no-reconstruct] [--verbose] [--large-js-mode preserve|split-raw|full]');
     process.exitCode = 1;
     return;
   }
@@ -190,11 +288,21 @@ function runProcess(args) {
     return;
   }
 
+  const excludedLargeFiles = flags.largeJsMode === 'full'
+    ? []
+    : findLargeJsFiles(absoluteInputDir, flags.maxTransformBytes);
+
   // Step 1: Deobfuscate
   console.log('\n=== Step 1/3: Deobfuscate ===\n');
   const deobfuscateArgs = [absoluteInputDir, absoluteOutputDir];
   if (flags.force) deobfuscateArgs.push('--force');
   if (flags.verbose) deobfuscateArgs.push('--verbose');
+  if (flags.timeout != null) deobfuscateArgs.push('--timeout', String(flags.timeout));
+  if (flags.concurrency != null) deobfuscateArgs.push('--concurrency', String(flags.concurrency));
+  deobfuscateArgs.push('--engine', flags.engine);
+  for (const file of excludedLargeFiles) {
+    deobfuscateArgs.push('--exclude', path.relative(absoluteInputDir, file.path).replace(/\\/g, '/'));
+  }
 
   runScript('deobfuscate-snapshot.cjs', deobfuscateArgs);
   if (process.exitCode) {
@@ -204,7 +312,13 @@ function runProcess(args) {
 
   // Step 2: Split large files
   console.log('\n=== Step 2/3: Split large files (>500 KB) ===\n');
-  const largeFiles = findLargeJsFiles(absoluteOutputDir, SIZE_THRESHOLD);
+  let largeFiles = findLargeJsFiles(absoluteOutputDir, SIZE_THRESHOLD);
+  if (flags.largeJsMode === 'preserve' && excludedLargeFiles.length > 0) {
+    const excludedOutputPaths = new Set(excludedLargeFiles.map((file) =>
+      path.join(absoluteOutputDir, path.relative(absoluteInputDir, file.path))));
+    largeFiles = largeFiles.filter((file) => !excludedOutputPaths.has(file.path));
+    console.log(`Preserved ${excludedLargeFiles.length} large input file(s) without transform or split.`);
+  }
 
   if (largeFiles.length === 0) {
     console.log('No JS files larger than 500 KB found. Skipping split step.');
@@ -222,7 +336,12 @@ function runProcess(args) {
 
       const splitArgs = [f.path, splitOutputDir];
       if (flags.force) splitArgs.push('--force');
-      runScript('split-bundle.cjs', splitArgs);
+      if (flags.largeJsMode === 'split-raw' || flags.largeJsMode === 'full') {
+        splitArgs.push('--deep-huge-nodes');
+        runScript('split-bundle-ast.cjs', splitArgs);
+      } else {
+        runScript('split-bundle.cjs', splitArgs);
+      }
 
       if (process.exitCode) {
         console.error(`\nWarning: split failed for ${path.basename(f.path)}, continuing...`);
@@ -283,6 +402,10 @@ function main() {
       runScript('split-bundle.cjs', subArgs);
       break;
 
+    case 'split-ast':
+      runScript('split-bundle-ast.cjs', subArgs);
+      break;
+
     case 'split-wp':
     case 'split-webpack':
       runScript('split-webpack-bundle.cjs', subArgs);
@@ -294,6 +417,29 @@ function main() {
 
     case 'reconstruct':
       runScript('reconstruct-site.cjs', subArgs);
+      break;
+
+    case 'recover':
+      runScript('recover-project.cjs', subArgs);
+      break;
+    case 'rebuild':
+      runScript('rebuild-project.cjs', subArgs);
+      break;
+    case 'promote-plan':
+    case 'promotion-plan':
+      runScript('plan-module-promotion.cjs', subArgs);
+      break;
+    case 'promote-apply':
+    case 'promotion-apply':
+      runScript('apply-module-promotion.cjs', subArgs);
+      break;
+    case 'stats':
+    case 'recovery-stats':
+      runScript('recovery-stats.cjs', subArgs);
+      break;
+    case 'recover-workflow':
+    case 'workflow':
+      runScript('recover-workflow.cjs', subArgs);
       break;
 
     case 'analyze':

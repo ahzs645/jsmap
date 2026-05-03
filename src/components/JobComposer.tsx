@@ -56,9 +56,20 @@ export function JobComposer({
   const [headerText, setHeaderText] = useState('');
   const [isDragActive, setIsDragActive] = useState(false);
   const [aggressiveAsync, setAggressiveAsync] = useState(false);
+  const [excludeText, setExcludeText] = useState('');
+  const [renameVariables, setRenameVariables] = useState(true);
+
+  const excludePatterns = excludeText
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
 
   const deobfuscationOptions = modeConfig.id === 'deobfuscator'
-    ? { aggressiveAsync }
+    ? {
+        aggressiveAsync,
+        excludePatterns: excludePatterns.length > 0 ? excludePatterns : undefined,
+        renameVariables,
+      }
     : undefined;
 
   useEffect(() => {
@@ -169,17 +180,40 @@ export function JobComposer({
           </button>
         </div>
         {modeConfig.id === 'deobfuscator' && (
-          <label className="deobfuscation-option">
-            <input
-              type="checkbox"
-              checked={aggressiveAsync}
-              onChange={(event) => setAggressiveAsync(event.target.checked)}
-            />
-            <span>
-              <strong>Aggressive async lift</strong>
-              <small>Attempts to restore transpiled async helpers back into `async`/`await`. Best-effort only.</small>
-            </span>
-          </label>
+          <div className="deobfuscation-options">
+            <label className="deobfuscation-option">
+              <input
+                type="checkbox"
+                checked={aggressiveAsync}
+                onChange={(event) => setAggressiveAsync(event.target.checked)}
+              />
+              <span>
+                <strong>Aggressive async lift</strong>
+                <small>Attempts to restore transpiled async helpers back into `async`/`await`. Best-effort only.</small>
+              </span>
+            </label>
+            <label className="deobfuscation-option">
+              <input
+                type="checkbox"
+                checked={renameVariables}
+                onChange={(event) => setRenameVariables(event.target.checked)}
+              />
+              <span>
+                <strong>Context-aware renaming</strong>
+                <small>Infers meaningful names for single-letter variables based on usage context (DOM, events, errors).</small>
+              </span>
+            </label>
+            <details className="exclude-details">
+              <summary>Exclude patterns</summary>
+              <textarea
+                className="paste-area compact"
+                placeholder={'node_modules\n*.min.js\nvendor/**'}
+                value={excludeText}
+                onChange={(event) => setExcludeText(event.target.value)}
+              />
+              <small>One glob pattern per line. Matched files are copied without transformation.</small>
+            </details>
+          </div>
         )}
         <input
           ref={fileInputRef}

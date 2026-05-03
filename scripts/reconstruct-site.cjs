@@ -103,6 +103,17 @@ function detectFramework(htmlFiles) {
       confidence = 'high';
       evidence.push(`__sveltekit/ paths in ${file.path}`);
     }
+    if (
+      name === 'unknown' &&
+      /<div\s+id\s*=\s*["']root["']/i.test(file.content) &&
+      /<script\s+[^>]*type\s*=\s*["']module["'][^>]*src\s*=\s*["'][^"']*\/assets\/[^"']+\.js/i.test(
+        file.content,
+      )
+    ) {
+      name = 'vite-react';
+      confidence = 'medium';
+      evidence.push(`Vite-style module asset plus #root mount in ${file.path}`);
+    }
   }
 
   return { name, version, confidence, evidence };
@@ -322,6 +333,123 @@ function buildReconstruction(htmlFiles, jsFiles, cssFiles) {
   const routes = extractRoutes(htmlFiles);
   const layout = extractLayoutElements(routes, htmlFiles);
   const styles = extractStyles(htmlFiles, cssFiles);
+
+  if (framework.name === 'vite-react') {
+    const indexRoute = routes.find((r) => r.route === '/') || routes[0] || {};
+    const siteTitle = indexRoute.title || 'Recovered Vite React App';
+    const siteDescription =
+      indexRoute.metaTags?.description ||
+      indexRoute.metaTags?.['og:description'] ||
+      'Recovered from a static Vite/React build.';
+    const siteUrl = indexRoute.metaTags?.['og:url'] || 'https://recovered-site.local';
+    let pkgName = 'recovered-site';
+    try {
+      pkgName = new URL(siteUrl).hostname.replace(/^www\./, '').replace(/\./g, '-');
+    } catch {}
+
+    const manifest = {
+      name: pkgName,
+      version: '0.0.0-recovered',
+      private: true,
+      type: 'module',
+      scripts: { dev: 'vite', build: 'tsc -b && vite build', preview: 'vite preview' },
+      dependencies: {
+        '@vitejs/plugin-react': '*',
+        react: '*',
+        'react-dom': '*',
+        vite: '*',
+      },
+      devDependencies: {
+        '@types/react': '*',
+        '@types/react-dom': '*',
+        typescript: '*',
+      },
+    };
+
+    const outputFiles = [
+      {
+        path: 'package.json',
+        content: JSON.stringify(manifest, null, 2) + '\n',
+      },
+      {
+        path: 'index.html',
+        content: [
+          '<!doctype html>',
+          '<html lang="en">',
+          '  <head>',
+          '    <meta charset="UTF-8" />',
+          '    <meta name="viewport" content="width=device-width, initial-scale=1.0" />',
+          `    <meta name="description" content="${siteDescription.replace(/"/g, '&quot;')}" />`,
+          `    <title>${siteTitle}</title>`,
+          '  </head>',
+          '  <body>',
+          '    <div id="root"></div>',
+          '    <script type="module" src="/src/main.jsx"></script>',
+          '  </body>',
+          '</html>',
+          '',
+        ].join('\n'),
+      },
+      {
+        path: 'src/main.jsx',
+        content: [
+          "import { StrictMode } from 'react';",
+          "import { createRoot } from 'react-dom/client';",
+          "import { App } from './App.jsx';",
+          "import './styles/global.css';",
+          '',
+          "createRoot(document.getElementById('root')).render(",
+          '  <StrictMode>',
+          '    <App />',
+          '  </StrictMode>,',
+          ');',
+          '',
+        ].join('\n'),
+      },
+      {
+        path: 'src/App.jsx',
+        content: [
+          'export function App() {',
+          '  return (',
+          '    <main className="recovered-app">',
+          `      <h1>${siteTitle.replace(/[{}]/g, '')}</h1>`,
+          `      <p>${siteDescription.replace(/[{}]/g, '')}</p>`,
+          '    </main>',
+          '  );',
+          '}',
+          '',
+        ].join('\n'),
+      },
+      {
+        path: 'src/styles/global.css',
+        content:
+          styles.cssContent.trim() ||
+          'body { margin: 0; font-family: system-ui, sans-serif; }\n.recovered-app { padding: 2rem; }\n',
+      },
+      {
+        path: 'README.md',
+        content: [
+          `# ${siteTitle}`,
+          '',
+          'This is a best-effort Vite/React reconstruction from static build output.',
+          '',
+          'The generated component tree is a scaffold. Use the deobfuscated bundles and route metadata to manually recover richer components.',
+          '',
+        ].join('\n'),
+      },
+    ];
+
+    return {
+      framework,
+      routes,
+      outputFiles,
+      notes: [
+        `Framework: ${framework.name} (${framework.confidence} confidence)`,
+        `Detected ${routes.length} page routes`,
+        'Generated a Vite/React scaffold from the static HTML entrypoint.',
+      ],
+    };
+  }
 
   if (framework.name !== 'astro') {
     return {
@@ -739,6 +867,8 @@ async function main() {
   }
 
   const result = buildReconstruction(htmlFiles, jsFiles, cssFiles);
+
+  await fs.mkdir(absoluteOutputDir, { recursive: true });
 
   for (const file of result.outputFiles) {
     const outputPath = path.join(absoluteOutputDir, file.path);

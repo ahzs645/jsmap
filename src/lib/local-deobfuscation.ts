@@ -3,6 +3,8 @@ import { unpack } from '@wakaru/unpacker';
 import type { DeobfuscationOptions, SourceFile } from '../types/analysis';
 
 const JS_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx']);
+const CSS_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less']);
+const HTML_EXTENSIONS = new Set(['.html', '.htm', '.xhtml', '.svg']);
 
 // Keep the browser worker execution-free and browser-safe: no target-code evaluation,
 // no native VM dependency, and no Node-only deobfuscation packages.
@@ -87,15 +89,155 @@ function normalizeCode(content: string): string {
   return normalized ? `${normalized}\n` : '';
 }
 
-function isJavaScriptPath(filePath: string): boolean {
+function getExtension(filePath: string): string {
   const normalizedPath = filePath.replace(/[?#].*$/u, '').toLowerCase();
   const extensionStart = normalizedPath.lastIndexOf('.');
+  return extensionStart >= 0 ? normalizedPath.slice(extensionStart) : '';
+}
 
-  if (extensionStart < 0) {
-    return false;
+function isJavaScriptPath(filePath: string): boolean {
+  return JS_EXTENSIONS.has(getExtension(filePath));
+}
+
+function isCSSPath(filePath: string): boolean {
+  return CSS_EXTENSIONS.has(getExtension(filePath));
+}
+
+function isHTMLPath(filePath: string): boolean {
+  return HTML_EXTENSIONS.has(getExtension(filePath));
+}
+
+function isTransformablePath(filePath: string): boolean {
+  return isJavaScriptPath(filePath) || isCSSPath(filePath) || isHTMLPath(filePath);
+}
+
+// ── Browser-based CSS formatting ──
+// Uses a simple regex-based approach since prettier is not available in the browser worker
+
+function formatCSSInBrowser(content: string): string {
+  let output = content;
+
+  // Add newlines after { and ;
+  output = output.replace(/\{/g, '{\n');
+  output = output.replace(/;\s*/g, ';\n');
+  output = output.replace(/\}/g, '}\n');
+
+  // Add newlines before selectors (lines starting with non-whitespace after })
+  output = output.replace(/\}\s*([^\s}])/g, '}\n\n$1');
+
+  // Indent properties inside blocks
+  const lines = output.split('\n');
+  const formatted: string[] = [];
+  let indent = 0;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      formatted.push('');
+      continue;
+    }
+
+    if (line.startsWith('}')) {
+      indent = Math.max(0, indent - 1);
+    }
+
+    formatted.push('  '.repeat(indent) + line);
+
+    if (line.endsWith('{')) {
+      indent += 1;
+    }
   }
 
-  return JS_EXTENSIONS.has(normalizedPath.slice(extensionStart));
+  return formatted.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
+}
+
+// ── Browser-based HTML formatting ──
+
+function formatHTMLInBrowser(content: string): string {
+  let output = content;
+
+  // Add newlines around tags if they're all on one line
+  if (content.split('\n').length < 5 && content.length > 200) {
+    output = output.replace(/></g, '>\n<');
+
+    const lines = output.split('\n');
+    const formatted: string[] = [];
+    let indent = 0;
+
+    const selfClosingPattern = /^<(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)\b/i;
+    const closingPattern = /^<\//;
+    const openingPattern = /^<[a-zA-Z]/;
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) continue;
+
+      if (closingPattern.test(line)) {
+        indent = Math.max(0, indent - 1);
+      }
+
+      formatted.push('  '.repeat(indent) + line);
+
+      if (openingPattern.test(line) && !selfClosingPattern.test(line) && !closingPattern.test(line) && !line.endsWith('/>')) {
+        indent += 1;
+      }
+    }
+
+    output = formatted.join('\n');
+  }
+
+  return output.trim() + '\n';
+}
+
+// ── Context-aware variable renaming (browser version) ──
+
+function inferVariableRenames(code: string): Map<string, string> {
+  const renames = new Map<string, string>();
+
+  // Event handler parameters
+  const eventPropertyPattern = /\b(\w)\.(preventDefault|stopPropagation|target|currentTarget|clientX|clientY|pageX|pageY|key|keyCode|type|bubbles)\b/g;
+  let match;
+  while ((match = eventPropertyPattern.exec(code)) !== null) {
+    const varName = match[1];
+    if (varName.length === 1 && !renames.has(varName)) {
+      renames.set(varName, 'event');
+    }
+  }
+
+  // DOM element variables
+  const domPattern = /\b(\w)\.(querySelector|querySelectorAll|classList|appendChild|removeChild|setAttribute|getAttribute|createElement|innerHTML|textContent|parentElement|parentNode|children|style|dataset|getBoundingClientRect|addEventListener|closest|matches)\b/g;
+  while ((match = domPattern.exec(code)) !== null) {
+    const varName = match[1];
+    if (varName.length === 1 && !renames.has(varName)) {
+      renames.set(varName, 'element');
+    }
+  }
+
+  // Error objects in catch blocks
+  const errorPattern = /catch\s*\((\w)\)\s*\{[^}]*\1\.(message|stack|name|cause)\b/g;
+  while ((match = errorPattern.exec(code)) !== null) {
+    const varName = match[1];
+    if (varName.length === 1) {
+      renames.set(varName, 'error');
+    }
+  }
+
+  return renames;
+}
+
+function applyVariableRenames(code: string, renames: Map<string, string>): string {
+  if (renames.size === 0) return code;
+
+  let result = code;
+  for (const [oldName, newName] of renames) {
+    const newNamePattern = new RegExp(`\\b${newName}\\b`);
+    if (newNamePattern.test(result)) continue;
+
+    const pattern = new RegExp(`\\b${oldName}\\b`, 'g');
+    result = result.replace(pattern, newName);
+  }
+
+  return result;
 }
 
 async function withMutedConsoleError<T>(callback: () => Promise<T>): Promise<T> {
@@ -139,6 +281,18 @@ async function transformJavaScript(
     });
   }
 
+  // Context-aware variable renaming
+  try {
+    const renames = inferVariableRenames(output);
+    const renamed = applyVariableRenames(output, renames);
+    if (renamed !== output) {
+      output = renamed;
+      steps.push('rename');
+    }
+  } catch {
+    // Non-critical
+  }
+
   try {
     const unpacked = unpack(output);
 
@@ -165,6 +319,78 @@ async function transformJavaScript(
   };
 }
 
+async function transformCSS(
+  relativePath: string,
+  content: string,
+): Promise<LocalDeobfuscationFile> {
+  const steps: string[] = [];
+  const warnings: LocalDeobfuscationWarning[] = [];
+  let output = content;
+
+  try {
+    const formatted = formatCSSInBrowser(content);
+    if (formatted && normalizeCode(formatted) !== normalizeCode(content)) {
+      output = normalizeCode(formatted);
+      steps.push('css-format');
+    }
+  } catch (error) {
+    warnings.push({
+      stage: 'css-format',
+      message: error instanceof Error ? error.message : 'CSS formatting failed.',
+    });
+  }
+
+  return {
+    id: '',
+    path: relativePath,
+    originalSource: relativePath,
+    content: output,
+    size: new Blob([output]).size,
+    missingContent: false,
+    mappingCount: 0,
+    changed: normalizeCode(output) !== normalizeCode(content),
+    steps,
+    warnings,
+    moduleCount: 0,
+  };
+}
+
+async function transformHTML(
+  relativePath: string,
+  content: string,
+): Promise<LocalDeobfuscationFile> {
+  const steps: string[] = [];
+  const warnings: LocalDeobfuscationWarning[] = [];
+  let output = content;
+
+  try {
+    const formatted = formatHTMLInBrowser(content);
+    if (formatted && normalizeCode(formatted) !== normalizeCode(content)) {
+      output = normalizeCode(formatted);
+      steps.push('html-format');
+    }
+  } catch (error) {
+    warnings.push({
+      stage: 'html-format',
+      message: error instanceof Error ? error.message : 'HTML formatting failed.',
+    });
+  }
+
+  return {
+    id: '',
+    path: relativePath,
+    originalSource: relativePath,
+    content: output,
+    size: new Blob([output]).size,
+    missingContent: false,
+    mappingCount: 0,
+    changed: normalizeCode(output) !== normalizeCode(content),
+    steps,
+    warnings,
+    moduleCount: 0,
+  };
+}
+
 export async function runLocalDeobfuscation(
   files: SourceFile[],
   options?: Partial<DeobfuscationOptions>,
@@ -176,7 +402,7 @@ export async function runLocalDeobfuscation(
   let unpackedBundleCount = 0;
 
   for (const file of files) {
-    if (!isJavaScriptPath(file.path)) {
+    if (!isTransformablePath(file.path)) {
       outputFiles.push({
         ...file,
         changed: false,
@@ -187,7 +413,25 @@ export async function runLocalDeobfuscation(
       continue;
     }
 
-    const transformed = await transformJavaScript(file.path, file.content, resolvedOptions);
+    let transformed: LocalDeobfuscationFile;
+
+    if (isJavaScriptPath(file.path)) {
+      transformed = await transformJavaScript(file.path, file.content, resolvedOptions);
+    } else if (isCSSPath(file.path)) {
+      transformed = await transformCSS(file.path, file.content);
+    } else if (isHTMLPath(file.path)) {
+      transformed = await transformHTML(file.path, file.content);
+    } else {
+      outputFiles.push({
+        ...file,
+        changed: false,
+        steps: [],
+        warnings: [],
+        moduleCount: 0,
+      });
+      continue;
+    }
+
     if (transformed.changed) {
       transformedCount += 1;
     }
@@ -213,6 +457,9 @@ export async function runLocalDeobfuscation(
       'wakaru',
       'wakaru-unpacker',
       'smart-rename',
+      'css-format',
+      'html-format',
+      'rename',
       ...(resolvedOptions.aggressiveAsync ? ['un-async-await'] : []),
     ],
     processedAt,
