@@ -90,6 +90,33 @@ async function chooseHtml(siteRoot, flags) {
     htmlFiles[0];
 }
 
+async function repairInvalidWasmAssets(publicRoot, assetBaseUrl) {
+  if (!assetBaseUrl || !await pathExists(publicRoot)) return [];
+  const wasmFiles = (await walk(publicRoot)).filter((file) => file.endsWith('.wasm'));
+  const repaired = [];
+  for (const file of wasmFiles) {
+    const current = await fsp.readFile(file);
+    const isBinaryWasm = current.length >= 4 &&
+      current[0] === 0x00 &&
+      current[1] === 0x61 &&
+      current[2] === 0x73 &&
+      current[3] === 0x6d;
+    if (isBinaryWasm) continue;
+    const response = await fetch(new URL(path.basename(file), assetBaseUrl).toString());
+    if (!response.ok) continue;
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const fetchedIsWasm = bytes.length >= 4 &&
+      bytes[0] === 0x00 &&
+      bytes[1] === 0x61 &&
+      bytes[2] === 0x73 &&
+      bytes[3] === 0x6d;
+    if (!fetchedIsWasm) continue;
+    await fsp.writeFile(file, bytes);
+    repaired.push(toPosix(path.relative(publicRoot, file)));
+  }
+  return repaired;
+}
+
 function findMainScript(html) {
   return /<script\b[^>]*type=["']module["'][^>]*src=["']\/?assets\/([^"']+\.js)["'][^>]*>\s*<\/script>/i.exec(html)?.[1] ||
     /<script\b[^>]*src=["']\/?assets\/([^"']+\.js)["'][^>]*type=["']module["'][^>]*>\s*<\/script>/i.exec(html)?.[1];
@@ -315,7 +342,9 @@ async function main() {
   const mainScript = findMainScript(html);
   if (!mainScript) throw new Error(`Could not find module script under /assets/*.js in ${htmlFile}`);
 
-  await fsp.cp(siteRoot, path.join(outputDir, 'public'), { recursive: true });
+  const outputPublicDir = path.join(outputDir, 'public');
+  await fsp.cp(siteRoot, outputPublicDir, { recursive: true });
+  const repairedWasmAssets = await repairInvalidWasmAssets(outputPublicDir, flags.fetchMissing);
 
   const chunksRoot = path.join(recoveryDir, 'src/recovered-chunks');
   const deobfuscatedAssets = path.join(recoveryDir, 'recovery/deobfuscated', toPosix(path.relative(publicDir, siteRoot)), 'assets');
@@ -331,6 +360,7 @@ async function main() {
     copiedModules: [],
     routeStubs: routeStubMap(),
     fetchMissing: flags.fetchMissing,
+    repairedWasmAssets,
   };
   const moduleIndex = {
     generatedBy: 'jsmap rebuild',
