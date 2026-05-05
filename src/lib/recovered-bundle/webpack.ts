@@ -138,7 +138,7 @@ export function expandWebpackFactories(
   }
 
   const slug = baseName(file.path).replace(/\.[^.]+$/, '');
-  return factories.map((factory, _index) => ({
+  return factories.map((factory) => ({
     id: `${file.id}:wp:${factory.moduleId}`,
     path: `${slug}/wp-module-${factory.moduleId}.js`,
     originalSource: `${file.path}#module-${factory.moduleId}`,

@@ -395,6 +395,18 @@ function runtimeDominates(runtime, rel, content = '', options = {}) {
   return true;
 }
 
+function manifestRuntimeSignalDominates(runtime) {
+  return [
+    'bundler-runtime',
+    'compiler-runtime',
+    'editor-runtime',
+    'formatter-runtime',
+    'framework-runtime',
+    'wasm-runtime',
+    'worker-runtime',
+  ].includes(runtime?.category);
+}
+
 function scoreAsset(rel, content) {
   const scores = createScoreboard();
   const base = path.basename(rel);
@@ -433,6 +445,7 @@ function scoreSplitAsset(entry) {
   const runtimeCategory = entry.embeddedRuntimeCategory || primary?.category;
   const runtimeId = entry.embeddedRuntime || primary?.id;
   const dominantRuntime = entry.embeddedRuntimeCategory ||
+    manifestRuntimeSignalDominates(primary) ||
     runtimeDominates(primary, rel, [entry.file, entry.asset].filter(Boolean).join('\n'), { allowSmallRuntime: false });
 
   if (entry.embeddedRuntimeCategory) addScore(scores, RUNTIME_CATEGORY_PACKAGES[entry.embeddedRuntimeCategory], 'embedded-runtime-category', entry.embeddedRuntimeCategory, 10);
@@ -455,7 +468,7 @@ function scoreSplitAsset(entry) {
 
   if (/fillet|\.forge\.js|model-project/i.test(rel)) addScore(scores, 'model-project', 'filename', rel, 8);
   if (/EditorApp|CodeEditor|FileExplorer|ParamPanel|ViewPanel|ExportPanel|Monaco/i.test(rel)) addScore(scores, 'editor', 'filename', rel, 4);
-  if (/renderSceneState|cameraState|Canvas|OrbitControls|SceneConfigurator|state-context/i.test(rel)) addScore(scores, 'viewport', 'filename', rel, 4);
+  if (!dominantRuntime && /renderSceneState|cameraState|Canvas|OrbitControls|SceneConfigurator|state-context/i.test(rel)) addScore(scores, 'viewport', 'filename', rel, 4);
   if (/evalWorker|solver|manifold|opencascade|cad|kernel/i.test(rel)) addScore(scores, 'cad-kernel', 'filename', rel, 4);
   if (/app-|vendor-react|app-routes|router|auth/i.test(rel)) addScore(scores, 'app-shell', 'filename', rel, 4);
 
@@ -676,12 +689,18 @@ function assessReadiness(entry) {
   if (entry.declarations?.length) score += 0.06;
   if (/exports\.js$|app-routes|state-|context|models|router|canvas|editor/i.test(entry.file || '')) score += 0.1;
   if (entry.exportSymbols?.length) score += Math.min(0.12, entry.exportSymbols.length / 100);
-  if (runtime && runtimeDominates(runtime, entry.asset || entry.file || '', [entry.file, entry.asset].filter(Boolean).join('\n'), { allowSmallRuntime: false })) {
+  let preserveFirstRuntime = false;
+  if (runtime && (
+    manifestRuntimeSignalDominates(runtime) ||
+    runtimeDominates(runtime, entry.asset || entry.file || '', [entry.file, entry.asset].filter(Boolean).join('\n'), { allowSmallRuntime: false })
+  )) {
     score -= runtime.category === 'domain-runtime' || runtime.category === 'render-runtime' ? 0.04 : 0.14;
     blockers.push(`runtime signal: ${runtime.id}`);
+    preserveFirstRuntime = manifestRuntimeSignalDominates(runtime);
   }
   if (entry.embeddedRuntimeCategory) score -= 0.12;
   if (entry.fragmentOf) blockers.push(`fragment of ${entry.fragmentOf}`);
+  if (preserveFirstRuntime) score = Math.min(score, 0.5);
 
   score = Math.max(0.05, Math.min(0.95, score));
   const label = score >= 0.72 ? 'source-like'
@@ -1033,7 +1052,9 @@ function renderRecoveryTodoMarkdown(audit, extractionPlan, options) {
 
   lines.push('## Done Criteria', '');
   lines.push('- Runtime/vendor fragments have wrapper or classifier decisions.');
+  lines.push('- Runtime boundaries are explicitly classified as `source-backed`, `preserve-first`, `retired-vendor-runtime`, or `retired-false-positive` before declaring package recovery complete.');
   lines.push('- Source-like candidates are grouped by package evidence before variable renaming.');
+  lines.push('- Captured JSON API endpoints used by the runtime are replayed by `scripts/serve-public.mjs`; verify query-shaped assets such as Nuxt Icon collections.');
   lines.push('- Any jsmap heuristic changes are covered by `npm run test:recovery-heuristics`.');
   lines.push('- The original app still runs from `public/` or an equivalent served copy.');
   lines.push('');
@@ -1235,6 +1256,7 @@ async function writeWorkspace(outputDir, boundaries, dependencies, options, extr
     workspaces: ['packages/*'],
     scripts: {
       recover: 'node ./scripts/refresh-recovery.mjs',
+      serve: 'node ./scripts/serve-public.mjs',
     },
     dependencies: depMap,
   });
@@ -1306,6 +1328,137 @@ async function writeWorkspace(outputDir, boundaries, dependencies, options, extr
     path.join(outputDir, 'scripts/refresh-recovery.mjs'),
     [
       `console.log(${JSON.stringify(`Run this from the jsmap repo to refresh:\nnode scripts/jsmap.cjs recover ${options.inputDir} ${outputDir} --force${options.repairWasm ? ' --repair-wasm' : ''} --recovery-mode ${options.recoveryMode || 'balanced'} --large-js-mode ${options.largeJsMode || 'preserve'} --module-granularity ${options.moduleGranularity || 'declarations'} --engine ${options.engine || 'both'}`)});`,
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  await fsp.writeFile(
+    path.join(outputDir, 'scripts/serve-public.mjs'),
+    [
+      "import http from 'node:http';",
+      "import { createReadStream } from 'node:fs';",
+      "import { readdir, readFile, stat } from 'node:fs/promises';",
+      "import path from 'node:path';",
+      "import { fileURLToPath } from 'node:url';",
+      '',
+      "const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');",
+      "const captureBases = ['', 'madera'];",
+      "const port = Number(process.env.PORT || process.argv[2] || 4173);",
+      "const types = new Map([",
+      "  ['.css', 'text/css; charset=utf-8'],",
+      "  ['.html', 'text/html; charset=utf-8'],",
+      "  ['.js', 'text/javascript; charset=utf-8'],",
+      "  ['.json', 'application/json; charset=utf-8'],",
+      "  ['.mjs', 'text/javascript; charset=utf-8'],",
+      "  ['.svg', 'image/svg+xml'],",
+      "  ['.wasm', 'application/wasm'],",
+      "  ['.woff2', 'font/woff2'],",
+      ']);',
+      '',
+      'function resolveRequest(url) {',
+      "  const requestPath = decodeURIComponent(new URL(url, 'http://localhost').pathname);",
+      "  const safePath = path.normalize(requestPath).replace(/^\\.\\.(?:\\/|\\\\|$)/, '');",
+      "  return path.join(root, safePath === '/' ? 'index.html' : safePath);",
+      '}',
+      '',
+      'async function loadCapturedJsonCollection(apiPath, basename) {',
+      '  const merged = {',
+      '    prefix: basename,',
+      '    icons: {},',
+      '  };',
+      '',
+      '  for (const base of captureBases) {',
+      "    const apiDir = path.join(root, base, apiPath.replace(/^\\/+/, ''));",
+      '    let files;',
+      '    try {',
+      '      files = await readdir(apiDir);',
+      '    } catch {',
+      '      continue;',
+      '    }',
+      '    for (const file of files.filter((item) =>',
+      "      item === `${basename}.json` || item.startsWith(`${basename} (`) && item.endsWith('.json'),",
+      '    )) {',
+      "      const collection = JSON.parse(await readFile(path.join(apiDir, file), 'utf8'));",
+      '      if (collection.prefix && collection.prefix !== basename) continue;',
+      '      if (!collection.icons || typeof collection.icons !== \'object\') continue;',
+      '      Object.assign(merged.icons, collection.icons);',
+      '      for (const [key, value] of Object.entries(collection)) {',
+      "        if (key !== 'icons' && merged[key] === undefined) merged[key] = value;",
+      '      }',
+      '    }',
+      '  }',
+      '',
+      '  return merged;',
+      '}',
+      '',
+      'async function maybeServeCapturedJsonApi(req, res) {',
+      "  const url = new URL(req.url || '/', 'http://localhost');",
+      "  const match = url.pathname.match(/^\\/(?:madera\\/)?(.+\\/)([^/]+)\\.json$/);",
+      '  if (!match || !match[1].includes(\'api/\')) return false;',
+      '',
+      '  let collection;',
+      '  try {',
+      '    collection = await loadCapturedJsonCollection(match[1], match[2]);',
+      '  } catch {',
+      '    return false;',
+      '  }',
+      '',
+      "  const requestedIcons = (url.searchParams.get('icons') || '')",
+      "    .split(',')",
+      '    .map((icon) => icon.trim())',
+      '    .filter(Boolean);',
+      '  const icons = requestedIcons.length > 0',
+      '    ? Object.fromEntries(requestedIcons.flatMap((icon) => collection.icons[icon] ? [[icon, collection.icons[icon]]] : []))',
+      '    : collection.icons;',
+      '  const body = JSON.stringify({ ...collection, icons });',
+      '',
+      '  res.statusCode = requestedIcons.length === 0 || Object.keys(icons).length > 0 ? 200 : 404;',
+      "  res.setHeader('Content-Length', Buffer.byteLength(body));",
+      "  res.setHeader('Content-Type', 'application/json; charset=utf-8');",
+      '  res.end(body);',
+      '  return true;',
+      '}',
+      '',
+      'async function resolveExisting(url) {',
+      '  const primary = resolveRequest(url);',
+      '  try {',
+      '    return { filePath: primary, info: await stat(primary) };',
+      '  } catch {',
+      "    const requestPath = decodeURIComponent(new URL(url, 'http://localhost').pathname);",
+      "    for (const base of captureBases.filter(Boolean)) {",
+      "      if (requestPath.startsWith(`/${base}/`)) continue;",
+      "      const fallbackPath = path.join(root, base, path.normalize(requestPath).replace(/^\\.\\.(?:\\/|\\\\|$)/, ''));",
+      '      try {',
+      '        return { filePath: fallbackPath, info: await stat(fallbackPath) };',
+      '      } catch {}',
+      '    }',
+      "    throw new Error('Not found');",
+      '  }',
+      '}',
+      '',
+      'const server = http.createServer(async (req, res) => {',
+      '  try {',
+      '    if (await maybeServeCapturedJsonApi(req, res)) return;',
+      '',
+      '    let { filePath, info } = await resolveExisting(req.url || \'/\');',
+      '    if (info.isDirectory()) {',
+      "      filePath = path.join(filePath, 'index.html');",
+      '      info = await stat(filePath);',
+      '    }',
+      "    res.setHeader('Content-Length', info.size);",
+      "    res.setHeader('Content-Type', types.get(path.extname(filePath)) || 'application/octet-stream');",
+      '    createReadStream(filePath).pipe(res);',
+      '  } catch {',
+      '    res.statusCode = 404;',
+      "    res.end('Not found');",
+      '  }',
+      '});',
+      '',
+      "server.listen(port, '127.0.0.1', () => {",
+      '  const address = server.address();',
+      "  const actualPort = typeof address === 'object' && address ? address.port : port;",
+      "  console.log(`Serving recovered public runtime at http://127.0.0.1:${actualPort}/`);",
+      '});',
       '',
     ].join('\n'),
     'utf8',
@@ -1471,6 +1624,8 @@ async function main() {
       '# jsmap Recovered Project',
       '',
       'This workspace was generated by `jsmap recover`.',
+      '',
+      'Run `npm run serve` to serve the preserved app from `public/`.',
       '',
       '- `public/` preserves the original captured runtime.',
       '- `recovery/deobfuscated/` contains deobfuscated snapshots.',

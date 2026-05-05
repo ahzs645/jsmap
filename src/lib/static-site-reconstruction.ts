@@ -463,7 +463,6 @@ function buildAstroScaffold(
   routes: ExtractedRoute[],
   layout: ExtractedLayoutElements,
   styles: ExtractedStyles,
-  _bundleRoles: JsBundleRole[],
 ): { outputFiles: ReconstructionOutputFile[]; manifest: ReconstructedManifest } {
   const outputFiles: ReconstructionOutputFile[] = [];
 
@@ -1107,7 +1106,6 @@ export function reconstructStaticSite(
       routes,
       layout,
       styles,
-      bundleRoles,
     );
     outputFiles = scaffold.outputFiles;
     manifest = scaffold.manifest;

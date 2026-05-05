@@ -6,6 +6,9 @@
 - Use `--fetch-missing <asset-base-url>` when dynamic chunks were not captured locally.
 - Use `--write --build-check` only after reviewing the promotion plan. The build check validates generated promoted modules are parseable and included in the Vite build; it does not prove runtime correctness.
 - Keep recovered runtime entries as the source of truth until promoted modules are imported through tested adapters.
+- Treat `public/` as the preserved runnable capture. Do not mutate it except for explicit asset repair; make serving fixes in generated tooling such as `scripts/serve-public.mjs`.
+- When declaring a recovered package workspace usable, distinguish `source-backed`, `preserve-first`, `retired-vendor-runtime`, and `retired-false-positive` boundaries. A runtime package is not unfinished merely because a generated/vendor runtime remains preserved, but it needs evidence and a replacement/retirement note.
+- Browser smoke tests should include runtime API replay checks. Static mirrors can contain query-shaped API captures, for example Nuxt Icon JSON collections saved as `lucide.json`, `lucide (1).json`, etc.; generated servers should replay those endpoints instead of serving only the basename file.
 
 ## Promotion Guidance
 
@@ -13,6 +16,7 @@
 - Treat `create-export-facade` as an API bridge, not recovered source.
 - Treat compiler, WASM, worker, and vendor/runtime chunks as wrap-or-replace boundaries unless replacing that runtime is explicitly the goal.
 - Do not manually rename or extract large vendor internals before checking `stats` for package replacement candidates.
+- For Nuxt/Vue bootstraps, look for app-facing metadata before retiring the framework runtime boundary: `useHead`/SEO setup, root app copy, error page copy, build metadata, runtime config, and route shell constants are often stable source candidates even when the hydration runtime is generated vendor code.
 
 ## Source Restructuring
 
