@@ -16,6 +16,12 @@
  *   promote-apply <linked-dir> [--dry-run|--write]     Generate promotion scaffold files
  *   stats      <recovery-or-linked-dir> [--json]       Summarize recovery size, packages, and leftovers
  *   recover-workflow <recovery-dir> [linked-dir]       Rebuild, plan, preview, build, and report
+ *   structure-plan <linked-dir>                        Generate RECOVERY_STRUCTURE guide
+ *   roadmap <linked-dir>                               Generate ordered recovery work packets
+ *   integrate <linked-dir>                             Wire promoted modules and vendor adapters
+ *   runtime-patch <linked-dir>                         Plan runtime replacement adapters
+ *   rename-plan <linked-dir>                           Suggest conservative local symbol renames
+ *   rename-apply <linked-dir>                          Apply reviewed low-risk rename suggestions
  *   analyze     <directory>                            Analyze bundles locally (requires tsx)
  *   process     <input-dir> [output-dir] [--force]    Chain: deobfuscate -> split large files -> reconstruct
  *
@@ -116,7 +122,39 @@ Commands:
       Run the practical human/agent recovery loop in one command:
         rebuild -> stats -> promote-plan -> promote-apply dry-run
         -> optional --write build-check -> npm run build -> final stats/report.
-      Options: --limit N, --actions <comma-list>, --write
+      Options: --limit N, --actions <comma-list>, --write,
+               --integrate, --integrate-write, --integrate-install,
+               --integrate-vendor-mode metadata|lazy|imports
+
+  structure-plan <linked-rebuild-dir> [--out <file-prefix>]
+      Generate RECOVERY_STRUCTURE.md/json with target buckets such as src/app,
+      src/editor, src/viewport, src/cad-kernel, src/model-runtime,
+      src/workers, src/vendor-boundaries, and src/wasm.
+
+  roadmap <linked-rebuild-dir> [--top N] [--out <file-prefix>]
+      Generate RECOVERY_ROADMAP.md/json: ordered agent/human work packets for
+      promoting app-owned modules, wrapping/replacing vendor/runtime packages,
+      moving promoted code into source buckets, and renaming safely.
+
+  integrate <linked-rebuild-dir> [--dry-run|--write] [--vendor-mode metadata|lazy|imports]
+      Generate or write integration scaffolds that import promoted modules,
+      create vendor replacement adapters, update package.json dependency
+      candidates, and optionally run npm install/build as the human/agent
+      fix loop. Options: --install, --build-check, --build-check-max-kb N,
+      --auto-downgrade-on-oversize, --out <file-prefix>
+
+  runtime-patch <linked-rebuild-dir> [--out <file-prefix>] [--json]
+      Generate runtime-replacement-plan.json/md with extractable payloads,
+      replaceable inline runtime callbacks, suggested adapter targets, evidence,
+      and reviewable before/after snippets. Starts with conservative editor
+      runtime heuristics such as Monaco type/theme/command setup.
+
+  rename-plan <linked-rebuild-dir> [--scope promoted|recovered] [--top N]
+      Suggest conservative local variable/parameter renames with confidence,
+      evidence, risk, and minifiedAlias metadata. Defaults to promoted modules.
+
+  rename-apply <linked-rebuild-dir> [--plan <file>] [--dry-run|--write] [--min-confidence N]
+      Apply only reviewed low-risk rename suggestions from recovery-rename-plan.json.
 
   analyze <directory>
       Analyze bundles locally (requires tsx/node with TS support).
@@ -148,6 +186,12 @@ Examples:
   node scripts/jsmap.cjs promote-apply ./recovered-project-linked --dry-run --limit 5
   node scripts/jsmap.cjs stats ./recovered-project-linked
   node scripts/jsmap.cjs recover-workflow ./recovered-project ./recovered-project-linked --force --fetch-missing https://example.com/assets/ --write
+  node scripts/jsmap.cjs structure-plan ./recovered-project-linked
+  node scripts/jsmap.cjs roadmap ./recovered-project-linked
+  node scripts/jsmap.cjs integrate ./recovered-project-linked --dry-run
+  node scripts/jsmap.cjs runtime-patch ./recovered-project-linked
+  node scripts/jsmap.cjs rename-plan ./recovered-project-linked --scope promoted
+  node scripts/jsmap.cjs rename-apply ./recovered-project-linked --dry-run
   node scripts/jsmap.cjs process ./snapshot-output ./clean-output --force
 `);
 }
@@ -440,6 +484,30 @@ function main() {
     case 'recover-workflow':
     case 'workflow':
       runScript('recover-workflow.cjs', subArgs);
+      break;
+    case 'structure-plan':
+    case 'recovery-structure':
+      runScript('structure-plan.cjs', subArgs);
+      break;
+    case 'roadmap':
+    case 'recovery-roadmap':
+      runScript('recovery-roadmap.cjs', subArgs);
+      break;
+    case 'integrate':
+    case 'integration':
+    case 'recovery-integrate':
+      runScript('integrate-recovery.cjs', subArgs);
+      break;
+    case 'runtime-patch':
+    case 'runtime-replacement-plan':
+    case 'adapter-promote':
+      runScript('runtime-patch-plan.cjs', subArgs);
+      break;
+    case 'rename-plan':
+      runScript('rename-plan.cjs', subArgs);
+      break;
+    case 'rename-apply':
+      runScript('rename-apply.cjs', subArgs);
       break;
 
     case 'analyze':

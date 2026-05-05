@@ -6,7 +6,7 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 
 function printUsage() {
-  console.error('Usage: jsmap recover-workflow <recovery-dir> [linked-dir] [--force] [--fetch-missing <asset-base-url>] [--limit N] [--write] [--actions a,b,c]');
+  console.error('Usage: jsmap recover-workflow <recovery-dir> [linked-dir] [--force] [--fetch-missing <asset-base-url>] [--limit N] [--write] [--actions a,b,c] [--integrate] [--integrate-write] [--integrate-install] [--integrate-build-check-max-kb N] [--integrate-auto-downgrade]');
 }
 
 function parseArgs(argv) {
@@ -16,6 +16,12 @@ function parseArgs(argv) {
     limit: 12,
     write: false,
     actions: null,
+    integrate: false,
+    integrateWrite: false,
+    integrateInstall: false,
+    integrateVendorMode: 'lazy',
+    integrateBuildCheckMaxKb: null,
+    integrateAutoDowngrade: false,
   };
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
@@ -25,6 +31,12 @@ function parseArgs(argv) {
     else if (arg === '--limit') flags.limit = Number(argv[++i]);
     else if (arg === '--write') flags.write = true;
     else if (arg === '--actions') flags.actions = argv[++i];
+    else if (arg === '--integrate') flags.integrate = true;
+    else if (arg === '--integrate-write') flags.integrateWrite = true;
+    else if (arg === '--integrate-install') flags.integrateInstall = true;
+    else if (arg === '--integrate-vendor-mode') flags.integrateVendorMode = argv[++i];
+    else if (arg === '--integrate-build-check-max-kb') flags.integrateBuildCheckMaxKb = Number(argv[++i]);
+    else if (arg === '--integrate-auto-downgrade') flags.integrateAutoDowngrade = true;
     else if (arg === '--help' || arg === '-h') {
       printUsage();
       process.exit(0);
@@ -32,6 +44,10 @@ function parseArgs(argv) {
     else throw new Error(`Unknown flag: ${arg}`);
   }
   if (!Number.isFinite(flags.limit) || flags.limit <= 0) throw new Error('--limit must be a positive number');
+  if (!['metadata', 'imports', 'lazy'].includes(flags.integrateVendorMode)) throw new Error('--integrate-vendor-mode must be metadata, lazy, or imports');
+  if (flags.integrateBuildCheckMaxKb != null && (!Number.isFinite(flags.integrateBuildCheckMaxKb) || flags.integrateBuildCheckMaxKb <= 0)) {
+    throw new Error('--integrate-build-check-max-kb must be a positive number');
+  }
   return { flags, positional };
 }
 
@@ -87,6 +103,15 @@ async function main() {
   runCommand('vite build check', 'npm', ['run', 'build'], linkedDir);
   run('stats after build', [jsmap, 'stats', linkedDir, '--out', path.join(reportDir, 'stats-after')], process.cwd());
 
+  if (flags.integrate || flags.integrateWrite) {
+    const integrateArgs = [jsmap, 'integrate', linkedDir, flags.integrateWrite ? '--write' : '--dry-run', '--vendor-mode', flags.integrateVendorMode, '--out', path.join(reportDir, 'integration-plan')];
+    if (flags.integrateWrite) integrateArgs.push('--build-check');
+    if (flags.integrateInstall) integrateArgs.push('--install');
+    if (flags.integrateBuildCheckMaxKb != null) integrateArgs.push('--build-check-max-kb', String(flags.integrateBuildCheckMaxKb));
+    if (flags.integrateAutoDowngrade) integrateArgs.push('--auto-downgrade-on-oversize');
+    run(flags.integrateWrite ? 'integration write' : 'integration dry-run', integrateArgs, process.cwd());
+  }
+
   const summary = [
     '# jsmap Recover Workflow Report',
     '',
@@ -99,6 +124,9 @@ async function main() {
     '- `recovery-workflow/promotion-plan.md`',
     '- `recovery-workflow/promote-preview/promotion-apply-preview.json`',
     '- `recovery-workflow/stats-after.md`',
+    flags.integrate || flags.integrateWrite ? '- `recovery-workflow/integration-plan.md`' : '',
+    flags.integrateWrite ? '- `RECOVERY_INTEGRATION.md`' : '',
+    flags.integrateWrite ? '- `recovery-integration-manifest.json`' : '',
     flags.write ? '- `promotion-apply-manifest.json`' : '- write mode was not enabled',
     flags.write ? '- `src/promoted/__build_check__.js`' : '',
     '',

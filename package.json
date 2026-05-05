@@ -14,11 +14,13 @@
     "promote-plan": "node scripts/jsmap.cjs promote-plan",
     "promote-apply": "node scripts/jsmap.cjs promote-apply",
     "stats": "node scripts/jsmap.cjs stats",
+    "runtime-patch": "node scripts/jsmap.cjs runtime-patch",
     "fixtures:rollup": "node scripts/build-rollup-recovery-fixtures.mjs",
     "lint": "eslint .",
     "preview": "vite preview",
     "test:bundle-recovery": "node --experimental-strip-types scripts/test-rollup-recovery-fixtures.mjs",
     "test:recovery-heuristics": "node scripts/test-recovery-heuristics.cjs",
+    "test:runtime-patch": "node scripts/test-runtime-patch-plan.cjs",
     "split:bundle": "node scripts/split-bundle-ast.cjs"
   },
   "dependencies": {

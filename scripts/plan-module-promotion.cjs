@@ -10,19 +10,21 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 
 function printUsage() {
-  console.error('Usage: jsmap promote-plan <linked-rebuild-dir> [--top N] [--out <file-prefix>]');
+  console.error('Usage: jsmap promote-plan <linked-rebuild-dir> [--top N] [--out <file-prefix>] [--focus <file-or-symbol>]');
 }
 
 function parseArgs(argv) {
   const flags = {
     top: 40,
     out: null,
+    focus: null,
   };
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--top') flags.top = Number(argv[++i]);
     else if (arg === '--out') flags.out = argv[++i];
+    else if (arg === '--focus') flags.focus = argv[++i];
     else if (arg === '--help' || arg === '-h') {
       printUsage();
       process.exit(0);
@@ -242,6 +244,99 @@ function toLeafCandidate(part, leaf) {
   };
 }
 
+function candidateMatchesFocus(candidate, focus) {
+  if (!focus) return true;
+  const needle = focus.toLowerCase();
+  const haystack = [
+    candidate.file,
+    candidate.entry,
+    candidate.chunk,
+    candidate.suggestedModulePath,
+    ...(candidate.declarations || []),
+    ...(candidate.exports || []),
+    candidate.leafCandidate?.name,
+  ].filter(Boolean).join('\n').toLowerCase();
+  return haystack.includes(needle);
+}
+
+function lineNumberAt(text, index) {
+  return text.slice(0, index).split('\n').length;
+}
+
+function scanFocusedSource(root, file) {
+  const full = path.join(root, file);
+  if (!fs.existsSync(full)) return [];
+  const text = fs.readFileSync(full, 'utf8');
+  const declarations = [];
+  const pattern = /(?:^|\n)(?:function\s+([A-Za-z_$][\w$]*)\s*\(|const\s+([A-Za-z_$][\w$]*)\s*=)/g;
+  for (const match of text.matchAll(pattern)) {
+    const name = match[1] || match[2];
+    if (!name || /^_|^[A-Za-z_$][\w$]{0,2}$/.test(name) || /\$/.test(name)) continue;
+    declarations.push({
+      name,
+      line: lineNumberAt(text, match.index + (match[0].startsWith('\n') ? 1 : 0)),
+    });
+  }
+  return declarations;
+}
+
+function inferFocusedPackets(candidates, focus, root) {
+  if (!focus) return [];
+  const packets = [];
+  const byFile = new Map();
+  for (const candidate of candidates) {
+    if (!candidateMatchesFocus(candidate, focus)) continue;
+    if (!byFile.has(candidate.file)) byFile.set(candidate.file, []);
+    byFile.get(candidate.file).push(candidate);
+  }
+  for (const [file, items] of byFile) {
+    const declarations = new Set(items.flatMap((item) => item.declarations || []));
+    const externalIdentifiers = new Set(items.flatMap((item) => item.externalIdentifiers || []));
+    const ranges = items.map((item) => item.sourceRange).filter(Boolean);
+    const minLine = ranges.length ? Math.min(...ranges.map((range) => range[0])) : null;
+    const maxLine = ranges.length ? Math.max(...ranges.map((range) => range[1])) : null;
+    const helperNames = [...declarations].filter((name) =>
+      /^(?:is|has|get|set|normalize|collect|build|derive|format|match|confirm|key|pluralize|smart|wait)/.test(name) ||
+      /^[A-Z0-9_]+$/.test(name)
+    );
+    const componentNames = [...declarations].filter((name) => /^[A-Z][A-Za-z0-9_$]*$/.test(name));
+    const sourceDeclarations = scanFocusedSource(root, file);
+    const sourceHelpers = sourceDeclarations
+      .filter((item) => /^(?:is|has|get|set|normalize|collect|build|derive|format|match|confirm|key|pluralize|smart|wait|doFetch|publishedFilesForProject)/.test(item.name))
+      .map((item) => `${item.name}:${item.line}`);
+    const sourceComponents = sourceDeclarations
+      .filter((item) => /^[A-Z][A-Za-z0-9_$]*$/.test(item.name))
+      .map((item) => `${item.name}:${item.line}`);
+    packets.push({
+      file,
+      sourceRange: minLine == null ? null : [minLine, maxLine],
+      suggestedBuckets: suggestFocusBuckets(file, declarations),
+      safeFirstExtractions: [...new Set([...sourceHelpers, ...helperNames])].slice(0, 24),
+      componentCandidates: [...new Set([...sourceComponents, ...componentNames])].slice(0, 24),
+      dependenciesToPreserve: [...externalIdentifiers].filter((name) =>
+        /^(?:reactExports|jsxRuntimeExports|React|use[A-Z]|authFetch|showToast|fileSystem|navigate|window|document|navigator|URL|Blob|CSS|confirm)$/.test(name)
+      ).slice(0, 32),
+      recommendedOrder: [
+        'Extract pure helpers/constants first.',
+        'Wrap store/browser dependencies behind explicit adapter parameters.',
+        'Promote small UI components before large tree/editor shells.',
+        'Wire promoted modules through the linker or an adapter, then run build and browser smoke.',
+      ],
+    });
+  }
+  return packets;
+}
+
+function suggestFocusBuckets(file, declarations) {
+  const names = [...declarations].join(' ');
+  if (/FileExplorer|FileSwitcher|ProjectSelector|ProjectPicker|isMeshFile|isSvgFile/.test(names) || /EditorApp/i.test(file)) {
+    return ['src/editor/file-types.js', 'src/editor/file-tree.js', 'src/editor/file-switcher.js', 'src/editor/project-selector.js'];
+  }
+  if (/Viewport|Camera|Scene|Orbit|Grid/.test(names)) return ['src/viewport'];
+  if (/Worker|wasm|kernel|solver/i.test(file + names)) return ['src/vendor-boundaries', 'src/wasm'];
+  return ['src/promoted'];
+}
+
 function markdownPlan(plan) {
   const lines = [];
   lines.push('# jsmap Module Promotion Plan');
@@ -268,6 +363,24 @@ function markdownPlan(plan) {
   lines.push('8. Validate browser/Vite candidates in Vite, not as bare Node imports, when the plan mentions browser/runtime categories.');
   lines.push('9. After each promotion, run `npm run link`, `npm run build`, and a browser smoke test for the recovered route.');
   lines.push('');
+  if (plan.focus) {
+    lines.push('## Focus Packets');
+    lines.push('');
+    lines.push(`Focus: \`${plan.focus}\``);
+    lines.push('');
+    for (const packet of plan.focusPackets || []) {
+      lines.push(`### ${packet.file}`);
+      lines.push('');
+      if (packet.sourceRange) lines.push(`- Source range: ${packet.sourceRange.join('-')}`);
+      lines.push(`- Suggested buckets: ${packet.suggestedBuckets.map((item) => `\`${item}\``).join(', ')}`);
+      if (packet.safeFirstExtractions.length) lines.push(`- Safe first extractions: ${packet.safeFirstExtractions.join(', ')}`);
+      if (packet.componentCandidates.length) lines.push(`- Component candidates: ${packet.componentCandidates.join(', ')}`);
+      if (packet.dependenciesToPreserve.length) lines.push(`- Dependencies to preserve: ${packet.dependenciesToPreserve.join(', ')}`);
+      lines.push('- Recommended order:');
+      for (const item of packet.recommendedOrder) lines.push(`  - ${item}`);
+      lines.push('');
+    }
+  }
   lines.push('## Candidates');
   lines.push('');
   for (const candidate of plan.candidates) {
@@ -308,7 +421,10 @@ async function main() {
       toCandidate(part),
       ...((part.analysis?.leafCandidates || []).map((leaf) => toLeafCandidate(part, leaf))),
     ]);
-  const candidates = allCandidates
+  const focusedCandidates = flags.focus
+    ? allCandidates.filter((candidate) => candidateMatchesFocus(candidate, flags.focus))
+    : allCandidates;
+  const candidates = focusedCandidates
     .sort((a, b) => b.score - a.score || a.file.localeCompare(b.file))
     .slice(0, flags.top);
   const byAction = {};
@@ -321,8 +437,11 @@ async function main() {
     generatedAt: new Date().toISOString(),
     root,
     indexFile: toPosix(path.relative(root, indexFile)),
+    focus: flags.focus,
+    focusPackets: inferFocusedPackets(allCandidates, flags.focus, root),
     summary: {
       totalParts: index.summary?.totalParts || index.parts?.length || 0,
+      focusedCandidates: focusedCandidates.length,
       leafCandidates: allCandidates.filter((candidate) => candidate.recommendedAction === 'extract-leaf-module').length,
       indexedReadiness: index.summary?.byReadiness || {},
       byAction,

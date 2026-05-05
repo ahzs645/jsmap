@@ -32,6 +32,35 @@ Summarize what remains to recover:
 node scripts/jsmap.cjs stats ./recovered-site-linked
 ```
 
+Create the reviewable integration surface for promoted modules and vendor
+replacement adapters. The default vendor mode is `lazy`, which avoids eagerly
+bundling heavy editor/compiler/render packages such as Monaco and Three into
+the build-check bundle:
+
+```bash
+node scripts/jsmap.cjs integrate ./recovered-site-linked --dry-run
+node scripts/jsmap.cjs integrate ./recovered-site-linked --write --install --build-check
+```
+
+Plan runtime replacement adapters before patching recovered entries. This emits
+extractable payloads, callback replacements, suggested adapter targets, evidence,
+and before/after snippets for human/agent review:
+
+```bash
+node scripts/jsmap.cjs runtime-patch ./recovered-site-linked
+node scripts/jsmap.cjs runtime-patch ./recovered-site-linked --apply
+node scripts/jsmap.cjs runtime-patch ./recovered-site-linked --write --build-check
+```
+
+`--apply` is a dry run that writes a manifest with exact-match decisions.
+`--write` requires the same hashes and prefers generated-entry linkers when
+present, patching `scripts/link-recovered-assets.mjs` so regenerated
+`src/recovered-entry/*` files receive payload imports and reviewed replacements
+without rewriting raw `src/recovered-parts/*` evidence. Add `--build-check` to
+run `npm run build` after write mode and record the result in the manifest.
+`--browser-smoke-command <command>` stores a follow-up browser verification
+command for the next human/agent step.
+
 The recovery workspace preserves the original runtime in `public/`, writes
 deobfuscated snapshots to `recovery/deobfuscated/`, splits inspectable chunks into
 `src/recovered-chunks/`, and creates inferred package boundaries under `packages/*`.
@@ -122,6 +151,25 @@ Useful generic signals currently include:
 - vendor/WASM contracts: stats reports package replacement candidates from CDN
   coordinates and symbol evidence, plus WASM files, public paths, loader
   evidence, and `locateFile`/WebAssembly usage
+- structure planning: `structure-plan` writes `RECOVERY_STRUCTURE.md/json` with
+  agent work buckets for app, editor, viewport, CAD kernel, model runtime,
+  workers, vendor boundaries, and WASM
+- recovery roadmap: `roadmap` combines promotion, structure, vendor/WASM, and
+  rename guidance into ordered human/agent work packets with done criteria
+- integration scaffolds: `integrate` imports promoted modules through a registry,
+  creates package replacement adapters under `src/vendor-boundaries/*`, updates
+  `package.json` dependency candidates, and can run install/build so the next
+  human/agent sees concrete failures to fix instead of an abstract todo. Heavy
+  editor/compiler/render packages are generated as lazy adapters even when
+  `--vendor-mode imports` is requested; a future force flag can opt into eager
+  imports for those packages when that is actually wanted.
+- integration diagnostics: `integrate --build-check` records before/after
+  `dist/assets/promotedBuildCheck*.js` sizes, warns above the configured
+  threshold, lists static vendor adapters included in the build-check graph,
+  and can retry with `--auto-downgrade-on-oversize`
+- renaming: `rename-plan` emits conservative local rename suggestions with
+  confidence, evidence, risk, and minified alias metadata; `rename-apply` can
+  apply reviewed low-risk suggestions
 
 Use `--repair-wasm` when a website mirror saved `.wasm` files as text/WAT or placeholder
 responses; jsmap will infer the site origin from HTML metadata and fetch valid binary WASM
@@ -137,6 +185,30 @@ For a practical lost-project recovery loop after `recover`, run:
 
 ```bash
 node scripts/jsmap.cjs recover-workflow ./recovered-project ./recovered-project-linked --force --fetch-missing https://example.com/assets/ --write --limit 12
+node scripts/jsmap.cjs structure-plan ./recovered-project-linked
+node scripts/jsmap.cjs roadmap ./recovered-project-linked
+node scripts/jsmap.cjs integrate ./recovered-project-linked --dry-run
+node scripts/jsmap.cjs rename-plan ./recovered-project-linked --scope promoted
+```
+
+To include integration planning in the one-command workflow:
+
+```bash
+node scripts/jsmap.cjs recover-workflow ./recovered-project ./recovered-project-linked --force --write --integrate
+```
+
+To let jsmap attempt package adapters and expose concrete install/build failures
+for an agent/person to fix:
+
+```bash
+node scripts/jsmap.cjs recover-workflow ./recovered-project ./recovered-project-linked --force --write --integrate-write --integrate-install
+```
+
+To automatically retry static vendor adapters as lazy if the promoted
+build-check bundle exceeds a threshold:
+
+```bash
+node scripts/jsmap.cjs integrate ./recovered-project-linked --write --vendor-mode imports --install --build-check --build-check-max-kb 250 --auto-downgrade-on-oversize
 ```
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.

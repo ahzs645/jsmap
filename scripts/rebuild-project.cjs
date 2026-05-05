@@ -63,6 +63,124 @@ function toPosix(value) {
   return value.replace(/\\/g, '/');
 }
 
+function runtimePatchLinkerHookTemplate() {
+  return String.raw`
+/* jsmap-runtime-patch:start */
+const __jsmapRuntimePatchPlanPaths = [
+  path.join(root, 'runtime-replacement-plan.json'),
+  path.join(root, 'recovery-workflow/runtime-replacement-plan.json'),
+];
+const __jsmapRuntimePatchManifestPaths = [
+  path.join(root, 'runtime-patch-manifest.json'),
+  path.join(root, 'recovery-workflow/runtime-patch-manifest.json'),
+];
+let __jsmapRuntimePatchPlan;
+let __jsmapRuntimePatchManifest;
+
+async function readJsmapRuntimePatchPlan() {
+  if (__jsmapRuntimePatchPlan !== undefined) return __jsmapRuntimePatchPlan;
+  for (const planPath of __jsmapRuntimePatchPlanPaths) {
+    try {
+      __jsmapRuntimePatchPlan = JSON.parse(await fs.readFile(planPath, 'utf8'));
+      return __jsmapRuntimePatchPlan;
+    } catch {}
+  }
+  __jsmapRuntimePatchPlan = null;
+  return null;
+}
+
+async function readJsmapRuntimePatchManifest() {
+  if (__jsmapRuntimePatchManifest !== undefined) return __jsmapRuntimePatchManifest;
+  for (const manifestPath of __jsmapRuntimePatchManifestPaths) {
+    try {
+      __jsmapRuntimePatchManifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+      return __jsmapRuntimePatchManifest;
+    } catch {}
+  }
+  __jsmapRuntimePatchManifest = null;
+  return null;
+}
+
+function decodeJsmapStringLiteral(literal) {
+  try { return JSON.parse(literal); } catch { return null; }
+}
+
+function collectJsmapRuntimePatchActions(plan) {
+  const actions = [];
+  const seen = new Set();
+  const push = (action) => {
+    const key = [action.type, action.sourceFile || '', action.payloadSymbol || '', action.before?.exactHash || ''].join(':');
+    if (seen.has(key)) return;
+    seen.add(key);
+    actions.push(action);
+  };
+  for (const action of plan?.payloadExtractionActions || []) push(action);
+  for (const candidate of plan?.replacementCandidates || []) {
+    for (const action of candidate.actions || []) push(action);
+  }
+  return actions;
+}
+
+function findJsmapPayload(plan, action, symbol) {
+  return (plan?.extractablePayloads || []).find((payload) =>
+    payload.file === action.sourceFile && payload.symbol === symbol
+  ) || {};
+}
+
+function parseJsmapInlinePayload(exact, symbol) {
+  const match = /^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')\s*;\s*$/.exec(exact);
+  if (!match || match[1] !== symbol) return null;
+  const value = decodeJsmapStringLiteral(match[2]);
+  if (typeof value !== 'string') return null;
+  return { symbol: match[1], literal: match[2], value };
+}
+
+function jsmapImportSpecifier(fromFile, toFile) {
+  let specifier = path.relative(path.dirname(fromFile), toFile).replace(/\\/g, '/');
+  if (!specifier.startsWith('.')) specifier = './' + specifier;
+  return specifier;
+}
+
+async function applyJsmapRuntimePatches(entry, text) {
+  const runtimeManifest = await readJsmapRuntimePatchManifest();
+  if (runtimeManifest?.mode !== 'write' || runtimeManifest?.linker?.applyViaLinker !== true) return text;
+  const runtimePlan = await readJsmapRuntimePatchPlan();
+  if (!runtimePlan) return text;
+  let patched = text;
+  const entryPath = path.join(outDir, entry);
+  for (const action of collectJsmapRuntimePatchActions(runtimePlan)) {
+    if (!action?.before?.exact || !action.before.exactHash) continue;
+    const first = patched.indexOf(action.before.exact);
+    if (first < 0) continue;
+    if (patched.indexOf(action.before.exact, first + action.before.exact.length) >= 0) {
+      throw new Error('Runtime patch exact snippet was not unique for ' + action.type + ' in ' + entry);
+    }
+
+    let replacement = action.after?.exact;
+    if (action.type === 'extract-inline-payload') {
+      const declaration = parseJsmapInlinePayload(action.before.exact, action.payloadSymbol);
+      if (!declaration) continue;
+      const payload = findJsmapPayload(runtimePlan, action, declaration.symbol);
+      const moduleFile = payload.suggestedModule || action.targetModule || 'src/runtime-patches/' + declaration.symbol.toLowerCase() + '.js';
+      const modulePath = path.join(root, moduleFile);
+      const moduleText = 'export const ' + declaration.symbol + ' = ' + declaration.literal + ';\\n';
+      await fs.mkdir(path.dirname(modulePath), { recursive: true });
+      const existing = await fs.readFile(modulePath, 'utf8').catch(() => null);
+      if (existing !== null && !existing.includes('export const ' + declaration.symbol + ' = ')) {
+        throw new Error('Runtime patch target exists with incompatible content: ' + moduleFile);
+      }
+      if (existing === null) await fs.writeFile(modulePath, moduleText, 'utf8');
+      replacement = 'import { ' + declaration.symbol + ' } from "' + jsmapImportSpecifier(entryPath, modulePath) + '";';
+    }
+    if (typeof replacement !== 'string') continue;
+    patched = patched.slice(0, first) + replacement + patched.slice(first + action.before.exact.length);
+  }
+  return patched;
+}
+/* jsmap-runtime-patch:end */
+`;
+}
+
 function stripRawSuffix(name) {
   return name.replace(/-raw$/, '');
 }
@@ -496,6 +614,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const plan = JSON.parse(await fs.readFile(path.join(root, 'recovery-link-plan.json'), 'utf8'));
 const outDir = path.join(root, 'src/recovered-entry');
 await fs.mkdir(outDir, { recursive: true });
+${runtimePatchLinkerHookTemplate()}
 
 async function exists(target) {
   try { await fs.access(target); return true; } catch { return false; }
@@ -520,7 +639,7 @@ for (const [entry, config] of Object.entries(plan.entries)) {
     parts.push(\`\\n/* --- \${part.file} L\${part.sourceRange[0]}-L\${part.sourceRange[1]} --- */\`);
     parts.push(normalizeLinkedContent(await fs.readFile(partPath, 'utf8')));
   }
-  await fs.writeFile(path.join(outDir, entry), parts.join('\\n') + '\\n', 'utf8');
+  await fs.writeFile(path.join(outDir, entry), await applyJsmapRuntimePatches(entry, parts.join('\\n') + '\\n'), 'utf8');
 }
 
 for (const [file, exportName] of Object.entries(plan.routeStubs || {})) {
