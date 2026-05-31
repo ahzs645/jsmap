@@ -82,6 +82,27 @@ files under `.jsmap-promote-preview` without changing the runnable rebuild; use
 largest remaining chunks, readiness breakdowns, promotion outputs, and quality
 warnings.
 
+For preserved static runtimes that need to be made operable with fake data,
+use the static harness and shim toolset:
+
+```bash
+node scripts/jsmap.cjs harness ./recovered-site --framework next
+node scripts/jsmap.cjs next-doctor ./recovered-site
+node scripts/jsmap.cjs shim-api ./recovered-site --record
+node scripts/jsmap.cjs shim-ui ./recovered-site
+node scripts/jsmap.cjs verify-static http://127.0.0.1:4173/ --expect-text "App"
+```
+
+`harness` writes a preserved-runtime server with SPA fallbacks, extensionless
+route support, injected request logging, CORS, and generic `_next/data` JSON
+fallbacks. `next-doctor` audits captured Next.js manifests for missing page
+chunks and route data payloads. `shim-api` creates a fake API map plus a browser
+recorder for failed fetch/XHR/beacon/EventSource requests. `shim-ui` writes a
+DOM shim registry/starter for placeholder examples, collapsed panels, intercepted
+static controls, and active row state. `verify-static` smoke-checks a local
+preserved URL and uses Playwright when it is installed, falling back to HTTP
+checks otherwise.
+
 The recovery heuristics are generic. jsmap now scores shared fingerprints for
 frameworks, bundlers, workers, WASM loaders, editor/compiler payloads, and
 domain bridges before assigning package boundaries. The extraction plan includes

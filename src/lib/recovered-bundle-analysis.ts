@@ -1,1 +1,1 @@
-export { recoverBundleGraph } from './recovered-bundle/index';
+export { recoverBundleGraph } from './recovered-bundle/index.ts';

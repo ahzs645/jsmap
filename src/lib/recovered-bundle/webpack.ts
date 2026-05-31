@@ -1,8 +1,8 @@
-import type { AstNode, AstProgram, ModuleDraft, ChunkRecoveryResult, WebpackModuleFactory } from './types';
+import type { AstNode, AstProgram, ModuleDraft, ChunkRecoveryResult, WebpackModuleFactory } from './types.ts';
 import type { RecoveredBundleChunk, RecoveredBundleEdge, RecoveredBundleModuleKind, SourceFile } from '../../types/analysis';
-import { isAstNode, byteLength, baseName, uniqueList, buildLineOffsets, getLineNumber, confidenceLabel } from './utils';
-import { parseProgram, analyzeStatement, collectStatementDeclarations } from './ast-traversal';
-import { deriveSyntheticPath, buildPseudoModuleContent } from './clustering';
+import { isAstNode, byteLength, baseName, uniqueList, buildLineOffsets, getLineNumber, confidenceLabel } from './utils.ts';
+import { parseProgram, analyzeStatement, collectStatementDeclarations } from './ast-traversal.ts';
+import { deriveSyntheticPath, buildPseudoModuleContent } from './clustering.ts';
 
 function isWebpackFactoryFunction(node: AstNode): boolean {
   return (

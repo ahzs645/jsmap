@@ -5,7 +5,7 @@ import {
   MIN_PACKAGE_HINT_LENGTH,
   NON_PACKAGE_WORDS,
   LOCALE_CODE_REGEX,
-} from './constants';
+} from './constants.ts';
 
 export function normalizePackageHint(candidate: string): string | null {
   const clean = candidate.trim().split('?')[0].split('#')[0];

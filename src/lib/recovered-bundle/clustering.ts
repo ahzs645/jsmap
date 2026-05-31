@@ -1,6 +1,6 @@
-import type { StatementInfo, ModuleDraft } from './types';
+import type { StatementInfo, ModuleDraft } from './types.ts';
 import type { RecoveredBundleModuleKind } from '../../types/analysis';
-import { uniqueList, normalizeSlug, baseName } from './utils';
+import { uniqueList, normalizeSlug, baseName } from './utils.ts';
 
 function shouldMergeIntoCurrentCluster(
   currentStatements: StatementInfo[],

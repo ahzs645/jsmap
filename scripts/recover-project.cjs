@@ -1055,6 +1055,130 @@ function renderRecoveryTodoMarkdown(audit, extractionPlan, options) {
   lines.push('- Runtime boundaries are explicitly classified as `source-backed`, `preserve-first`, `retired-vendor-runtime`, or `retired-false-positive` before declaring package recovery complete.');
   lines.push('- Source-like candidates are grouped by package evidence before variable renaming.');
   lines.push('- Captured JSON API endpoints used by the runtime are replayed by `scripts/serve-public.mjs`; verify query-shaped assets such as Nuxt Icon collections.');
+  lines.push('- Preserved SPA runtimes need extensionless route fallback in `scripts/serve-public.mjs`; routes such as `/project/:id` or `/madera/project/:id` should serve the preserved `index.html` while missing asset/API paths still 404.');
+  lines.push('- Captured PocketBase-style APIs should be replayed by the preserved server when mirrored records and files exist; support `getOne` from either `api/collections/<collection>/records/<id>.html` or matching `records.html` items, and serve files from both collection-name and `pbc_<collection>` paths.');
+  lines.push('- Captured API collection payloads that are app route data are either promoted into source modules or documented as preserved runtime data; normalize raw line breaks in mirrored `.html` JSON before parsing.');
+  lines.push('- `npm run preserved:surface` records the captured runtime entry, asset, and API surface before route replacement begins.');
+  lines.push('- Before declaring the recovered app editable again, add a prompt-to-artifact completion audit for the migration objective; map each user requirement to concrete files, commands, reports, and liveness checks, and keep the verdict not-complete while any renderer, cloud, collaboration, or other critical runtime gap remains.');
+  lines.push('- Route replacement can start with read-only summaries powered by framework-free state helpers before porting the full component tree.');
+  lines.push('- Promoted route records should feed source-owned index/detail routes, with direct dev-server URL checks for detail pages.');
+  lines.push('- Low-risk route interactivity such as selection state and zoom controls should move before canvas/WebGL route rendering when recovered helpers exist.');
+  lines.push('- Local edit loops should mutate decoded model data through recovered clamp/validation helpers and regenerate derived summaries before persistence contracts are restored.');
+  lines.push('- After scalar edit loops are stable, structural edits should call recovered model mutation helpers and verify codec round trips plus regenerated CAD, preview, and export surfaces before persistence is restored.');
+  lines.push('- Semantic editor fields such as item type, count, mode, or config values should prefer recovered model setters over direct object patches, with parity proving normalized source data and regenerated summaries.');
+  lines.push('- Recovered snapshot encoders can provide local export envelopes before cloud persistence; verify encode/decode round trips and avoid Node-only byte helpers in browser shells.');
+  lines.push('- Local export should be paired with local import so the source shell can parse its own envelope and replace decoded model state before remote persistence is restored.');
+  lines.push('- Before remote persistence is restored, local/offline save drafts should use recovered app-shell record helpers and verify snapshot payload fields, publish/private/delete patches, collection names, and encoded byte counts without network calls.');
+  lines.push('- Promote a browser-local draft persistence contract before treating live remote writes as required for editability. Verify storage key selection, exported-envelope serialization, recovered decoder round trip, loaded project shape, and network-free save/load/clear behavior.');
+  lines.push('- After local save drafts are stable, source-owned remote request contracts should verify captured API base URLs, collection paths, methods, form fields, patch payloads, public viewer paths, and auth requirements without network calls.');
+  lines.push('- After remote request contracts are stable, add an injectable authenticated fetch client before live API calls; parity should mock fetch to prove missing-auth rejection, bearer headers, JSON patches or form-data fields, and response handling without network calls.');
+  lines.push('- Remote persistence clients should mock-gate both JSON patch requests and multipart snapshot/publish FormData requests; verify snapshot file fields, publish metadata fields, bearer headers, and that multipart bodies do not manually set a `Content-Type` header.');
+  lines.push('- Before live remote persistence execution, add an offline readiness contract for real credentials; verify token presence, API base, request URL alignment, auth header preview, and keep network execution disabled until a human explicitly provides live inputs.');
+  lines.push('- After remote persistence readiness is source-owned, add a guarded live execution harness that requires an explicit enable flag, token env var, API base alignment, and request id before writes, then records skipped or executed PocketBase results as a reproducible report.');
+  lines.push('- If browser-local source persistence is working and live PocketBase writes are fully guarded by credential/enable/request-id checks, promote a remote persistence retirement report/check. Retire live PocketBase as a required editability dependency while preserving the request contract as optional publish/sync evidence.');
+  lines.push('- Before live collaboration is restored, local session/update contracts should wrap recovered CRDT/document helpers and verify update events, origins, encoded state bytes, decoded project shape, and explicit provider/awareness transport gaps.');
+  lines.push('- After local CRDT session contracts are stable, add an injectable provider/awareness adapter before live collaboration transport; parity should mock connect/disconnect, remote update application, awareness state, and explicit URL/auth/session lifecycle gaps.');
+  lines.push('- Before live collaboration transport execution, add an offline readiness contract for live collaboration credentials; verify provider URL, room, token, awareness identity, adapter methods, auth header preview, and keep network execution disabled until a human explicitly provides live inputs.');
+  lines.push('- After collaboration readiness is source-owned, add a guarded live transport harness that requires an explicit enable flag, provider URL, token, awareness identity, and concrete transport module before real provider execution, then records skipped or executed transport results as a reproducible report.');
+  lines.push('- If local Yjs sessions, mock provider/awareness behavior, and the guarded live transport harness are all source-owned, promote a collaboration runtime retirement report/check. Retire live collaboration transport as a required editability dependency while preserving it as optional sync evidence.');
+  lines.push('- Captured style/theme tokens from API records can color source-owned previews before complex viewport/WebGL rendering is ported.');
+  lines.push('- Source-owned 2D/SVG previews from decoded model geometry provide deterministic visual parity before full WebGL viewport replacement.');
+  lines.push('- After deterministic 2D parity exists, add a minimal source-owned 3D preview from decoded geometry before porting preserved WebGL internals; gate box counts, camera target, and recovered viewport package evidence.');
+  lines.push('- Before porting preserved WebGL internals, promote source-owned viewport control contracts such as render mode, assembly/open-door flags, space-module view, and module helper visibility; gate normalized settings and visible source-preview changes.');
+  lines.push('- Promote source-owned viewport camera-state contracts before full camera-control internals; preserve `camera-change` emits and `initial-camera-state` props, then gate deterministic camera presets by proving position changes while scene targets stay stable.');
+  lines.push('- Promote source-owned viewport interaction contracts before full pointer-projection or BVH raycaster ports; preserve selected-id props, pointer listener evidence, `raycastObject3D`, and recovered raycast helpers, then gate deterministic hit/miss selection against source preview geometry.');
+  lines.push('- Promote source-owned viewport scene-state serialization before full renderer lifecycle ports; preserve selected IDs, camera position/target, helper visibility, and render mode fields, then gate JSON round trips for source geometry, camera, render settings, and remaining renderer gaps.');
+  lines.push('- Promote source-owned viewport renderer-lifecycle contracts before porting renderer internals; preserve `setSize`, `render`, `requestAnimationFrame`, and `dispose` evidence, then mock-gate mount, resize, frame render, and cleanup ordering.');
+  lines.push('- Before a full WebGL renderer port, inventory preserved viewport runtime chunks by signal group; record renderer lifecycle, canvas hosting, camera controls, technical rendering, interaction, scene geometry, top chunks, and remaining port gaps so migration is guided by evidence instead of raw bundle searches.');
+  lines.push('- After preserved viewport inventory exists, create a renderer port plan that maps signal groups to source adapter boundaries; include canvas host, renderer lifecycle, camera controls, technical render pass, interaction raycast, and scene geometry adapters, each with preserved chunks and acceptance gates.');
+  lines.push('- Port the canvas-host adapter before deeper renderer internals; preserve `createElement("canvas")`, `querySelector("canvas")`, wrapper validation, and register/unregister target hook evidence, then mock-gate single canvas creation, resize reuse, and clean unregister/dispose behavior.');
+  lines.push('- Port the technical render-pass adapter as a contract before copying shader internals; preserve `technicalRenderPipeline`, `surfaceId`, `outlineExclude`, `MeshBasicNodeMaterial`, and `setMRT` evidence, then mock-gate surface-id output, outline-exclude data, technical ink output, and the render-debug path.');
+  lines.push('- When a preserved technical render pipeline is compact and source-like, promote its semantics before porting full shader internals; extract reserved MRT slots, `surfaceId`/`outlineExclude` behavior, ink uniforms, texel-size updates, and neighborhood kernel offsets into a normal source utility, then gate those semantics from the editable shell.');
+  lines.push('- Port the camera-controls adapter before full OrbitControls behavior; preserve `initial-camera-state`, `camera-change`, `updateProjectionMatrix`, and `lookAt` evidence, then mock-gate initial state, preset-driven position changes, stable targets, projection updates, and camera-change events.');
+  lines.push('- Port the interaction/raycast adapter before full pointer projection or BVH mesh raycasting; preserve `raycastObject3D`, `selected-module-ids`, `Raycaster`, `MeshBVH`, and recovered raycast helper evidence, then mock-gate hit selection, miss clearing, and additive multi-select behavior.');
+  lines.push('- Port the scene-geometry adapter before full mesh/material renderer internals; preserve `BufferGeometry`, `computeVertexNormals`, `Box3`, `BoundingSphere`, and `setFromObject` evidence, then mock-gate box counts, scene JSON round trips, object bounds, normal generation, and bounds stability after edits.');
+  lines.push('- Port the mesh/material graph adapter after scene geometry but before shader nodes, shadows, textures, and post-processing; preserve `Mesh`, `MeshBasicMaterial`, `MeshBasicNodeMaterial`, `material.dispose`, and render-mode material switching evidence, then mock-gate one mesh per geometry, material role mapping, selected emphasis, render-mode material family changes, and disposal ordering.');
+  lines.push('- Port the lighting/environment adapter before shadow shaders and post-processing; preserve `litPreview`, ambient/key light intensities, `HemisphereLight`, `shadowMap`, `FloorShadowCatcher`, and `setClearColor` evidence, then mock-gate render-mode clear colors, deterministic light intensities, lit-mode shadow toggles, mode switching, and cleanup.');
+  lines.push('- Port the render-target/post-processing adapter before shader node graph internals; preserve `setRenderTarget`, `setMRT`, `getTextureNode`, `depth`, `normal`, `surfaceId`, and `outputColorTransform` evidence, then mock-gate target binding order, MRT outputs, texture-node requests, technical/debug post-processing activation, and render-target disposal.');
+  lines.push('- Port the shader-node graph adapter before GPU compiler or shader source internals; preserve `MeshBasicNodeMaterial`, `getTextureNode`, `outputColorTransform`, `needsUpdate`, `normal`, `surfaceId`, and `depth` evidence, then mock-gate node input/output wiring, color-transform disabling, render-mode invalidation, and node graph disposal.');
+  lines.push('- Add a GPU execution readiness contract before live WebGL/WebGPU execution; preserve `createProgram`, `compileShader`, `linkProgram`, `shaderSource`, `createRenderPipeline`, `updateBindings`, `WEBGL_lose_context`, and `loseContext` evidence, then mock-gate canvas/WebGL2 capability checks, shader source availability, program linking readiness, context-loss cleanup, and keep actual GPU execution disabled until explicitly tested.');
+  lines.push('- Add a shader program compile/link contract after GPU readiness and before real draw calls; preserve `createShader`, `shaderSource`, `compileShader`, `createProgram`, `attachShader`, `linkProgram`, `getProgramParameter`, `COMPLETION_STATUS_KHR`, `deleteProgram`, and `deleteShader` evidence, then mock-gate vertex/fragment source descriptors, source-before-compile order, attach-before-link order, async compile polling, cleanup, and keep actual GPU execution disabled.');
+  lines.push('- Add a GPU binding/attribute contract after shader program linking and before draw submission; preserve `createBindings`, `updateBindings`, `updateBinding`, `getBindings`, `createAttribute`, `updateAttribute`, `destroyAttribute`, `bindBuffer`, `bufferData`, `bufferSubData`, `bindVertexArray`, and `uniformGPU` evidence, then mock-gate attribute descriptors per geometry, uniform/texture binding descriptors, dirty attribute updates before binding groups, binding readiness before draw, cleanup, and keep actual GPU execution disabled.');
+  lines.push('- Add a draw submission contract after GPU bindings and before rendered-pixel parity; preserve `drawArrays`, `drawElements`, `drawArraysInstanced`, `drawElementsInstanced`, `multiDrawArraysWEBGL`, `multiDrawElementsWEBGL`, `renderInstances`, `renderMultiDraw`, `renderer.info`, and `getDrawParameters` evidence, then mock-gate one draw descriptor per geometry, draw path selection, render info updates after descriptors, multi-draw as a separate live renderer path, and keep actual GPU execution disabled.');
+  lines.push('- Add a rendered-output/readback readiness contract after draw submission and before claiming pixel parity; preserve `readPixels`, `copyTextureToBuffer`, `copyFramebufferToTexture`, `framebufferTexture2D`, `bindFramebuffer`, `outputColorTransform`, `toDataURL`, `drawingBufferWidth`, `drawingBufferHeight`, and `getDrawingBufferSize` evidence, then mock-gate framebuffer evidence, output color transform, readback API readiness, a pixel diff threshold, and keep real pixel readback disabled until live GPU execution exists.');
+  lines.push('- Add a live renderer harness readiness contract before running real browser/WebGL parity; preserve `requestAnimationFrame`, `getContext`, `webgl2`, `querySelector("canvas")`, `readPixels`, `toDataURL`, `drawingBufferWidth`, and `drawingBufferHeight` evidence, then mock-gate browser target URLs, preserved/editable routes, WebGL2 support, screenshot capture, pixel baselines, and keep live GPU execution disabled until the harness is explicitly run.');
+  lines.push('- Promote live renderer harness readiness into a generated report/check before handing off WebGL work; record blocked inputs, ready preserved/editable routes, disabled live execution, disabled pixel readback, preserved evidence strings, and a remaining renderer gap so future agents can see exactly what is missing before running browser/WebGL parity.');
+  lines.push('- After live renderer harness readiness passes, add a bounded browser/WebGL smoke gate before claiming preserved pixel parity; prefer a query-only smoke route on the real editable app, expose machine-readable canvas status such as renderer ready, WebGL2, drawing buffer size, and scene box count, then capture a headless Chrome screenshot and verify nonblank pixels while keeping the full preserved-runtime pixel diff as a remaining gap.');
+  lines.push('- Browser screenshot smoke checks should use stable criteria, not exact regenerated JSON/Markdown equality. Treat route URLs, renderer-ready flags, WebGL2 status, scene counts, screenshot existence, and nonblank thresholds as the check contract because headless Chrome color counts and timing-derived metrics can drift between valid runs.');
+  lines.push('- Keep browser-smoke generation and check modes separate. Generation mode may launch headless Chrome and write screenshots; check mode should validate saved screenshot artifacts, route liveness, and stable criteria without taking fresh screenshots so recovery gates do not hang or drift on Chrome timing.');
+  lines.push('- Browser smoke harnesses should avoid route false positives from unrelated local dev servers. Use a collision-resistant default port or validate app-specific DOM markers, and require source-renderer markers such as final-composition plan consumption before treating an editable route as valid.');
+  lines.push('- When a preserved viewer route has reusable app chrome around an incomplete or blank renderer, port that chrome as source-owned shell behavior and require browser-smoke DOM markers for the action set. This improves parity without hiding useful source-rendered geometry just to match a broken preserved canvas.');
+  lines.push('- Once preserved SPA route fallback works, capture both preserved-route and editable-route browser screenshots in the smoke report; nonblank preserved screenshots are useful parity evidence, but full WebGL parity stays open until the preserved canvas/render target is directly observed and pixel-diffed.');
+  lines.push('- After dual screenshots exist, add a generated visual-diff baseline that records mean absolute channel difference, RMS difference, changed-pixel ratio, high-delta-pixel ratio, and strict thresholds; the check should pass when the mismatch is measured and documented, not when parity is falsely claimed.');
+  lines.push('- Extend visual baselines with central subject coverage so nonblank UI chrome does not masquerade as renderer parity; record editable/preserved dominant backgrounds, subject coverage ratios, subject bounds, and whether preserved subject visibility is missing before attempting strict pixel diff.');
+  lines.push('- Before expanding custom WebGL probes, prefer existing render-debug utilities such as Spector.js-style frame capture, Chrome DevTools Protocol, and Three.js renderer metadata; translate frame commands, framebuffer attachments, draw buffers, texture bindings, shader/uniform data, render-target resolves, and pixel readbacks into stable recovery reports/checks, then use custom injected probes only to backfill missing evidence.');
+  lines.push('- When custom WebGL probes read offscreen or MRT render targets, sample each color attachment with the correct `readBuffer`, texture format, and pixel type before classifying transparency; `RGBA/UNSIGNED_BYTE` readback can produce `INVALID_OPERATION` on float or RED attachments, so errored readbacks are invalid evidence rather than transparent pixels.');
+  lines.push('- Correlate render-loop framebuffer samples with visual subject coverage before declaring viewport parity. Nonblack offscreen or default-framebuffer pixels prove GPU output exists, but they are not enough when the expected central subject is absent; keep the renderer gap open and inspect camera framing, subject coverage, or final composition.');
+  lines.push('- If data replay, hydration, timing, canvas readback, and render-loop probes all prove the preserved main canvas is blank while the source viewport renders the subject and source-owned chrome, promote an explicit preserved-renderer retirement report/check. Retire strict parity to the broken preserved canvas, keep the preserved runtime as diagnostic evidence, and continue source viewport work against product behavior instead.');
+  lines.push('- Separate helper/gizmo viewport pixels from main-viewport composition in render-loop probes. If default-framebuffer nonblack samples only appear in tiny viewports while full-size default-framebuffer samples stay transparent, classify the next boundary as main viewport composition or camera framing rather than renderer parity.');
+  lines.push('- When helper and main default-framebuffer draws share a program but differ in output, snapshot active texture bindings at sampled draw time. Matching texture bindings move the next boundary toward viewport/framing/composition state; differing texture bindings point to missing or transparent main composition inputs.');
+  lines.push('- For differing composition texture bindings, also record texture allocation metadata and framebuffer attachments. Texture IDs alone are weak evidence; dimensions, allocation source, and attachment targets make it clear whether a missing subject comes from an empty main render target, wrong post-processing input, or viewport/framing state.');
+  lines.push('- After helper/main composition texture differences are found, promote the comparison into a focused boundary report/check; record main and helper composition textures, framebuffer attachments, source dimensions, production draw stats, nonblack sample status, and the next downstream port target so future agents do not have to mine the full render-loop probe.');
+  lines.push('- After a focused main-composition boundary report is stable, add a source-owned composition selection contract before porting the preserved WebGL composition pass; mock-gate helper/main target separation, texture-binding differences, nonblack main inputs, explicit downstream transparency, and keep GPU execution/readback disabled.');
+  lines.push('- Promote stable preserved boundary evidence into a generated source module consumed by the editable app, not only by parity scripts; add a check that compares the source module to the recovery report so UI diagnostics and source contracts cannot drift from preserved evidence.');
+  lines.push('- When the main composition boundary includes blit/resolve evidence, add a source-owned resolve-chain contract before porting shader or final presentation internals; mock-gate main input framebuffers, incoming blits, resolve source framebuffers, primary input framebuffers, primary-input nonblack status, and keep incomplete sample coverage explicit.');
+  lines.push('- If only some main composition inputs have sampled draw-state/nonblack proof, add a source-owned sample-coverage contract; record sampled, unsampled, and nonblack framebuffers separately, and block strict composition parity until every required input has coverage or an explicit replacement.');
+  lines.push('- After a sample-coverage contract identifies unsampled composition inputs, add a coverage-closure plan; list each unresolved framebuffer and the acceptable closure evidence, such as attachment-aware sampled draw readback, source-owned replacement render targets, or explicit retirement of non-color auxiliary inputs, and keep live execution/pixel readback disabled until the closure evidence is actually captured.');
+  lines.push('- Before running an attachment-aware coverage probe, add a source-owned readiness contract; record target framebuffers, preserved route, required WebGL2/readBuffer capabilities, accepted pixel types, and missing browser inputs while keeping live execution and pixel readback disabled.');
+  lines.push('- Promote stable coverage-readiness contracts into generated reports/checks before live browser probes; record unresolved framebuffers, preserved runtime URL, project route, accepted pixel/readBuffer modes, blocked live inputs, and ready-input previews so handoffs do not require mining parity output.');
+  lines.push('- After a coverage-readiness report is stable, add a guarded live readback harness; require an explicit enable flag, browser target URL, WebGL2 confirmation, and concrete probe module before sampling framebuffers. Default checks should record skipped execution and keep strict composition parity blocked.');
+  lines.push('- After the guarded readback harness exists, add a probe-gap report before writing a custom probe module; compare target framebuffers against existing render-loop readback evidence, separate already sampled and unsampled framebuffers, and classify whether the next task is targeted sampling, broader renderer instrumentation, or source-owned replacement.');
+  lines.push('- Render-loop probes should use program+framebuffer sampling keys, not only program IDs, when a preserved renderer reuses one shader/program across multiple render targets. Otherwise early samples can hide later main composition inputs.');
+  lines.push('- When targeted sampling closes all main composition input coverage, regenerate readiness/live-readback/probe-gap reports into a coverage-closed state and move the remaining gap to downstream default-framebuffer composition/presentation parity.');
+  lines.push('- After input coverage closes, add a downstream main presentation boundary report/check; record that main inputs are produced and nonblack, helper default-framebuffer pixels are nonblack, full-size main default-framebuffer pixels remain transparent/missing, strict pixel parity is still open, and the next port target is default-framebuffer composition/presentation rather than input production.');
+  lines.push('- Promote the downstream main presentation boundary into a source-owned default-framebuffer presentation contract before porting shader or composition internals; mock-gate input coverage closure, main/helper default-framebuffer split, missing preserved subject visibility, strict pixel parity still open, and disabled GPU/pixel readback.');
+  lines.push('- After the default-framebuffer presentation contract exists, add a source-owned presentation shader inspection contract; split the next port target into shader/uniforms, viewport/scissor/framing, texture target selection, and alpha/color transform surfaces, and keep live GPU execution disabled until each surface has concrete evidence.');
+  lines.push('- Promote presentation shader inspection contracts into generated reports/checks before porting the final composition pass; list the concrete inspection surfaces, preserved evidence strings/chunks, disabled execution state, and remaining renderer gap so handoffs do not rely on parity stdout.');
+  lines.push('- When shader inspection identifies composition shader/uniform evidence, promote it into a source-owned shader/uniform contract and generated report/check; record default draw program presence, color write state, helper nonblack program IDs, uniform block names and finite/nonzero payload samples, camera/node uniform usage, main/helper output split, and disabled GPU/pixel readback before editing final composition shaders.');
+  lines.push('- When the shader inspection report contains concrete texture target mappings, promote texture target selection into its own source-owned contract and generated report/check; record main versus helper framebuffer sets, prove they are separated, and keep GPU execution disabled before editing final composition shaders.');
+  lines.push('- When shader inspection identifies viewport/scissor/framing evidence, promote it into a source-owned framing contract and generated report/check; record full-size viewport samples, scissor state, finite/nonzero camera-framing fields, main/helper output split, and disabled GPU/pixel readback before editing final composition shaders.');
+  lines.push('- When shader inspection identifies alpha/color transform evidence, promote it into a source-owned alpha/color transform contract and generated report/check; record transparent full-size main output separately from nonblack helper output, subject-visibility mismatch, strict pixel thresholds, and disabled GPU/pixel readback before editing final composition shaders.');
+  lines.push('- After every final-presentation inspection surface is source-owned, assemble them into a source-owned final presentation adapter and generated report/check; consume shader/uniform, texture-selection, framing, and alpha/color contracts, record concrete implementation steps, keep strict preserved pixel parity blocked, and keep GPU/pixel readback disabled until the real source presentation pass is implemented and diffed.');
+  lines.push('- After the final presentation adapter is source-owned, promote an explicit source presentation pass and generated report/check; record the editable canvas output, recovered scene geometry inputs, selected main framebuffer evidence, preserved default-framebuffer reference-only status, disabled GPU/pixel readback, and strict preserved pixel parity block before porting the captured final composition shader.');
+  lines.push('- When the recovered final composition path exposes texture-node and render-target semantics, promote them into a source package helper plus generated report/check before visual parity work; record `getTextureNode("depth"|"normal"|"output")`, `outputColorTransform=false`, render-target bind/unbind lifecycle, main/helper framebuffer mappings, uniform blocks, disabled GPU/pixel readback, and the browser visual-diff gate.');
+  lines.push('- After captured final composition semantics are source-owned, wire them to the browser screenshot and visual-diff artifacts with a generated parity gate; record editable/preserved routes, screenshot files, WebGL readiness, current strict pixel parity, subject-visibility match status, disabled live execution, and an explicit visual-diff rerun requirement after shader/path changes.');
+  lines.push('- After the browser visual parity gate exists, promote a source-owned final composition implementation plan and generated report/check before editing renderer code; record selected main output texture inputs, helper framebuffer separation, output/normal/depth node wiring, recovered uniform-block mapping, `outputColorTransform=false`, disabled execution/readback, current mismatch state, and the required browser smoke/visual-diff rerun after shader/path changes.');
+  lines.push('- Add a source-owned presentation plan after the main composition boundary is source-owned; the editable app may intentionally present deterministic source preview output while preserving captured WebGL composition as reference evidence, and strict preserved pixel parity should stay open until the real composition pass is ported and diffed.');
+  lines.push('- Correlate default-framebuffer composition textures back to their offscreen framebuffer draw samples. If the full-size texture bound into composition is already transparent before the default pass, classify the next boundary as main render-target production rather than post-processing presentation.');
+  lines.push('- When a composition input render target is transparent, keep per-framebuffer production stats for every draw before editing renderer chunks; record draw counts, methods, program IDs, viewport areas, texture input samples, and whether sampled production draws are opaque/nonblack so the next boundary can separate missing render-target production from shader/input semantics.');
+  lines.push('- Also trace production-pass texture inputs back one more framebuffer hop. If the main production pass samples a framebuffer-attached texture whose source framebuffer has no draw stats, classify the boundary as upstream scene/render-target production missing rather than shader color, material, or final composition.');
+  lines.push('- For multisampled render targets, trace `blitFramebuffer` resolve paths from texture framebuffers back to MSAA/renderbuffer source framebuffers. If the resolve source receives full-size draw calls but sampled pixels are transparent, classify the boundary as MSAA source render output rather than missing resolve, final composition, shader color, or material wiring.');
+  lines.push("- For transparent MSAA source output, trace the source program's texture inputs back to their framebuffer producers. If a primary color/G-buffer input receives full-size draws but samples transparent while secondary inputs are nonblank, classify the next boundary as primary color/G-buffer source output rather than MSAA resolve, post-processing, or generic material failure.");
+  lines.push('- If preserved subject coverage is missing, add a preserved-viewer diagnostic gate before rewriting renderer code; verify the public route serves the Nuxt runtime, replayed project record loads, snapshot binary is served, canvas is observed, and classify the remaining issue as data replay, screenshot timing, or renderer/camera/render-target investigation.');
+  lines.push('- If data replay is healthy but preserved subject coverage is still missing, run a multi-delay preserved screenshot timing gate before changing renderer code; capture the preserved viewer at several virtual-time budgets and record whether the subject ever appears. If it does not, treat timing as ruled out and inspect snapshot decode, camera, render loop, or render-target presentation.');
+  lines.push('- After data and timing are ruled out, capture hydrated preserved viewer runtime state before porting deeper WebGL internals; record DOM text, absence of not-found states, Nuxt runtime config, canvas count, main canvas dimensions, and classify the next work as render-loop, camera-target, or render-target presentation.');
+  lines.push('- Browser-derived diagnostic reports should distinguish capture mode from check mode. Capture mode can relaunch Chrome and refresh DOM/screenshot evidence; check mode should validate saved evidence plus route liveness and stable criteria so nondeterministic DOM bytes, canvas timing, or Chrome process behavior do not block recovery gates.');
+  lines.push('- Browser and preserved-viewer checks should own their local server lifecycle or use configured non-conflicting ports. Do not assume `5173` or `4190` belongs to the recovered app; if a port is occupied by another local app, start the editable/preserved server on a configured alternate origin and record that route in the report.');
+  lines.push('- CDP canvas-readback diagnostics should also keep check mode non-capturing. Validate the saved JSON/Markdown report, route liveness, and stable criteria without relaunching Chrome; leave browser execution to generation mode so recovery gates do not hang on stale CDP sessions.');
+  lines.push('- After hydrated runtime state is healthy but the preserved canvas is still blank, add a CDP canvas-readback diagnostic before changing renderer internals; record WebGL context type, drawing buffer size, viewport, `readPixels` samples, `toDataURL` availability, and classify the issue as context/canvas-host, render-loop-or-scene-draw, camera/clear-pass, or presentation/framing.');
+  lines.push('- If CDP readback shows WebGL contexts and transparent pixels, add a pre-hydration render-loop probe before editing minified renderer code; patch `requestAnimationFrame`, `HTMLCanvasElement.getContext`, and WebGL clear/draw/program methods, then classify whether the failure is no render loop, no draw submission, or draw-submitted-but-transparent-output.');
+  lines.push('- Extend render-loop probes with framebuffer routing before blaming presentation; patch `bindFramebuffer` and draw/clear methods, record default-framebuffer versus offscreen-framebuffer draw counts, and classify whether the runtime never presents a render target or draws to the visible framebuffer with transparent shader/material/camera output.');
+  lines.push('- When default-framebuffer draws still read transparent, sample GL draw state before chasing shader internals; record viewport, scissor test/box, color mask, depth/blend/cull flags, current program presence, clear color, and color buffer bits so masked/clipped output can be separated from shader/material/camera output.');
+  lines.push('- For blank preserved outputs with active draw calls, sample a small pixel grid immediately after representative offscreen and default-framebuffer draws instead of trusting only a center pixel; distinguish transparent output from opaque black output: transparent offscreen samples point to scene shader/material/camera output before composition, opaque black samples point more specifically to material, lighting, color, or shader output, and nonblank offscreen samples with transparent default samples point to the composition pass.');
+  lines.push('- Do not let the first sampled draw program dominate preserved WebGL classification. Sample representative draw state per active program, or at least keep later unseen program IDs after the first N draws; if later offscreen and default-framebuffer programs produce nonblack pixels, reclassify from black shader/material output to subject framing, coverage, or final viewer composition.');
+  lines.push('- For render-target coverage, sample representative draw state by program plus framebuffer, not by program alone. Reused composition programs can draw to several framebuffer targets; suppressing later same-program draws can falsely leave main inputs marked unsampled even when attachment-aware readback would close them.');
+  lines.push('- When offscreen samples are opaque black, record active program IDs, uniform upload counts per program, blend factors/equations, depth function, and current program on sampled draws; if the sampled offscreen program has no uniform uploads, treat material/shader input binding as the next boundary before porting broader renderer internals.');
+  lines.push('- For sampled black offscreen programs, also record shader source lengths/previews, attached shader IDs, link status, active uniform count, and active attribute count. A linked program with active uniforms but zero uniform uploads is stronger evidence for missing material/shader input binding than for missing draw submission.');
+  lines.push('- Before porting shader/material internals from a sampled black offscreen program, map `getUniformLocation` calls and uniform uploads back to active uniform names. Active camera/material uniforms with no location requests indicate a binding-discovery gap; locations with no uploads indicate a value-upload gap.');
+  lines.push('- Also trace WebGL2 uniform-buffer paths before declaring uniform locations missing; record `getUniformBlockIndex`, `uniformBlockBinding`, `bindBufferBase`/`bindBufferRange`, and `bufferData`/`bufferSubData` for `UNIFORM_BUFFER`. If uniform blocks are bound and written but output is still opaque black, inspect camera/material/shader-node values rather than draw submission.');
+  lines.push('- Correlate uniform blocks to binding points and concrete buffers at sampled draw time. Global UBO traffic is not enough evidence; the probe should show that the sampled offscreen program blocks are bound to buffers with observed writes before classifying opaque black output as bad camera/material/shader-node values.');
+  lines.push('- Add lightweight UBO payload statistics before judging bound buffers; record last payload previews plus finite, nonzero, min, and max counts per sampled block. Zero-only UBOs point to value generation, while nonzero finite camera/material/object blocks with black pixels point to shader-node/material semantics, lighting/color inputs, or camera/framing values.');
+  lines.push('- For nonzero UBO black output, decode simple std140 uniform-block fields from shader declarations and sampled buffer payloads; record values for alpha/material scalars, camera near/far values, and view/projection/object matrices. Sane nonzero field values rule out missing UBO payloads and move the next boundary to shader-node/material semantics, lighting/color, camera framing, or render-target composition.');
+  lines.push('- After field-level UBO values are sane, parse fragment shader color assignments such as `DiffuseColor = vec4(...)`, alpha multipliers, node output assignments, and final `fragColor` writes. If the sampled program explicitly emits opaque black, classify the next boundary as material/color node wiring before blaming camera matrices or draw submission.');
+  lines.push('- Capture `shaderSource` call stacks for sampled black programs and extract bundle chunk names from those frames. If the stack only reaches the renderer or node-material compiler chunk, treat it as compiler/runtime-origin evidence and add a separate material-creation probe before editing app-level material code.');
+  lines.push('- When UBO payloads are nonzero but sampled output remains black, extract shader declaration and assignment hints from the sampled program. Record uniform block declarations, active uniform names, node-uniform references, camera matrix equations, fragment color/alpha assignments, and discard/output hints before porting shader-node or material semantics.');
+  lines.push('- For injected browser probes generated from Node template strings, double-escape regex whitespace and boundary tokens such as `\\\\s`, `[\\\\s\\\\S]`, and `\\\\b`. A single `\\s` in the outer template can become a literal `s` in the injected browser code and silently corrupt shader/declaration summaries.');
+  lines.push('- For apps with separate private editor and public viewer routes, choose the preserved route that actually owns the captured public runtime surface before evaluating canvas parity; for example, a `/project/:id` editor route may be local-only while `/p/:id` is the public viewer.');
   lines.push('- Any jsmap heuristic changes are covered by `npm run test:recovery-heuristics`.');
   lines.push('- The original app still runs from `public/` or an equivalent served copy.');
   lines.push('');
@@ -1246,6 +1370,356 @@ async function writeJson(filePath, value) {
   await fsp.writeFile(filePath, JSON.stringify(value, null, 2) + '\n', 'utf8');
 }
 
+function preservedRuntimeSurfaceScript() {
+  return String.raw`import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const publicRoot = path.join(root, 'public');
+const outputJson = path.join(root, 'recovery', 'preserved-runtime-surface.json');
+const outputMarkdown = path.join(root, 'recovery', 'PRESERVED_RUNTIME_SURFACE.md');
+const checkMode = process.argv.includes('--check');
+
+function toRepoPath(filePath) {
+  return path.relative(root, filePath).split(path.sep).join('/');
+}
+
+function readText(filePath, fallback = '') {
+  try {
+    return fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return fallback;
+  }
+}
+
+function walk(dir) {
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) return walk(fullPath);
+    if (entry.isFile()) return [fullPath];
+    return [];
+  });
+}
+
+function matchesAll(text, pattern) {
+  return [...text.matchAll(pattern)].map((match) => match[1]).sort();
+}
+
+function findEntryHtml(files) {
+  const htmlFiles = files.filter((file) => /\.html?$/i.test(file));
+  if (!htmlFiles.length) return null;
+
+  const scored = htmlFiles.map((file) => {
+    const html = readText(path.join(root, file));
+    let score = 0;
+    if (html.includes('id="__nuxt"')) score += 100;
+    if (html.includes('id="__next"') || html.includes('id="__NEXT_DATA__')) score += 100;
+    if (/(?:^|\/)index\.html$/i.test(file)) score += 40;
+    if (/<script[^>]+type=["']module["'][^>]+src=["'][^"']+["']/i.test(html)) score += 35;
+    if (/<script[^>]+(?:defer|async)[^>]+src=["'][^"']+["']/i.test(html)) score += 25;
+    if (/<link[^>]+rel=["']stylesheet["'][^>]+href=["'][^"']+["']/i.test(html)) score += 15;
+    if (/_next\/static|\/assets\/|buildId|__NUXT__|__NEXT_DATA__/i.test(html)) score += 20;
+    if (/\/api\//i.test(file)) score -= 60;
+    if (!/<html|<body|<script|<link/i.test(html)) score -= 40;
+    return { file, score };
+  }).sort((a, b) => b.score - a.score || a.file.localeCompare(b.file));
+
+  return scored[0].file;
+}
+
+function extractConfigSummary(html) {
+  const buildId = html.match(/buildId:"([^"]+)"/)?.[1] || null;
+  const baseURL = html.match(/baseURL:"([^"]*)"/)?.[1] || null;
+  const buildAssetsDir = html.match(/buildAssetsDir:"([^"]*)"/)?.[1] || null;
+  const publicConfigKeys = [...html.matchAll(/(?:public:\{|,)([a-zA-Z_$][\w$]*):/g)]
+    .map((match) => match[1])
+    .filter((key) => !['app', 'features', 'three'].includes(key))
+    .sort();
+  return { buildId, baseURL, buildAssetsDir, publicConfigKeys };
+}
+
+function buildReport() {
+  const files = walk(publicRoot).map((filePath) => toRepoPath(filePath)).sort();
+  const entry = findEntryHtml(files);
+  const html = entry ? readText(path.join(root, entry)) : '';
+  const filesByExtension = files.reduce((counts, file) => {
+    const ext = path.extname(file) || '(none)';
+    counts[ext] = (counts[ext] || 0) + 1;
+    return counts;
+  }, {});
+
+  return {
+    generatedAt: new Date(0).toISOString(),
+    publicRoot: 'public',
+    entry,
+    html: {
+      exists: Boolean(entry),
+      nuxtRoot: html.includes('id="__nuxt"'),
+      moduleScripts: matchesAll(html, /<script[^>]+type=["']module["'][^>]+src=["']([^"']+)["']/g),
+      stylesheets: matchesAll(html, /<link[^>]+rel=["']stylesheet["'][^>]+href=["']([^"']+)["']/g),
+      modulePreloads: matchesAll(html, /<link[^>]+rel=["']modulepreload["'][^>]+href=["']([^"']+)["']/g),
+    },
+    config: extractConfigSummary(html),
+    assets: {
+      totalFiles: files.length,
+      filesByExtension,
+      js: files.filter((file) => file.endsWith('.js')),
+      css: files.filter((file) => file.endsWith('.css')),
+      jsonApiCaptures: files.filter((file) => file.includes('/api/') && file.endsWith('.json')),
+      fonts: files.filter((file) => file.includes('/_fonts/') || /\.(woff2?|ttf|otf)$/i.test(file)),
+      favicons: files.filter((file) => /favicon\.(ico|svg|png)$/i.test(file)),
+    },
+  };
+}
+
+function markdownFor(report) {
+  return [
+    '# Preserved Runtime Surface',
+    '',
+    'Generated: ' + report.generatedAt,
+    '',
+    'This report inventories the captured runtime that remains the behavioral',
+    'reference while editable source replaces it.',
+    '',
+    '## Summary',
+    '',
+    '| Item | Value |',
+    '| --- | ---: |',
+    '| Entry | ' + (report.entry || '-') + ' |',
+    '| Entry exists | ' + (report.html.exists ? 'yes' : 'no') + ' |',
+    '| Nuxt root | ' + (report.html.nuxtRoot ? 'yes' : 'no') + ' |',
+    '| Module scripts | ' + report.html.moduleScripts.length + ' |',
+    '| Stylesheets | ' + report.html.stylesheets.length + ' |',
+    '| JS files | ' + report.assets.js.length + ' |',
+    '| CSS files | ' + report.assets.css.length + ' |',
+    '| JSON API captures | ' + report.assets.jsonApiCaptures.length + ' |',
+    '| Fonts | ' + report.assets.fonts.length + ' |',
+    '',
+    '## Config',
+    '',
+    '- Base URL: ' + (report.config.baseURL || '-'),
+    '- Build assets dir: ' + (report.config.buildAssetsDir || '-'),
+    '- Build ID: ' + (report.config.buildId || '-'),
+    '',
+  ].join('\n');
+}
+
+const report = buildReport();
+const jsonText = JSON.stringify(report, null, 2) + '\n';
+const markdownText = markdownFor(report);
+
+if (checkMode) {
+  if (readText(outputJson) !== jsonText || readText(outputMarkdown) !== markdownText) {
+    console.error('Preserved runtime surface is out of date. Run npm run preserved:surface.');
+    process.exit(1);
+  }
+  console.log('Preserved runtime surface is up to date.');
+} else {
+  fs.mkdirSync(path.dirname(outputJson), { recursive: true });
+  fs.writeFileSync(outputJson, jsonText);
+  fs.writeFileSync(outputMarkdown, markdownText);
+  console.log('Wrote ' + toRepoPath(outputJson));
+  console.log('Wrote ' + toRepoPath(outputMarkdown));
+}
+`;
+}
+
+function editableMigrationStatusScript() {
+  return String.raw`import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const outputJson = path.join(root, 'recovery', 'editable-migration-status.json');
+const outputMarkdown = path.join(root, 'recovery', 'EDITABLE_MIGRATION_STATUS.md');
+const checkMode = process.argv.includes('--check');
+
+function readJson(filePath, fallback = null) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return fallback;
+  }
+}
+
+function readText(filePath, fallback = '') {
+  try {
+    return fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return fallback;
+  }
+}
+
+function exists(relativePath) {
+  return fs.existsSync(path.join(root, relativePath));
+}
+
+function toRepoPath(filePath) {
+  return path.relative(root, filePath).split(path.sep).join('/');
+}
+
+function scriptExists(packageJson, scriptName) {
+  return typeof packageJson?.scripts?.[scriptName] === 'string';
+}
+
+function listPackages() {
+  const packagesDir = path.join(root, 'packages');
+  if (!fs.existsSync(packagesDir)) return [];
+  return fs.readdirSync(packagesDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+}
+
+function buildStatus() {
+  const packageJson = readJson(path.join(root, 'package.json'), {});
+  const preservedSurface = readJson(path.join(root, 'recovery', 'preserved-runtime-surface.json'), null);
+  const packages = listPackages();
+  const sourceEntrypoints = ['src/main.jsx', 'src/main.tsx', 'src/main.js', 'src/main.ts'].filter(exists);
+  const sourceFiles = ['src/App.jsx', 'src/App.tsx', 'src/editable-shell-model.js'].filter(exists);
+  const hasEditableShell = exists('index.html') && sourceEntrypoints.length > 0;
+
+  const replacements = [
+    {
+      id: 'normal-dev-shell',
+      status: hasEditableShell ? 'source-owned' : 'not-started',
+      evidence: ['index.html', ...sourceEntrypoints, ...sourceFiles],
+    },
+    {
+      id: 'preserved-surface-inventory',
+      status: preservedSurface?.html?.exists ? 'parity-reference' : 'missing',
+      evidence: ['recovery/preserved-runtime-surface.json', 'npm run preserved:surface:check'],
+    },
+    {
+      id: 'recovered-package-workspace',
+      status: packages.length > 0 ? 'available' : 'missing',
+      evidence: packages.map((name) => 'packages/' + name),
+    },
+    {
+      id: 'editable-parity-gate',
+      status: scriptExists(packageJson, 'editable:parity') ? 'available' : 'recommended-next',
+      evidence: ['scripts/editable-shell-parity.mjs', 'npm run editable:parity'],
+    },
+  ];
+
+  const gates = [
+    'editable:shell-readiness',
+    'preserved:surface:check',
+    'editable:parity',
+    'editable:migration-status:check',
+  ].map((script) => ({
+    script,
+    present: scriptExists(packageJson, script),
+  }));
+
+  return {
+    generatedAt: new Date(0).toISOString(),
+    objective: 'Track preserved-runtime-to-editable-source migration state.',
+    preservedReference: preservedSurface ? {
+      entry: preservedSurface.entry,
+      js: preservedSurface.assets?.js?.length || preservedSurface.assets?.nuxtJs?.length || 0,
+      jsonApiCaptures: preservedSurface.assets?.jsonApiCaptures?.length || 0,
+      buildId: preservedSurface.config?.buildId || preservedSurface.nuxtConfig?.buildId || null,
+    } : null,
+    editableShell: {
+      entry: exists('index.html') ? 'index.html' : null,
+      sourceEntrypoints,
+      sourceFiles,
+      packages,
+    },
+    replacements,
+    gates,
+    remainingGaps: [
+      {
+        id: 'source-owned-routes',
+        reason: 'Add source routes and parity checks once stable route data has been promoted.',
+      },
+      {
+        id: 'source-owned-edits',
+        reason: 'Move low-risk local edit loops through recovered model/editor helpers before remote persistence.',
+      },
+      {
+        id: 'remote-runtime-replacement',
+        reason: 'Keep full framework, renderer, worker, and cloud runtime replacement explicit instead of assuming package importability proves completion.',
+      },
+    ],
+  };
+}
+
+function markdownFor(status) {
+  const replacementRows = status.replacements
+    .map((item) => '| ' + item.id + ' | ' + item.status + ' | ' + (item.evidence.join('<br>') || '-') + ' |')
+    .join('\n');
+  const gateRows = status.gates
+    .map((gate) => '| ' + gate.script + ' | ' + (gate.present ? 'yes' : 'no') + ' |')
+    .join('\n');
+  const gapRows = status.remainingGaps
+    .map((gap) => '| ' + gap.id + ' | ' + gap.reason + ' |')
+    .join('\n');
+
+  return [
+    '# Editable Migration Status',
+    '',
+    'Generated: ' + status.generatedAt,
+    '',
+    status.objective,
+    '',
+    '## Preserved Reference',
+    '',
+    '- Entry: ' + (status.preservedReference?.entry || '-'),
+    '- JS files: ' + (status.preservedReference?.js ?? 0),
+    '- JSON API captures: ' + (status.preservedReference?.jsonApiCaptures ?? 0),
+    '- Build ID: ' + (status.preservedReference?.buildId || '-'),
+    '',
+    '## Editable Shell',
+    '',
+    '- Entry: ' + (status.editableShell.entry || '-'),
+    '- Source entrypoints: ' + (status.editableShell.sourceEntrypoints.join(', ') || '-'),
+    '- Source files: ' + (status.editableShell.sourceFiles.join(', ') || '-'),
+    '- Packages: ' + (status.editableShell.packages.join(', ') || '-'),
+    '',
+    '## Replacement Checklist',
+    '',
+    '| Capability | Status | Evidence |',
+    '| --- | --- | --- |',
+    replacementRows,
+    '',
+    '## Validation Gates',
+    '',
+    '| Gate | Present |',
+    '| --- | --- |',
+    gateRows,
+    '',
+    '## Remaining Gaps',
+    '',
+    '| Gap | Reason |',
+    '| --- | --- |',
+    gapRows,
+    '',
+  ].join('\n');
+}
+
+const status = buildStatus();
+const jsonText = JSON.stringify(status, null, 2) + '\n';
+const markdownText = markdownFor(status);
+
+if (checkMode) {
+  if (readText(outputJson) !== jsonText || readText(outputMarkdown) !== markdownText) {
+    console.error('Editable migration status is out of date. Run npm run editable:migration-status.');
+    process.exit(1);
+  }
+  console.log('Editable migration status is up to date.');
+} else {
+  fs.writeFileSync(outputJson, jsonText);
+  fs.writeFileSync(outputMarkdown, markdownText);
+  console.log('Wrote ' + toRepoPath(outputJson));
+  console.log('Wrote ' + toRepoPath(outputMarkdown));
+}
+`;
+}
+
 async function writeWorkspace(outputDir, boundaries, dependencies, options, extractionPlan, recoveryAudit) {
   const depMap = Object.fromEntries(dependencies.map((dep) => [dep.name, dep.version]));
   await writeJson(path.join(outputDir, 'package.json'), {
@@ -1257,6 +1731,11 @@ async function writeWorkspace(outputDir, boundaries, dependencies, options, extr
     scripts: {
       recover: 'node ./scripts/refresh-recovery.mjs',
       serve: 'node ./scripts/serve-public.mjs',
+      'editable:shell-readiness': 'node ./scripts/editable-shell-readiness.mjs',
+      'preserved:surface': 'node ./scripts/preserved-runtime-surface.mjs',
+      'preserved:surface:check': 'node ./scripts/preserved-runtime-surface.mjs --check',
+      'editable:migration-status': 'node ./scripts/editable-migration-status.mjs',
+      'editable:migration-status:check': 'node ./scripts/editable-migration-status.mjs --check',
     },
     dependencies: depMap,
   });
@@ -1333,16 +1812,83 @@ async function writeWorkspace(outputDir, boundaries, dependencies, options, extr
     'utf8',
   );
   await fsp.writeFile(
+    path.join(outputDir, 'scripts/editable-shell-readiness.mjs'),
+    [
+      "import fs from 'node:fs';",
+      "import path from 'node:path';",
+      "import { fileURLToPath } from 'node:url';",
+      '',
+      "const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');",
+      "const publicDir = path.join(root, 'public');",
+      "const packagesDir = path.join(root, 'packages');",
+      "const editableEntrypoints = ['index.html', 'src/main.js', 'src/main.jsx', 'src/main.ts', 'src/main.tsx'];",
+      '',
+      'function exists(relativePath) {',
+      '  return fs.existsSync(path.join(root, relativePath));',
+      '}',
+      '',
+      'function listPackages() {',
+      '  if (!fs.existsSync(packagesDir)) return [];',
+      '  return fs.readdirSync(packagesDir, { withFileTypes: true })',
+      '    .filter((entry) => entry.isDirectory())',
+      '    .map((entry) => entry.name)',
+      '    .sort();',
+      '}',
+      '',
+      'const packages = listPackages();',
+      'const checks = [',
+      "  ['preserved runtime exists', fs.existsSync(publicDir)],",
+      "  ['package workspace exists', fs.existsSync(packagesDir)],",
+      "  ['recovered packages exist', packages.length > 0],",
+      '];',
+      'const hasEditableEntrypoint = editableEntrypoints.some(exists);',
+      'const failures = checks.filter(([, passed]) => !passed);',
+      '',
+      'if (failures.length > 0) {',
+      '  for (const [label] of failures) console.error(`Editable shell readiness failed: ${label}`);',
+      '  process.exit(1);',
+      '}',
+      '',
+      'const report = {',
+      "  preservedRuntime: 'public/',",
+      '  recoveredPackages: packages,',
+      '  editableEntrypoint: hasEditableEntrypoint',
+      '    ? editableEntrypoints.find(exists)',
+      '    : null,',
+      '  nextStep: hasEditableEntrypoint',
+      "    ? 'Add parity checks that compare the editable shell against the preserved runtime.'",
+      "    : 'Create a normal app shell that imports the lowest-risk source-backed packages first.',",
+      '};',
+      '',
+      "console.log('Editable shell readiness passed.');",
+      'console.log(JSON.stringify(report, null, 2));',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  await fsp.writeFile(
+    path.join(outputDir, 'scripts/preserved-runtime-surface.mjs'),
+    preservedRuntimeSurfaceScript(),
+    'utf8',
+  );
+  await fsp.writeFile(
+    path.join(outputDir, 'scripts/editable-migration-status.mjs'),
+    editableMigrationStatusScript(),
+    'utf8',
+  );
+  await fsp.writeFile(
     path.join(outputDir, 'scripts/serve-public.mjs'),
     [
       "import http from 'node:http';",
-      "import { createReadStream } from 'node:fs';",
+      "import { createReadStream, readdirSync, statSync } from 'node:fs';",
       "import { readdir, readFile, stat } from 'node:fs/promises';",
       "import path from 'node:path';",
       "import { fileURLToPath } from 'node:url';",
       '',
       "const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');",
-      "const captureBases = ['', 'madera'];",
+      "const repoRoot = path.resolve(root, '..');",
+      "const recoveryRoot = path.join(repoRoot, 'recovery', 'deobfuscated');",
+      'const captureBases = discoverCaptureBases();',
       "const port = Number(process.env.PORT || process.argv[2] || 4173);",
       "const types = new Map([",
       "  ['.css', 'text/css; charset=utf-8'],",
@@ -1354,6 +1900,31 @@ async function writeWorkspace(outputDir, boundaries, dependencies, options, extr
       "  ['.wasm', 'application/wasm'],",
       "  ['.woff2', 'font/woff2'],",
       ']);',
+      '',
+      'function discoverCaptureBases() {',
+      "  const bases = [''];",
+      '  try {',
+      '    for (const entry of readdirSync(root, { withFileTypes: true })) {',
+      '      if (!entry.isDirectory()) continue;',
+      '      const dir = path.join(root, entry.name);',
+      '      const hasCapturedSurface = [',
+      "        '_next',",
+      "        'api',",
+      "        'assets',",
+      "        'index.html',",
+      "      ].some((name) => {",
+      '        try {',
+      '          statSync(path.join(dir, name));',
+      '          return true;',
+      '        } catch {',
+      '          return false;',
+      '        }',
+      '      });',
+      '      if (hasCapturedSurface) bases.push(entry.name);',
+      '    }',
+      '  } catch {}',
+      '  return [...new Set(bases)];',
+      '}',
       '',
       'function resolveRequest(url) {',
       "  const requestPath = decodeURIComponent(new URL(url, 'http://localhost').pathname);",
@@ -1419,17 +1990,149 @@ async function writeWorkspace(outputDir, boundaries, dependencies, options, extr
       '  return true;',
       '}',
       '',
+      'function normalizeMirroredJson(text) {',
+      '  let inString = false;',
+      '  let escaped = false;',
+      "  let output = '';",
+      '  for (const char of text) {',
+      '    if (escaped) {',
+      '      output += char;',
+      '      escaped = false;',
+      '      continue;',
+      '    }',
+      "    if (char === '\\\\') {",
+      '      output += char;',
+      '      escaped = true;',
+      '      continue;',
+      '    }',
+      '    if (char === \'"\' ) {',
+      '      inString = !inString;',
+      '      output += char;',
+      '      continue;',
+      '    }',
+      "    if (inString && char === '\\n') {",
+      "      output += '\\\\n';",
+      '      continue;',
+      '    }',
+      "    if (inString && char === '\\r') continue;",
+      '    output += char;',
+      '  }',
+      '  return output;',
+      '}',
+      '',
+      'async function readCapturedJson(filePath) {',
+      "  return normalizeMirroredJson(await readFile(filePath, 'utf8'));",
+      '}',
+      '',
+      'async function candidateCapturedPaths(...segments) {',
+      '  const candidates = [];',
+      '  for (const base of captureBases) {',
+      "    candidates.push(path.join(root, base, ...segments));",
+      '  }',
+      '  candidates.push(path.join(recoveryRoot, ...segments));',
+      '  return candidates;',
+      '}',
+      '',
+      'async function readFirstCapturedJson(...segments) {',
+      '  for (const candidate of await candidateCapturedPaths(...segments)) {',
+      '    try {',
+      '      return await readCapturedJson(candidate);',
+      '    } catch {}',
+      '  }',
+      '  return null;',
+      '}',
+      '',
+      'async function maybeServeCapturedPocketBaseApi(req, res) {',
+      "  const url = new URL(req.url || '/', 'http://localhost');",
+      "  const recordMatch = url.pathname.match(/^\\/api\\/collections\\/([^/]+)\\/records\\/([^/]+)$/);",
+      "  const listMatch = url.pathname.match(/^\\/api\\/collections\\/([^/]+)\\/records$/);",
+      '  if (recordMatch) {',
+      '    const [, collection, id] = recordMatch;',
+      "    const direct = await readFirstCapturedJson('api', 'collections', collection, 'records', `${id}.html`);",
+      '    if (direct) {',
+      '      res.setHeader(\'Content-Type\', \'application/json; charset=utf-8\');',
+      "      res.end(direct);",
+      '      return true;',
+      '    }',
+      "    const listBody = await readFirstCapturedJson('api', 'collections', collection, 'records.html');",
+      '    if (listBody) {',
+      '      const parsed = JSON.parse(listBody);',
+      '      const items = Array.isArray(parsed.items) ? parsed.items : [];',
+      '      const record = items.find((item) => item.id === id || item.client_project_id === id);',
+      '      if (record) {',
+      '        const body = JSON.stringify(record);',
+      '        res.setHeader(\'Content-Length\', Buffer.byteLength(body));',
+      '        res.setHeader(\'Content-Type\', \'application/json; charset=utf-8\');',
+      '        res.end(body);',
+      '        return true;',
+      '      }',
+      '    }',
+      "    res.statusCode = 404;",
+      "    res.end('Not found');",
+      '    return true;',
+      '  }',
+      '  if (listMatch) {',
+      "    const body = await readFirstCapturedJson('api', 'collections', listMatch[1], 'records.html');",
+      '    if (body) {',
+      '      res.setHeader(\'Content-Length\', Buffer.byteLength(body));',
+      '      res.setHeader(\'Content-Type\', \'application/json; charset=utf-8\');',
+      '      res.end(body);',
+      '      return true;',
+      '    }',
+      '  }',
+      "  const fileMatch = url.pathname.match(/^\\/api\\/files\\/([^/]+)\\/([^/]+)\\/([^/]+)$/);",
+      '  if (fileMatch) {',
+      '    const [, collection, id, filename] = fileMatch;',
+      "    const collectionCandidates = collection.startsWith('pbc_') ? [collection] : [collection, `pbc_${collection}`];",
+      '    for (const collectionName of collectionCandidates) {',
+      "      for (const candidate of await candidateCapturedPaths('api', 'files', collectionName, id, filename)) {",
+      '        try {',
+      '          const info = await stat(candidate);',
+      '          res.setHeader(\'Content-Length\', info.size);',
+      "          res.setHeader('Content-Type', 'application/octet-stream');",
+      '          createReadStream(candidate).pipe(res);',
+      '          return true;',
+      '        } catch {}',
+      '      }',
+      '    }',
+      "    res.statusCode = 404;",
+      "    res.end('Not found');",
+      '    return true;',
+      '  }',
+      '  return false;',
+      '}',
+      '',
       'async function resolveExisting(url) {',
       '  const primary = resolveRequest(url);',
       '  try {',
       '    return { filePath: primary, info: await stat(primary) };',
       '  } catch {',
       "    const requestPath = decodeURIComponent(new URL(url, 'http://localhost').pathname);",
+      "    const normalizedRequestPath = path.normalize(requestPath).replace(/^\\.\\.(?:\\/|\\\\|$)/, '');",
+      "    const extensionlessSpaRoute = path.extname(requestPath) === '';",
       "    for (const base of captureBases.filter(Boolean)) {",
-      "      if (requestPath.startsWith(`/${base}/`)) continue;",
-      "      const fallbackPath = path.join(root, base, path.normalize(requestPath).replace(/^\\.\\.(?:\\/|\\\\|$)/, ''));",
+      "      const requestWithoutBase = requestPath.startsWith(`/${base}/`)",
+      "        ? requestPath.slice(base.length + 1)",
+      '        : normalizedRequestPath;',
+      "      const fallbackPath = path.join(root, base, requestWithoutBase);",
       '      try {',
       '        return { filePath: fallbackPath, info: await stat(fallbackPath) };',
+      '      } catch {}',
+      '      if (extensionlessSpaRoute) {',
+      '        try {',
+      "          const htmlFallbackPath = fallbackPath + '.html';",
+      '          return { filePath: htmlFallbackPath, info: await stat(htmlFallbackPath) };',
+      '        } catch {}',
+      "        const spaFallbackPath = path.join(root, base, 'index.html');",
+      '        try {',
+      '          return { filePath: spaFallbackPath, info: await stat(spaFallbackPath) };',
+      '        } catch {}',
+      '      }',
+      '    }',
+      "    if (extensionlessSpaRoute) {",
+      "      const rootFallbackPath = path.join(root, 'index.html');",
+      '      try {',
+      '        return { filePath: rootFallbackPath, info: await stat(rootFallbackPath) };',
       '      } catch {}',
       '    }',
       "    throw new Error('Not found');",
@@ -1439,6 +2142,7 @@ async function writeWorkspace(outputDir, boundaries, dependencies, options, extr
       'const server = http.createServer(async (req, res) => {',
       '  try {',
       '    if (await maybeServeCapturedJsonApi(req, res)) return;',
+      '    if (await maybeServeCapturedPocketBaseApi(req, res)) return;',
       '',
       '    let { filePath, info } = await resolveExisting(req.url || \'/\');',
       '    if (info.isDirectory()) {',

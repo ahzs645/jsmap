@@ -22,6 +22,11 @@
  *   runtime-patch <linked-dir>                         Plan runtime replacement adapters
  *   rename-plan <linked-dir>                           Suggest conservative local symbol renames
  *   rename-apply <linked-dir>                          Apply reviewed low-risk rename suggestions
+ *   harness <recovery-dir>                             Generate a preserved static runtime harness
+ *   next-doctor <recovery-dir>                         Audit captured Next.js route assets
+ *   shim-api <recovery-dir> [--record]                 Generate fake API recorder/map scaffolding
+ *   shim-ui <recovery-dir>                             Generate static DOM shim scaffolding
+ *   verify-static <url>                                Smoke-check a preserved static runtime URL
  *   analyze     <directory>                            Analyze bundles locally (requires tsx)
  *   process     <input-dir> [output-dir] [--force]    Chain: deobfuscate -> split large files -> reconstruct
  *
@@ -156,6 +161,30 @@ Commands:
   rename-apply <linked-rebuild-dir> [--plan <file>] [--dry-run|--write] [--min-confidence N]
       Apply only reviewed low-risk rename suggestions from recovery-rename-plan.json.
 
+  harness <recovery-dir> [--framework next]
+      Create or update a scripts/serve-public.mjs static runtime harness for a
+      preserved public/ directory. Includes SPA route fallback, extensionless
+      route support, cache-busted shim injection, query/hash cleanup, CORS, and
+      generic _next/data JSON fallbacks.
+
+  next-doctor <recovery-dir>
+      Inspect captured Next.js _buildManifest.js files, detect missing page
+      chunks and _next/data payloads, and write recovery/next-doctor.json plus
+      recovery/NEXT_DOCTOR.md with route fallback suggestions.
+
+  shim-api <recovery-dir> [--record] [--from-browser-log <file>]
+      Generate recovery/fake-api-map.json and a browser-side API recorder shim
+      for static API replay work.
+
+  shim-ui <recovery-dir>
+      Generate recovery/static-ui-shims.json and a browser-side DOM shim starter
+      for placeholder examples, collapsed panels, intercepted static controls,
+      and active row state.
+
+  verify-static <url> [--expect-text <text>] [--expect-selector <selector>] [--click <selector>]
+      Smoke-check a preserved static runtime URL. Uses Playwright when available
+      and falls back to HTTP checks for environments without Playwright.
+
   analyze <directory>
       Analyze bundles locally (requires tsx/node with TS support).
 
@@ -192,6 +221,11 @@ Examples:
   node scripts/jsmap.cjs runtime-patch ./recovered-project-linked
   node scripts/jsmap.cjs rename-plan ./recovered-project-linked --scope promoted
   node scripts/jsmap.cjs rename-apply ./recovered-project-linked --dry-run
+  node scripts/jsmap.cjs harness ./recovered-project --framework next
+  node scripts/jsmap.cjs next-doctor ./recovered-project
+  node scripts/jsmap.cjs shim-api ./recovered-project --record
+  node scripts/jsmap.cjs shim-ui ./recovered-project
+  node scripts/jsmap.cjs verify-static http://127.0.0.1:4173/ --expect-text Heidi
   node scripts/jsmap.cjs process ./snapshot-output ./clean-output --force
 `);
 }
@@ -508,6 +542,22 @@ function main() {
       break;
     case 'rename-apply':
       runScript('rename-apply.cjs', subArgs);
+      break;
+
+    case 'harness':
+      runScript('static-runtime-tools.cjs', ['harness', ...subArgs]);
+      break;
+    case 'next-doctor':
+      runScript('static-runtime-tools.cjs', ['next-doctor', ...subArgs]);
+      break;
+    case 'shim-api':
+      runScript('static-runtime-tools.cjs', ['shim-api', ...subArgs]);
+      break;
+    case 'shim-ui':
+      runScript('static-runtime-tools.cjs', ['shim-ui', ...subArgs]);
+      break;
+    case 'verify-static':
+      runScript('static-runtime-tools.cjs', ['verify-static', ...subArgs]);
       break;
 
     case 'analyze':

@@ -21,6 +21,7 @@
     "test:bundle-recovery": "node --experimental-strip-types scripts/test-rollup-recovery-fixtures.mjs",
     "test:recovery-heuristics": "node scripts/test-recovery-heuristics.cjs",
     "test:runtime-patch": "node scripts/test-runtime-patch-plan.cjs",
+    "test:static-runtime-tools": "node scripts/test-static-runtime-tools.cjs",
     "split:bundle": "node scripts/split-bundle-ast.cjs"
   },
   "dependencies": {

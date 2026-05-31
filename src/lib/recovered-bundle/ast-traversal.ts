@@ -1,7 +1,7 @@
-import type { AstNode, AstProgram, ParsedProgram, StatementInfo, TraversalContext } from './types';
-import { JavaScriptParser, KNOWN_RUNTIME_HELPERS } from './constants';
-import { isAstNode, byteLength, uniqueList } from './utils';
-import { maybeTrackPackageHint } from './package-hints';
+import type { AstNode, AstProgram, ParsedProgram, StatementInfo, TraversalContext } from './types.ts';
+import { JavaScriptParser, KNOWN_RUNTIME_HELPERS } from './constants.ts';
+import { isAstNode, byteLength, uniqueList } from './utils.ts';
+import { maybeTrackPackageHint } from './package-hints.ts';
 
 export function parseProgram(source: string): ParsedProgram {
   const parse = (sourceType: 'module' | 'script'): AstProgram =>

@@ -1,5 +1,5 @@
-import { BYTE_ENCODER, RECOVERABLE_JS_PATH_REGEX } from './constants';
-import type { AstNode } from './types';
+import { BYTE_ENCODER, RECOVERABLE_JS_PATH_REGEX } from './constants.ts';
+import type { AstNode } from './types.ts';
 import type { SourceFile } from '../../types/analysis';
 
 export function byteLength(value: string): number {

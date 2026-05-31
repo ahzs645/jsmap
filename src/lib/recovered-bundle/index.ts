@@ -1,4 +1,4 @@
-import type { ModuleDraft } from './types';
+import type { ModuleDraft } from './types.ts';
 import type {
   AnalysisWarning,
   BundleTreemapNode,
@@ -8,8 +8,8 @@ import type {
   RecoveredBundleModule,
   SourceFile,
 } from '../../types/analysis';
-import { isRecoverableJavaScript, baseName, sortByPath } from './utils';
-import { recoverChunk } from './recover-chunk';
+import { isRecoverableJavaScript, baseName, sortByPath } from './utils.ts';
+import { recoverChunk } from './recover-chunk.ts';
 
 function finalizeModules(modules: ModuleDraft[]): RecoveredBundleModule[] {
   return modules.map((module) => {

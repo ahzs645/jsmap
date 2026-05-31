@@ -1,8 +1,8 @@
-import type { ModuleDraft, ChunkRecoveryResult } from './types';
+import type { ModuleDraft, ChunkRecoveryResult } from './types.ts';
 import type { RecoveredBundleChunk, RecoveredBundleEdge, SourceFile } from '../../types/analysis';
-import { byteLength, uniqueList, buildLineOffsets, getLineNumber, baseName, confidenceLabel } from './utils';
-import { FALLBACK_MODULE_CONFIDENCE } from './constants';
-import { parseProgram, analyzeStatement, collectStatementDeclarations } from './ast-traversal';
+import { byteLength, uniqueList, buildLineOffsets, getLineNumber, baseName, confidenceLabel } from './utils.ts';
+import { FALLBACK_MODULE_CONFIDENCE } from './constants.ts';
+import { parseProgram, analyzeStatement, collectStatementDeclarations } from './ast-traversal.ts';
 import {
   clusterStatements,
   scoreModule,
@@ -11,8 +11,8 @@ import {
   deriveSyntheticPath,
   buildModuleReasons,
   buildPseudoModuleContent,
-} from './clustering';
-import { findWebpackModuleObjects, recoverWebpackChunk } from './webpack';
+} from './clustering.ts';
+import { findWebpackModuleObjects, recoverWebpackChunk } from './webpack.ts';
 
 function createFallbackRecovery(
   file: SourceFile,
