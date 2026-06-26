@@ -2,6 +2,7 @@ const path = require('node:path');
 const { webcrack } = require('webcrack');
 const { runTransformationRules } = require('@wakaru/unminify');
 const { unpack } = require('@wakaru/unpacker');
+const acornLoose = require('acorn-loose');
 
 const JS_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx']);
 const CSS_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less']);
@@ -278,22 +279,82 @@ function inferVariableRenames(code) {
   return renames;
 }
 
+// Decide whether an Identifier node sits in a position that is a genuine
+// variable reference (safe to rename) rather than a property name, key, label,
+// or import/export alias (which would change semantics if renamed).
+function isRenamableIdentifierPosition(node, parent) {
+  if (!parent) return true;
+  // Non-computed member property: `a.b` — `b` is a property, not the variable.
+  if (parent.type === 'MemberExpression' && parent.property === node && !parent.computed) return false;
+  // Object/pattern property key (including shorthand, where key === value).
+  if (parent.type === 'Property' && parent.key === node && !parent.computed) return false;
+  // Class field / method key.
+  if ((parent.type === 'PropertyDefinition' || parent.type === 'MethodDefinition') &&
+    parent.key === node && !parent.computed) return false;
+  // Labels are their own namespace.
+  if ((parent.type === 'LabeledStatement' || parent.type === 'BreakStatement' ||
+    parent.type === 'ContinueStatement') && parent.label === node) return false;
+  // import { foo as local } / export { local as foo } — only the local binding renames.
+  if (parent.type === 'ImportSpecifier' && parent.imported === node && parent.imported !== parent.local) return false;
+  if (parent.type === 'ExportSpecifier' && parent.local !== node) return false;
+  return true;
+}
+
+// AST-based identifier rename. A previous regex implementation rewrote every
+// `\b`-bounded occurrence, which corrupted member accesses (`obj.e` → `obj.event`),
+// object keys, and identifier-like text inside strings/comments/regex literals.
+// This walks the parsed AST and rewrites only real reference positions.
 function applyVariableRenames(code, renames) {
   if (renames.size === 0) return code;
 
-  // Only apply renames that are safe - single-char variables that won't collide
-  // We do a conservative approach: only rename if the new name doesn't already exist
-  let result = code;
+  // Keep a conservative collision guard: never rename to a name that already
+  // appears in the file, so we cannot merge two distinct identifiers.
+  const activeRenames = new Map();
   for (const [oldName, newName] of renames) {
-    // Skip if the new name is already used as an identifier in the code
-    const newNamePattern = new RegExp(`\\b${newName}\\b`);
-    if (newNamePattern.test(result)) continue;
+    if (new RegExp(`\\b${newName}\\b`).test(code)) continue;
+    activeRenames.set(oldName, newName);
+  }
+  if (activeRenames.size === 0) return code;
 
-    // Replace only whole-word occurrences of the single-char variable
-    const pattern = new RegExp(`\\b${oldName}\\b`, 'g');
-    result = result.replace(pattern, newName);
+  let ast;
+  try {
+    ast = acornLoose.parse(code, { ecmaVersion: 2022 });
+  } catch {
+    // Never rename content we cannot parse as JavaScript.
+    return code;
   }
 
+  const edits = [];
+  const visit = (node, parent) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child, parent);
+      return;
+    }
+    if (typeof node.type !== 'string') return;
+    if (
+      node.type === 'Identifier' &&
+      activeRenames.has(node.name) &&
+      typeof node.start === 'number' &&
+      isRenamableIdentifierPosition(node, parent)
+    ) {
+      edits.push({ start: node.start, end: node.end, text: activeRenames.get(node.name) });
+    }
+    for (const key of Object.keys(node)) {
+      if (key === 'type' || key === 'start' || key === 'end' || key === 'loc' || key === 'range') continue;
+      const value = node[key];
+      if (value && typeof value === 'object') visit(value, node);
+    }
+  };
+  visit(ast, null);
+
+  if (edits.length === 0) return code;
+  // Apply right-to-left so earlier offsets stay valid.
+  edits.sort((a, b) => b.start - a.start);
+  let result = code;
+  for (const edit of edits) {
+    result = result.slice(0, edit.start) + edit.text + result.slice(edit.end);
+  }
   return result;
 }
 
