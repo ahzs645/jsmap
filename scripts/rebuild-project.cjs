@@ -455,10 +455,28 @@ async function main() {
   const publicDir = path.join(recoveryDir, 'public');
   const siteRoot = findSiteRoot(publicDir);
   const htmlFile = await chooseHtml(siteRoot, flags);
-  if (!htmlFile) throw new Error(`No HTML file found under ${siteRoot}`);
+  if (!htmlFile) {
+    const hasChunks = await pathExists(path.join(recoveryDir, 'src/recovered-chunks'));
+    throw new Error(
+      `No HTML entry found under ${siteRoot}.\n` +
+      `'rebuild' generates a runnable SPA and needs an HTML page that loads /assets/*.js.\n` +
+      (hasChunks
+        ? `This looks like a JS-only capture (no index.html was captured). The recovery workspace is still usable:\n` +
+          `  - inspect the recovered modules under src/recovered-chunks/\n` +
+          `  - run \`jsmap stats ${path.relative(process.cwd(), recoveryDir) || recoveryDir}\` for a recovery summary\n` +
+          `If you have the app's HTML entry, pass it with --html <file>.`
+        : `Pass the entry page with --html <file>.`),
+    );
+  }
   const html = await fsp.readFile(htmlFile, 'utf8');
   const mainScript = findMainScript(html);
-  if (!mainScript) throw new Error(`Could not find module script under /assets/*.js in ${htmlFile}`);
+  if (!mainScript) {
+    throw new Error(
+      `Could not find a module script under /assets/*.js in ${htmlFile}.\n` +
+      `'rebuild' links the captured SPA entry to recovered chunks; the HTML must reference its main bundle as ` +
+      `<script type="module" src="/assets/<name>.js">. Pass a different page with --html <file> if this is not the app entry.`,
+    );
+  }
 
   const outputPublicDir = path.join(outputDir, 'public');
   await fsp.cp(siteRoot, outputPublicDir, { recursive: true });

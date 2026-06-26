@@ -206,10 +206,18 @@ function mergeDependencyEvidence(items) {
     const current = deps.get(item.name) || {
       name: item.name,
       version: item.version || '*',
+      // Track the curated "last known" version separately so package.json is not
+      // pinned to a guessed version when only a content fingerprint matched.
+      lastKnownVersion: item.lastKnownVersion || null,
+      resolution: item.version ? (item.resolution || 'exact') : (item.resolution || 'inferred'),
       evidence: item.evidence || item.detail || 'package evidence',
       evidenceItems: [],
     };
-    if ((!current.version || current.version === '*') && item.version) current.version = item.version;
+    if ((!current.version || current.version === '*') && item.version) {
+      current.version = item.version;
+      current.resolution = item.resolution || 'exact';
+    }
+    if (!current.lastKnownVersion && item.lastKnownVersion) current.lastKnownVersion = item.lastKnownVersion;
     const evidenceItem = {
       type: item.evidenceType || item.type || 'fingerprint',
       detail: item.detail || item.evidence || '',
