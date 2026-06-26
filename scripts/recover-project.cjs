@@ -42,7 +42,7 @@ const RECOVERY_MODES = new Set(['balanced', 'inspect-first']);
 
 function printUsage() {
   console.error(
-    'Usage: jsmap recover <input-dir> [output-dir] [--force] [--repair-wasm] [--recovery-mode balanced|inspect-first] [--large-js-mode preserve|split-raw|full] [--module-granularity grouped|declarations] [--engine webcrack|wakaru|both] [--timeout seconds] [--concurrency N] [--max-transform-mb N] [--min-split-kb N] [--max-split-mb N]',
+    'Usage: jsmap recover <input-dir> [output-dir] [--force] [--repair-wasm] [--allow-empty] [--recovery-mode balanced|inspect-first] [--large-js-mode preserve|split-raw|full] [--module-granularity grouped|declarations] [--engine webcrack|wakaru|both] [--timeout seconds] [--concurrency N] [--max-transform-mb N] [--min-split-kb N] [--max-split-mb N]',
   );
 }
 
@@ -50,6 +50,7 @@ function parseArgs(argv) {
   const flags = {
     force: false,
     repairWasm: false,
+    allowEmpty: false,
     recoveryMode: 'balanced',
     largeJsMode: 'preserve',
     timeoutSeconds: null,
@@ -66,6 +67,7 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === '--force') flags.force = true;
     else if (arg === '--repair-wasm') flags.repairWasm = true;
+    else if (arg === '--allow-empty') flags.allowEmpty = true;
     else if (arg === '--recovery-mode') flags.recoveryMode = argv[++i];
     else if (arg === '--large-js-mode') flags.largeJsMode = argv[++i];
     else if (arg === '--timeout') flags.timeoutSeconds = Number(argv[++i]);
@@ -278,6 +280,56 @@ async function collectSourceMapEvidence(rootDir) {
   }
 
   return evidence;
+}
+
+// Read the last `bytes` of a file without loading the whole thing (bundles can
+// be very large, and sourceMappingURL comments live at the end).
+async function readFileTail(filePath, bytes) {
+  let handle;
+  try {
+    handle = await fsp.open(filePath, 'r');
+    const { size } = await handle.stat();
+    const length = Math.min(bytes, size);
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, size - length);
+    return buffer.toString('utf8');
+  } catch {
+    return '';
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+// Suggest where a genuine source map could be re-fetched from for an invalid
+// (e.g. HTML-shell) captured `.map`. Prefers the sibling bundle's
+// //# sourceMappingURL comment, then origin + the map's path.
+async function suggestMapRefetchUrl(inputDir, mapRel, inputRelSet, origin) {
+  const bundleRel = mapRel.replace(/\.map$/i, '');
+  if (inputRelSet.has(bundleRel)) {
+    const tail = await readFileTail(path.join(inputDir, bundleRel), 8192);
+    const match = /[#@]\s*sourceMappingURL=([^\s'"]+)/.exec(tail);
+    if (match) {
+      const ref = match[1].trim();
+      if (/^https?:\/\//i.test(ref)) return ref;
+      if (origin && !ref.startsWith('data:')) {
+        try { return new URL(ref, `${origin}/${path.posix.dirname(bundleRel)}/`).toString(); } catch { /* ignore */ }
+      }
+    }
+  }
+  if (origin) return `${origin.replace(/\/$/, '')}/${mapRel}`;
+  return null;
+}
+
+// Read the deobfuscation report to learn which JS assets were actually
+// transformed vs. passed through unchanged (a no-op transform often means the
+// input was already source-like, or was corrupt/unparseable).
+async function readDeobfuscationReport(deobfuscatedDir) {
+  try {
+    const report = JSON.parse(await fsp.readFile(path.join(deobfuscatedDir, 'deobfuscation-report.json'), 'utf8'));
+    return Array.isArray(report.results) ? report : { results: [] };
+  } catch {
+    return { results: [] };
+  }
 }
 
 function dedupeSourceMapEvidence(evidence) {
@@ -905,9 +957,12 @@ function createRecoveryAudit(splitEntries, splitManifests, sourceMapEvidence, op
   if (invalidSourceMaps.length) {
     const htmlShells = invalidSourceMaps.filter((m) => m.reason === 'html-shell');
     const origin = options?.origin;
-    const refetchHint = origin
-      ? `Re-fetch the real maps from the app origin (${origin}), e.g. ${origin}/<bundle>.js.map.`
-      : 'Re-fetch the real .map files directly from the asset URLs (bundle URL + ".map").';
+    const knownUrls = invalidSourceMaps.map((m) => m.refetchUrl).filter(Boolean);
+    const refetchHint = knownUrls.length
+      ? `Re-fetch the real maps from: ${[...new Set(knownUrls)].slice(0, 6).join(', ')}.`
+      : origin
+        ? `Re-fetch the real maps from the app origin (${origin}), e.g. ${origin}/<bundle>.js.map.`
+        : 'Re-fetch the real .map files directly from the asset URLs (bundle URL + ".map"). The capture had no origin or sourceMappingURL to derive an exact URL.';
     warnings.push({
       severity: 'warning',
       code: 'source-map-is-html-shell',
@@ -919,6 +974,18 @@ function createRecoveryAudit(splitEntries, splitManifests, sourceMapEvidence, op
       priority: 1,
       action: 'Obtain genuine source maps (valid JSON with version:3 and mappings) for the captured bundles and place them next to the .js files before rerunning recover.',
       relatedWarning: 'source-map-is-html-shell',
+    });
+  }
+
+  const noopTransforms = options?.noopTransforms || [];
+  if (noopTransforms.length) {
+    const withParserWarnings = noopTransforms.filter((entry) => (entry.warnings || []).length);
+    warnings.push({
+      severity: withParserWarnings.length ? 'warning' : 'info',
+      code: 'no-op-transform',
+      message: `${noopTransforms.length} JavaScript asset(s) were unchanged by deobfuscation (output bytes == input bytes)${withParserWarnings.length ? `; ${withParserWarnings.length} also produced parser warnings, which usually means corrupt or unparseable input` : ', which usually means the input was already source-like or could not be improved'}.`,
+      patchSurface: 'capture-quality-or-classifier',
+      examples: noopTransforms.slice(0, 12),
     });
   }
 
@@ -2411,6 +2478,7 @@ async function main() {
   // skipping them. extractPackageCoordinate-style evidence is gathered later;
   // here we only flag maps that are not usable as source maps at all.
   const invalidSourceMaps = [];
+  const inputRelSet = new Set(inputFiles.map((file) => toPosix(path.relative(absoluteInputDir, file))));
   for (const file of inputFiles) {
     const rel = toPosix(path.relative(absoluteInputDir, file));
     if (!/\.map$/i.test(rel)) continue;
@@ -2418,7 +2486,13 @@ async function main() {
     if (content == null) continue;
     const verdict = classifySourceMapContent(content);
     if (!verdict.valid) {
-      invalidSourceMaps.push({ map: rel, reason: verdict.reason });
+      invalidSourceMaps.push({
+        map: rel,
+        reason: verdict.reason,
+        // Best-effort URL to re-fetch a genuine map from: the sibling bundle's
+        // //# sourceMappingURL comment if present, else origin + map path.
+        refetchUrl: await suggestMapRefetchUrl(absoluteInputDir, rel, inputRelSet, origin),
+      });
     }
   }
 
@@ -2431,6 +2505,20 @@ async function main() {
     deobfuscateArgs.push('--exclude', rel);
   }
   runNodeScript('deobfuscate-snapshot.cjs', deobfuscateArgs);
+
+  const deobReport = await readDeobfuscationReport(deobfuscatedDir);
+  const noopTransforms = deobReport.results
+    .filter((result) =>
+      result.kind === 'js' &&
+      !result.excluded &&
+      result.changed === false &&
+      typeof result.originalBytes === 'number' &&
+      result.originalBytes === result.outputBytes)
+    .map((result) => ({
+      file: result.path,
+      bytes: result.originalBytes,
+      warnings: (result.warnings || []).map((warning) => warning.message).slice(0, 2),
+    }));
 
   const deobfuscatedFiles = await walkDirectory(deobfuscatedDir);
   const filesByRel = {};
@@ -2496,6 +2584,7 @@ async function main() {
     inspectFirstSkipped: flags.recoveryMode === 'inspect-first' ? excludedLargeJsDetails : [],
     htmlWrappedCaptures,
     invalidSourceMaps,
+    noopTransforms,
     origin,
   });
   const extractionPlan = createExtractionPlan(boundaries, splitManifestData.manifests, splitManifestData.entries, sourceMapEvidence, recoveryAudit);
@@ -2570,6 +2659,22 @@ async function main() {
   if (invalidSourceMaps.length) console.log(`Unusable captured source maps: ${invalidSourceMaps.length} (see source-map-is-html-shell warning)`);
   if (excludedLargeJs.length) console.log(`Preserved large JS: ${excludedLargeJs.join(', ')}`);
   if (wasmRepairs.length) console.log(`WASM repairs: ${wasmRepairs.map((item) => `${item.file}:${item.status}`).join(', ')}`);
+
+  // Signal a fully-degenerate capture (nothing inspectable or source-like was
+  // recovered) with a non-zero exit so automation can detect it. Normal
+  // recoveries — anything split, any real map, or any transformed JS — exit 0.
+  const changedJsCount = deobReport.results.filter((result) => result.kind === 'js' && result.changed === true).length;
+  const recoveredNothing = splitOutputs.length === 0 && sourceMapEvidence.length === 0 && changedJsCount === 0;
+  if (recoveredNothing && !flags.allowEmpty) {
+    console.error(
+      '\nRecovery is empty: no chunks were split, no usable source maps were found, and no JavaScript was transformed.\n' +
+      (htmlWrappedCaptures.some((capture) => !capture.recovered)
+        ? 'Some captured JS could not be unwrapped from its HTML page. Re-capture the bundles as raw JavaScript responses.\n'
+        : 'The input may be empty, already source, or not recoverable JavaScript.\n') +
+      'Exiting non-zero. Pass --allow-empty to treat this as success.',
+    );
+    process.exitCode = 2;
+  }
 }
 
 main().catch((error) => {
