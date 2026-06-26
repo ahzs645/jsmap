@@ -2245,6 +2245,40 @@ async function copyProjectFiles(inputDir, outputDir, force) {
   await fsp.cp(inputDir, path.join(outputDir, 'public'), { recursive: true });
 }
 
+// public/ is advertised as the preserved, runnable capture, but a verbatim
+// mirror of an imperfect capture is not runnable: HTML-wrapped JS would be sent
+// to the browser as a script (and fail), and fake .map files (SPA shells) would
+// be loaded as source maps. Repair those assets in place so the preserved app
+// can actually run. Only detected corruption is touched; clean captures are
+// left byte-for-byte intact.
+async function repairPublicCapture(publicDir) {
+  const summary = { repairedJs: [], brokenMaps: [] };
+  const files = await walkDirectory(publicDir);
+  for (const file of files) {
+    const rel = toPosix(path.relative(publicDir, file));
+    if (isJavaScript(rel)) {
+      const content = await fsp.readFile(file, 'utf8').catch(() => null);
+      if (content == null || !looksLikeHtmlDocument(content)) continue;
+      const recovered = unwrapHtmlWrappedJs(content);
+      if (recovered) {
+        await fsp.writeFile(file, recovered.code, 'utf8');
+        summary.repairedJs.push(rel);
+      }
+    } else if (/\.map$/i.test(rel)) {
+      const content = await fsp.readFile(file, 'utf8').catch(() => null);
+      if (content == null) continue;
+      const verdict = classifySourceMapContent(content);
+      if (!verdict.valid) {
+        // Move the fake map aside (preserved as evidence) so the browser does
+        // not fetch the SPA shell as a source map.
+        await fsp.rename(file, `${file}.broken`).catch(() => {});
+        summary.brokenMaps.push({ map: rel, reason: verdict.reason });
+      }
+    }
+  }
+  return summary;
+}
+
 function runNodeScript(scriptName, args) {
   execFileSync(process.execPath, [path.join(SCRIPTS_DIR, scriptName), ...args], {
     stdio: 'inherit',
@@ -2304,6 +2338,7 @@ async function main() {
   await copyProjectFiles(absoluteInputDir, outputDir, flags.force);
 
   const publicDir = path.join(outputDir, 'public');
+  const publicRepairs = await repairPublicCapture(publicDir);
   const origin = await inferOriginFromHtml(absoluteInputDir);
   const wasmRepairs = flags.repairWasm ? await repairWasmAssets(publicDir, origin) : [];
 
@@ -2477,6 +2512,7 @@ async function main() {
     })),
     sourceMapEvidence,
     wasmRepairs,
+    publicRepairs,
     timeoutSeconds: flags.timeoutSeconds,
     concurrency: flags.concurrency,
     engine: flags.engine,
@@ -2520,6 +2556,9 @@ async function main() {
   console.log(`Large JS mode: ${flags.largeJsMode}`);
   if (recoveryAudit.summary.warningCount) console.log(`Quality audit warnings: ${recoveryAudit.summary.warningCount} (see recovery/QUALITY_AUDIT.md)`);
   if (htmlWrappedCaptures.length) console.log(`Repaired HTML-wrapped JS captures: ${htmlWrappedCaptures.filter((c) => c.recovered).length}/${htmlWrappedCaptures.length}`);
+  if (publicRepairs.repairedJs.length || publicRepairs.brokenMaps.length) {
+    console.log(`Repaired preserved public/: ${publicRepairs.repairedJs.length} JS file(s) unwrapped, ${publicRepairs.brokenMaps.length} fake map(s) set aside (.broken)`);
+  }
   if (invalidSourceMaps.length) console.log(`Unusable captured source maps: ${invalidSourceMaps.length} (see source-map-is-html-shell warning)`);
   if (excludedLargeJs.length) console.log(`Preserved large JS: ${excludedLargeJs.join(', ')}`);
   if (wasmRepairs.length) console.log(`WASM repairs: ${wasmRepairs.map((item) => `${item.file}:${item.status}`).join(', ')}`);

@@ -95,7 +95,9 @@ const result = {
     namesCount: 0,
     fileCount: files.length,
     missingContentCount: 0,
-    hasAllSourcesContent: true,
+    // Bundle-only analysis reads no source maps, so no original source content
+    // was recovered. Reporting true here falsely implies full sources.
+    hasAllSourcesContent: false,
     retrievedFrom: `Bundle-only analysis: ${entries.length} JS files`,
   },
 };

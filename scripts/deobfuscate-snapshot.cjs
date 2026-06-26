@@ -10,6 +10,7 @@ const {
   isHTMLPath,
   isTransformablePath,
   unwrapHtmlWrappedJs,
+  classifySourceMapContent,
   loadConfigFile,
   mergeConfigWithFlags,
   matchesExcludePattern,
@@ -508,6 +509,8 @@ async function main() {
     excludedCount: 0,
     htmlUnwrappedCount: 0,
     htmlUnwrappedFiles: [],
+    invalidSourceMapCount: 0,
+    invalidSourceMaps: [],
     concurrency,
     results: [],
   };
@@ -565,6 +568,18 @@ async function main() {
     const kind = isJavaScriptPath(normalizedPath) ? 'js'
       : isCSSPath(normalizedPath) ? 'css'
         : isHTMLPath(normalizedPath) ? 'html' : 'copy';
+    // Flag captured source maps that are not usable maps (e.g. the SPA/app-shell
+    // HTML returned for a missing .map route) instead of copying them silently.
+    if (!excluded && /\.map$/i.test(normalizedPath)) {
+      const mapContent = await fs.readFile(absoluteFilePath, 'utf8').catch(() => null);
+      if (mapContent != null) {
+        const verdict = classifySourceMapContent(mapContent);
+        if (!verdict.valid) {
+          report.invalidSourceMapCount += 1;
+          report.invalidSourceMaps.push({ path: normalizedPath, reason: verdict.reason });
+        }
+      }
+    }
     const result = { path: normalizedPath, kind, changed: false, excluded };
     report.results.push(result);
     if (excluded) report.excludedCount += 1;
@@ -683,6 +698,9 @@ async function main() {
   }
   if (report.htmlUnwrappedCount > 0) {
     parts.push(`Repaired ${report.htmlUnwrappedCount} HTML-wrapped JS capture(s).`);
+  }
+  if (report.invalidSourceMapCount > 0) {
+    parts.push(`Warning: ${report.invalidSourceMapCount} captured .map file(s) are not usable source maps (e.g. SPA/app-shell HTML).`);
   }
   if (report.excludedCount > 0) {
     parts.push(`Excluded ${report.excludedCount} files.`);
