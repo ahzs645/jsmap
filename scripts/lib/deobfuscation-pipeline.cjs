@@ -56,6 +56,88 @@ function isTransformablePath(filePath) {
   return isJavaScriptPath(filePath) || isCSSPath(filePath) || isHTMLPath(filePath);
 }
 
+// ── Captured-source sanitization ──
+//
+// Real-world captures (browser "Save as", view-source, naive site mirrors, or a
+// server that returns its SPA index.html for unknown routes) frequently save
+// JavaScript and source-map responses wrapped in an HTML document. A captured
+// `.js` then looks like `<html>…<pre>(()=&gt;{…}</pre></html>` with the code
+// HTML-entity-encoded, and a captured `.js.map` is often just the app shell
+// HTML. Classifying by file extension alone makes the pipeline transform that
+// HTML as if it were JavaScript (a no-op that is reported as success) and treat
+// the fake map as a real source map. These helpers detect and repair that.
+
+const HTML_DOCUMENT_START = /^\uFEFF?\s*<(?:!doctype\s+html|!--|html\b|head\b|body\b|pre\b|div\b)/i;
+
+function looksLikeHtmlDocument(content) {
+  if (typeof content !== 'string' || !content) return false;
+  return HTML_DOCUMENT_START.test(content.slice(0, 256));
+}
+
+function decodeHtmlEntities(input) {
+  return input
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => safeFromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => safeFromCodePoint(parseInt(dec, 10)))
+    .replace(/&amp;/g, '&'); // must be decoded last so other entities are not double-decoded
+}
+
+function safeFromCodePoint(code) {
+  if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return '';
+  try {
+    return String.fromCodePoint(code);
+  } catch {
+    return '';
+  }
+}
+
+// Attempt to recover JavaScript text from an HTML-wrapped capture.
+// Returns { code, method } when recovery looks viable, otherwise null.
+function unwrapHtmlWrappedJs(content) {
+  if (!looksLikeHtmlDocument(content)) return null;
+  // Browsers wrap raw text/JS responses in a single <pre> block.
+  const pre = /<pre\b[^>]*>([\s\S]*?)<\/pre>/i.exec(content);
+  if (pre) {
+    const code = decodeHtmlEntities(pre[1]).trim();
+    if (code) return { code, method: 'pre-unwrap' };
+  }
+  return null; // looked like HTML but no recoverable code block (e.g. a real SPA shell)
+}
+
+// Classify the content of a captured `.map` file.
+// Returns { valid, reason } so callers can warn precisely instead of silently
+// skipping a map that is actually an HTML shell or a degenerate no-op map.
+function classifySourceMapContent(content) {
+  if (typeof content !== 'string' || !content.trim()) {
+    return { valid: false, reason: 'empty' };
+  }
+  if (looksLikeHtmlDocument(content)) {
+    return { valid: false, reason: 'html-shell' };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return { valid: false, reason: 'not-json' };
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    return { valid: false, reason: 'not-object' };
+  }
+  if (parsed.version !== 3 && parsed.version !== '3') {
+    return { valid: false, reason: 'no-version-3' };
+  }
+  const hasMappings = typeof parsed.mappings === 'string' && parsed.mappings.length > 0;
+  const hasSections = Array.isArray(parsed.sections) && parsed.sections.length > 0;
+  if (!hasMappings && !hasSections) {
+    return { valid: false, reason: 'no-mappings' };
+  }
+  return { valid: true, reason: 'ok' };
+}
+
 async function withMutedConsoleError(callback) {
   const originalConsoleError = console.error;
   console.error = () => {};
@@ -662,6 +744,10 @@ module.exports = {
   isCSSPath,
   isHTMLPath,
   isTransformablePath,
+  looksLikeHtmlDocument,
+  decodeHtmlEntities,
+  unwrapHtmlWrappedJs,
+  classifySourceMapContent,
   normalizeCode,
   transformJavaScript,
   transformCSS,

@@ -9,6 +9,7 @@ const {
   isCSSPath,
   isHTMLPath,
   isTransformablePath,
+  unwrapHtmlWrappedJs,
   loadConfigFile,
   mergeConfigWithFlags,
   matchesExcludePattern,
@@ -505,6 +506,8 @@ async function main() {
     htmlTransformedCount: 0,
     unpackedBundleCount: 0,
     excludedCount: 0,
+    htmlUnwrappedCount: 0,
+    htmlUnwrappedFiles: [],
     concurrency,
     results: [],
   };
@@ -531,10 +534,20 @@ async function main() {
     if (matchesExcludePattern(normalizedPath, options.exclude)) {
       passthroughFiles.push({ absoluteFilePath, normalizedPath, excluded: true });
     } else {
-      const content = await fs.readFile(absoluteFilePath, 'utf8').catch(() => null);
+      let content = await fs.readFile(absoluteFilePath, 'utf8').catch(() => null);
       if (content == null || !isTransformablePath(normalizedPath)) {
         passthroughFiles.push({ absoluteFilePath, normalizedPath, excluded: false });
       } else {
+        // Repair HTML-wrapped JS captures (browser "Save as"/view-source/mirror)
+        // so the pipeline transforms real JavaScript instead of an HTML document.
+        if (isJavaScriptPath(normalizedPath)) {
+          const recovered = unwrapHtmlWrappedJs(content);
+          if (recovered) {
+            report.htmlUnwrappedCount += 1;
+            report.htmlUnwrappedFiles.push(normalizedPath);
+            content = recovered.code;
+          }
+        }
         transformableFiles.push({ absoluteFilePath, normalizedPath, content });
       }
     }
@@ -667,6 +680,9 @@ async function main() {
   }
   if (report.unpackedBundleCount > 0) {
     parts.push(`Detected embedded module wrappers in ${report.unpackedBundleCount} files.`);
+  }
+  if (report.htmlUnwrappedCount > 0) {
+    parts.push(`Repaired ${report.htmlUnwrappedCount} HTML-wrapped JS capture(s).`);
   }
   if (report.excludedCount > 0) {
     parts.push(`Excluded ${report.excludedCount} files.`);

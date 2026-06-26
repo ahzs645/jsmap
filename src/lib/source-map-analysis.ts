@@ -293,7 +293,9 @@ export function analyzeBundleOnlyFiles(
     namesCount: 0,
     retrievedFrom: options?.retrievedFrom ?? `Bundle-only analysis: ${job.inputSummary ?? job.label}`,
     generatedUrl,
-    hasAllSourcesContent: true,
+    // Bundle-only analysis has no source map, so no original source content was
+    // recovered. Reporting `true` here is misleading (it implies full sources).
+    hasAllSourcesContent: false,
     bundle: null,
     recoveredBundle,
     warnings,
@@ -416,7 +418,12 @@ export async function analyzeDiscoveredMap(
       mapUrl: discovered.mapUrl,
       generatedCode: discovered.generatedCode,
       generatedUrl: discovered.generatedUrl,
+      // hasContentsOfAllSources() is vacuously true when a map has no sources or
+      // no mappings, so a degenerate/no-op map would falsely claim full sources.
+      // Require real mappings and at least one source file before trusting it.
       hasAllSourcesContent:
+        mappingCount > 0 &&
+        files.length > 0 &&
         consumer.hasContentsOfAllSources() &&
         files.every((file) => !file.missingContent),
       bundle,
