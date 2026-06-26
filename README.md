@@ -141,6 +141,21 @@ The full captured app does not run standalone (it needs its real backend/auth an
 any WebGL/WASM runtimes); this is the editable **source layer** with a working
 dev/HMR loop that a human grows by promoting more modules.
 
+### Boot readiness (`boot-check`)
+
+```bash
+node scripts/jsmap.cjs boot-check <capture-or-recovery-dir>
+```
+
+Modern webpack/rspack apps defer their entry until specific chunks load
+(`__webpack_require__.O(void 0, [chunkIds], () => require(entryId))`). If a
+required chunk was never captured, the entry never runs and the app renders
+nothing — with no error. `boot-check` finds the entry startup(s), the chunks they
+wait for, and module coverage, then reports any **missing chunks** (and separate
+self-contained runtimes), so you know exactly what to re-capture. It exits non-zero
+(3) when the capture cannot boot. (Most such apps also need their real auth +
+backend to render, even with all chunks present.)
+
 For preserved static runtimes that need to be made operable with fake data,
 use the static harness and shim toolset:
 

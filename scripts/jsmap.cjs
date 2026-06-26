@@ -168,6 +168,12 @@ Commands:
       injected backend/auth dependencies so they run offline, and writes an
       interactive playground that hot-reloads. A human reviews and grows it.
 
+  boot-check <dir-or-recovery-or-linked> [--json] [--out <prefix>]
+      Diagnose whether a captured bundle set can boot. Finds the deferred
+      webpack/rspack entry startup, the chunks it waits for, and module coverage,
+      then reports missing chunks/entry modules and separate runtimes. Exits 3
+      when a required chunk was not captured (the app would render nothing).
+
   harness <recovery-dir> [--framework next]
       Create or update a scripts/serve-public.mjs static runtime harness for a
       preserved public/ directory. Includes SPA route fallback, extensionless
@@ -548,6 +554,10 @@ function main() {
     case 'editable':
     case 'editable-workspace':
       runScript('generate-editable-workspace.cjs', subArgs);
+      break;
+    case 'boot-check':
+    case 'boot-readiness':
+      runScript('analyze-boot-readiness.cjs', subArgs);
       break;
     case 'rename-plan':
       runScript('rename-plan.cjs', subArgs);
