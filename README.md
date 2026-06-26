@@ -82,6 +82,40 @@ files under `.jsmap-promote-preview` without changing the runnable rebuild; use
 largest remaining chunks, readiness breakdowns, promotion outputs, and quality
 warnings.
 
+### Imperfect real-world captures
+
+Captures are frequently lossy, and jsmap now detects and repairs the common
+defects instead of silently producing garbage:
+
+- **HTML-wrapped JavaScript** (browser "Save as"/view-source/site mirrors save a
+  bundle as `<html>…<pre>(()=&gt;{…}</pre>` with entity-encoded code) is detected
+  and unwrapped during `recover`/`deobfuscate`, and `recover` repairs the
+  preserved `public/` copy in place so `npm run serve` still works. A
+  `html-wrapped-js-capture` warning records what was repaired.
+- **Fake source maps** (the SPA/app-shell HTML returned for a missing `.map`
+  route) are detected rather than treated as real maps. `recover` emits a
+  `source-map-is-html-shell` warning with a concrete re-fetch URL when one can be
+  derived from the bundle's `sourceMappingURL` or the inferred origin, and moves
+  the fake maps aside as `*.map.broken` in `public/`.
+- **Webpack bundles** (a single top-level IIFE) are routed to per-module
+  extraction during `recover` instead of being emitted as one giant chunk; an
+  `unsplit-large-bundle` warning flags any large bundle that still yields a single
+  chunk. A `no-op-transform` warning flags JS that deobfuscation left unchanged.
+- Inferred dependency versions from content fingerprints are written as `"*"`
+  (with the curated version kept as a non-authoritative `lastKnownVersion` hint),
+  so recovered `package.json` does not pin guessed versions.
+- `recover` exits non-zero on a fully-degenerate capture (nothing split, no
+  usable maps, nothing transformed); pass `--allow-empty` to treat that as
+  success.
+
+### Bundle-only captures (no HTML entry)
+
+When a capture is just JavaScript bundles with no `index.html` (for example a
+webpack app split into modules), `rebuild` runs in bundle-only mode: it builds
+`recovery-module-index.json` and `src/recovered-parts/*` directly from the split
+manifests and synthesizes a minimal entry page, so the recovered modules still
+flow into `promote-plan`, `structure-plan`, and `roadmap`.
+
 For preserved static runtimes that need to be made operable with fake data,
 use the static harness and shim toolset:
 
