@@ -22,6 +22,7 @@
     "test:capture-sanitization": "node scripts/test-capture-sanitization.cjs",
     "test:rename-safety": "node scripts/test-rename-safety.cjs",
     "test:bundle-only-rebuild": "node scripts/test-bundle-only-rebuild.cjs",
+    "test:editable-workspace": "node scripts/test-editable-workspace.cjs",
     "test:recovery-heuristics": "node scripts/test-recovery-heuristics.cjs",
     "test:runtime-patch": "node scripts/test-runtime-patch-plan.cjs",
     "test:static-runtime-tools": "node scripts/test-static-runtime-tools.cjs",

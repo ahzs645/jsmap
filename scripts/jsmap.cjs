@@ -161,6 +161,13 @@ Commands:
   rename-apply <linked-rebuild-dir> [--plan <file>] [--dry-run|--write] [--min-confidence N]
       Apply only reviewed low-risk rename suggestions from recovery-rename-plan.json.
 
+  editable <linked-rebuild-dir> [output-dir] [--top N] [--force]
+      Generate an editable, hot-reloading Vite workspace from a linked rebuild.
+      Promotes self-contained recovered functions (with their in-module helper
+      closures) into editable src/recovered/* modules, scaffolds fake stubs for
+      injected backend/auth dependencies so they run offline, and writes an
+      interactive playground that hot-reloads. A human reviews and grows it.
+
   harness <recovery-dir> [--framework next]
       Create or update a scripts/serve-public.mjs static runtime harness for a
       preserved public/ directory. Includes SPA route fallback, extensionless
@@ -220,6 +227,7 @@ Examples:
   node scripts/jsmap.cjs integrate ./recovered-project-linked --dry-run
   node scripts/jsmap.cjs runtime-patch ./recovered-project-linked
   node scripts/jsmap.cjs rename-plan ./recovered-project-linked --scope promoted
+  node scripts/jsmap.cjs editable ./recovered-project-linked ./recovered-editable --top 25
   node scripts/jsmap.cjs rename-apply ./recovered-project-linked --dry-run
   node scripts/jsmap.cjs harness ./recovered-project --framework next
   node scripts/jsmap.cjs next-doctor ./recovered-project
@@ -536,6 +544,10 @@ function main() {
     case 'runtime-replacement-plan':
     case 'adapter-promote':
       runScript('runtime-patch-plan.cjs', subArgs);
+      break;
+    case 'editable':
+    case 'editable-workspace':
+      runScript('generate-editable-workspace.cjs', subArgs);
       break;
     case 'rename-plan':
       runScript('rename-plan.cjs', subArgs);

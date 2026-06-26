@@ -116,6 +116,31 @@ webpack app split into modules), `rebuild` runs in bundle-only mode: it builds
 manifests and synthesizes a minimal entry page, so the recovered modules still
 flow into `promote-plan`, `structure-plan`, and `roadmap`.
 
+### Editable, hot-reloading workspace (`editable`)
+
+```bash
+node scripts/jsmap.cjs editable ./recovered-project-linked ./recovered-editable --top 25
+cd ./recovered-editable && npm install && npm run dev
+```
+
+`editable` turns a linked rebuild into a runnable, **hot-reloading** Vite
+workspace for human-in-the-loop recovery:
+
+- Promotes self-contained recovered functions — including the in-module helper
+  closures they need — into editable `src/recovered/*` modules.
+- Detects **injected backend/auth dependencies** (a recovered function calling a
+  non-built-in method on one of its parameters, e.g. `fileManager.itemForPath(p)`)
+  and scaffolds a fake provider in `src/stubs/*` so the function runs **without**
+  the real backend. The reviewer fills in realistic fake data.
+- Writes an interactive playground (`src/main.js` + `index.html`) that lists each
+  promoted function, runs it with editable args, and **hot-reloads** as you edit
+  `src/recovered/*`. `PROMOTION_MANIFEST.json` records what was promoted, stubbed,
+  and skipped (with reasons).
+
+The full captured app does not run standalone (it needs its real backend/auth and
+any WebGL/WASM runtimes); this is the editable **source layer** with a working
+dev/HMR loop that a human grows by promoting more modules.
+
 For preserved static runtimes that need to be made operable with fake data,
 use the static harness and shim toolset:
 
