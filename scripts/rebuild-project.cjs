@@ -376,6 +376,22 @@ function lineNumberAt(content, offset) {
   return line;
 }
 
+// A webpack module body is an anonymous factory `function(module,exports,require){…}`.
+// Return the statements inside that single wrapper (so analysis sees the real
+// inner declarations) plus the factory's parameter names, or the original
+// top-level nodes when there is no such wrapper.
+function unwrapModuleFactory(astBody) {
+  const nodes = astBody || [];
+  if (nodes.length !== 1) return { nodes, factoryParams: [] };
+  const only = nodes[0];
+  const fn = /^(?:FunctionDeclaration|FunctionExpression|ArrowFunctionExpression)$/.test(only.type)
+    ? only
+    : (only.type === 'ExpressionStatement' && /^(?:FunctionExpression|ArrowFunctionExpression)$/.test(only.expression?.type) ? only.expression : null);
+  if (!fn || fn.body?.type !== 'BlockStatement') return { nodes, factoryParams: [] };
+  const factoryParams = (fn.params || []).map((param) => (param.type === 'Identifier' ? param.name : null)).filter(Boolean);
+  return { nodes: fn.body.body, factoryParams };
+}
+
 function collectLeafCandidates(content, item) {
   const candidates = [];
   let ast;
@@ -384,7 +400,8 @@ function collectLeafCandidates(content, item) {
   } catch {
     return candidates;
   }
-  for (const node of ast.body || []) {
+  const { nodes, factoryParams } = unwrapModuleFactory(ast.body);
+  for (const node of nodes) {
     let name = null;
     let params = [];
     let start = node.start;
@@ -399,12 +416,15 @@ function collectLeafCandidates(content, item) {
         params = (decl.init.params || []).map((param) => param.type === 'Identifier' ? param.name : null).filter(Boolean);
       }
     }
-    if (!name || /^[A-Za-z_$][\w$]?$/.test(name)) continue;
+    // Require a real, multi-character identifier. This rejects the acorn-loose
+    // error placeholder ("✖", emitted for anonymous factories at statement
+    // position) and ultra-short minified names.
+    if (!name || !/^[A-Za-z_$][\w$]{2,}$/.test(name)) continue;
     const body = content.slice(start, end);
       const lines = body.split('\n').length;
       if (lines > 80) continue;
       const externalIdentifiers = collectExternalIdentifiers(body, [name, ...params]);
-      const allowed = new Set(params);
+      const allowed = new Set([...params, ...factoryParams]);
       const unresolved = externalIdentifiers.filter((identifier) => !allowed.has(identifier));
       if (unresolved.length > 4) continue;
       const startLine = (item.startLine || 1) + lineNumberAt(content, start) - 1;

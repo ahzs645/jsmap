@@ -27,7 +27,10 @@ function write(file, content) {
 write(path.join(recoveryDir, 'public', 'app.4242.js'), '(()=>{var m={1:function(e,t,r){t.x=1}};})();\n');
 
 // A webpack-split manifest (modules[], not files[]) plus the split module files.
-const moduleA = 'function(module, exports, require){\n  exports.add = (a, b) => a + b;\n}\n';
+// moduleA wraps a NAMED inner declaration in an anonymous factory: leaf analysis
+// must descend into the factory and surface `parseThing`, not the acorn-loose
+// error placeholder ("✖") it emits for the anonymous wrapper.
+const moduleA = 'function(module, exports, require){\n  function parseThing(input){ return String(input).trim(); }\n  exports.add = (a, b) => a + b;\n  module.exports = { parseThing };\n}\n';
 const moduleB = 'function(module, exports, require){\n  const a = require(1);\n  exports.run = () => a.add(2, 3);\n}\n';
 write(path.join(recoveryDir, 'src/recovered-chunks/app-raw/module/module-1.js'), moduleA);
 write(path.join(recoveryDir, 'src/recovered-chunks/app-raw/component/component-2.js'), moduleB);
@@ -52,6 +55,13 @@ execFileSync(process.execPath, [path.join(REPO, 'scripts/jsmap.cjs'), 'rebuild',
 const moduleIndex = JSON.parse(fs.readFileSync(path.join(linkedDir, 'recovery-module-index.json'), 'utf8'));
 assert.equal(moduleIndex.summary.totalParts, 2, 'module index should contain both webpack modules');
 assert.ok(moduleIndex.entries['app.4242.js'], 'module index should key the entry by the original bundle source');
+
+// Leaf analysis must descend into the webpack factory and never surface the
+// acorn-loose error placeholder.
+const indexText = fs.readFileSync(path.join(linkedDir, 'recovery-module-index.json'), 'utf8');
+assert.doesNotMatch(indexText, /✖/, 'leaf candidates must not include the acorn-loose placeholder');
+const leafNames = moduleIndex.parts.flatMap((part) => (part.analysis.leafCandidates || []).map((leaf) => leaf.name));
+assert.ok(leafNames.includes('parseThing'), 'leaf analysis should find the named inner declaration inside the factory');
 
 const plan = JSON.parse(fs.readFileSync(path.join(linkedDir, 'recovery-link-plan.json'), 'utf8'));
 assert.equal(plan.bundleOnly, true, 'link plan should record bundle-only mode');
