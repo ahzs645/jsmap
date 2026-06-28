@@ -1,0 +1,12 @@
+{
+  "rules": [
+    {
+      "pattern": "console.log($MSG)",
+      "fix": "console.debug($MSG)"
+    },
+    {
+      "pattern": "$OBJ === void 0",
+      "fix": "$OBJ === undefined"
+    }
+  ]
+}

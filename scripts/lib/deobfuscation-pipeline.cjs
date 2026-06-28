@@ -339,6 +339,23 @@ async function transformJavaScript(relativePath, content, options = {}) {
     }
   }
 
+  // Optional restringer pre-pass: resolve string arrays / fold constants before
+  // the main engines run, which gives webcrack/wakaru cleaner input.
+  if (options.restringer) {
+    try {
+      const { restringerPass } = require('./extra-passes.cjs');
+      const res = await timeStage('restringer', () => restringerPass(output, options.restringerOptions || {}));
+      if (res.changed) {
+        output = normalizeCode(res.code);
+        steps.push('restringer');
+        changed = true;
+      }
+      warnings.push(...res.warnings);
+    } catch (error) {
+      warnings.push({ stage: 'restringer', message: error instanceof Error ? error.message : 'restringer failed.' });
+    }
+  }
+
   if (runWebcrack) {
     try {
       const result = await timeStage('webcrack', () => withTimeout(
@@ -407,6 +424,36 @@ async function transformJavaScript(relativePath, content, options = {}) {
       }
     } catch {
       // Non-critical; skip silently
+    }
+  }
+
+  // Optional post-passes wrapping community tools. Each is opt-in and degrades
+  // to a no-op + warning if its dependency is missing. Order matters: modernize
+  // (lebab) -> structural rewrites (ast-grep) -> codemod (jscodeshift) ->
+  // cleanup (putout) -> LLM rename (humanify).
+  const postPasses = [];
+  if (options.lebab) postPasses.push({ name: 'lebab', options: options.lebabOptions });
+  if (options.astGrep && Array.isArray(options.astGrepRules)) {
+    postPasses.push({ name: 'ast-grep', options: { rules: options.astGrepRules, lang: options.astGrepLang } });
+  }
+  if (options.jscodeshift) {
+    postPasses.push({ name: 'jscodeshift', options: { transformPath: options.jscodeshift, parser: options.jscodeshiftParser } });
+  }
+  if (options.putout) postPasses.push({ name: 'putout', options: options.putoutOptions });
+  if (options.humanify) postPasses.push({ name: 'humanify', options: options.humanifyOptions });
+
+  if (postPasses.length > 0) {
+    try {
+      const { runJsPasses } = require('./extra-passes.cjs');
+      const res = await timeStage('extra-passes', () => runJsPasses(output, postPasses));
+      if (res.changed) {
+        output = normalizeCode(res.code);
+        steps.push(...res.steps);
+        changed = true;
+      }
+      warnings.push(...res.warnings);
+    } catch (error) {
+      warnings.push({ stage: 'extra-passes', message: error instanceof Error ? error.message : 'extra-passes failed.' });
     }
   }
 

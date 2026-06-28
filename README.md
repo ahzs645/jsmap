@@ -80,7 +80,12 @@ files under `.jsmap-promote-preview` without changing the runnable rebuild; use
 `--write` only after reviewing the preview.
 `stats` produces a compact report of inferred packages, recovered file counts,
 largest remaining chunks, readiness breakdowns, promotion outputs, and quality
-warnings.
+warnings. It also scores the readability of the deobfuscated snapshots with a
+heuristic, JsDeObsBench-style metric (0–100, A–F) — a weighted blend of identifier
+clarity (non-`_0x`/non-single-char names), dot vs. bracket-string member access,
+line formatting, average identifier length, and escape-sequence cleanliness. The
+report shows the average/median score, grade distribution, and the lowest-scoring
+files as concrete manual-cleanup targets.
 
 For preserved static runtimes that need to be made operable with fake data,
 use the static harness and shim toolset:
@@ -136,6 +141,63 @@ Normal deobfuscated chunks default to `--module-granularity declarations`, which
 uses AST top-level declarations to emit source-like files such as components,
 stores, hooks, classes, and helpers. Use `--module-granularity grouped` when you
 prefer fewer, coarser topic buckets.
+
+### Optional community-tool passes
+
+Beyond the built-in webcrack/wakaru engines, jsmap can run additional passes that
+wrap tools from the community deobfuscation toolkit
+(<https://gist.github.com/0xdevalias/d8b743efb82c0e9406fc69da0d6c6581>). These are
+installed as `optionalDependencies`, lazy-loaded, and each degrades to a no-op with
+a warning if its package is missing, so the core install never breaks:
+
+```bash
+node scripts/jsmap.cjs deobfuscate ./snapshot ./clean --force \
+  --restringer \                       # safe string/proxy/sequence untangling (no eval)
+  --lebab \                            # ES5 -> ES6 modernization (var->const, fn->arrow)
+  --putout \                           # cleanup plugins (remove-debugger, dead code, ...)
+  --jscodeshift fixtures/deobfuscation/codemod-void0-to-undefined.cjs \
+  --ast-grep fixtures/deobfuscation/ast-grep-rules.json \
+  --humanify                           # LLM rename (needs OPENAI_API_KEY/GEMINI_API_KEY)
+```
+
+The same flags work on the `recover` command (they are forwarded into the recovery
+deobfuscation step) and can be toggled per-request through the local deobfuscation
+bridge via an `options` object (e.g. `{ "options": { "putout": true } }`).
+
+Pass ordering inside the pipeline is: aggressive unwrap → **restringer (pre-pass)** →
+webcrack → wakaru → context rename → **lebab → ast-grep → jscodeshift → putout →
+humanify (post-passes)**.
+
+`--humanify` uses [`humanifyjs`](https://github.com/jehna/humanify) (the LLM
+deobfuscator) and requires `OPENAI_API_KEY`, `GEMINI_API_KEY`, or a downloaded local
+model; without credentials it skips cleanly.
+
+Important behavior note discovered while testing: **restringer runs in safe mode by
+default**. Its unsafe (eval-based) methods will execute code to fold values, which
+silently breaks stateful programs — e.g. a counter closure collapses
+`add(i, counter())` into `i + 1`. jsmap disables those methods unless you opt in via
+`restringerOptions.unsafe`. Safe mode still untangles proxies, sequences, and member
+references without altering behavior; webcrack already decodes obfuscator.io string
+arrays safely.
+
+`--ast-grep <file>` takes a JSON file of `{ "rules": [{ "pattern", "fix" }] }`, where
+`fix` may reference ast-grep metavariables (`$VAR`, `$$$VAR`). `--jscodeshift <file>`
+runs a standard jscodeshift transform module against each JS file. The `debundle`
+subcommand wraps the external `debundle`/`reliable-debundle` debundlers and works on
+classic array-style webpack/browserify bundles (entry point defaults to module 0);
+`reliable-debundle` is a GitHub-only fork — set `RELIABLE_DEBUNDLE_BIN` to prefer it.
+jsmap's own `split-wp` remains the primary dependency-free webpack extractor for
+modern bundle shapes.
+
+These passes are exercised against an obfuscator.io preset matrix (string-array
+base64/rc4, control-flow flattening, dead-code injection, full obfuscation) with
+semantic-equivalence assertions, and a readability matrix that reports how much each
+preset's score improves (typically F → A/B, +40–50 points) and asserts the pipeline
+never regresses readability:
+
+```bash
+npm run test:deobfuscation-tools
+```
 
 Use `--engine webcrack`, `--engine wakaru`, or `--engine both` to choose how much
 JavaScript transformation to run. Single-engine mode skips module unpacker

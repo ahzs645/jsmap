@@ -33,6 +33,12 @@ function parseArgs(argv) {
     timeout: null,
     engine: 'both',
     detectModules: null,
+    restringer: false,
+    lebab: false,
+    putout: false,
+    humanify: false,
+    jscodeshift: null,
+    astGrep: null,
   };
   const positional = [];
 
@@ -94,6 +100,29 @@ function parseArgs(argv) {
       case '--detect-modules':
         flags.detectModules = true;
         break;
+      case '--restringer':
+        flags.restringer = true;
+        break;
+      case '--lebab':
+        flags.lebab = true;
+        break;
+      case '--putout':
+        flags.putout = true;
+        break;
+      case '--humanify':
+        flags.humanify = true;
+        break;
+      case '--jscodeshift':
+        if (i + 1 < args.length) {
+          flags.jscodeshift = args[++i];
+        }
+        break;
+      case '--ast-grep':
+      case '--astgrep':
+        if (i + 1 < args.length) {
+          flags.astGrep = args[++i];
+        }
+        break;
       case '--help':
       case '-h':
         printUsage();
@@ -112,6 +141,10 @@ function parseArgs(argv) {
           flags.engine = arg.slice('--engine='.length);
         } else if (arg === '--detect-modules') {
           flags.detectModules = true;
+        } else if (arg.startsWith('--jscodeshift=')) {
+          flags.jscodeshift = arg.slice('--jscodeshift='.length);
+        } else if (arg.startsWith('--ast-grep=') || arg.startsWith('--astgrep=')) {
+          flags.astGrep = arg.slice(arg.indexOf('=') + 1);
         } else if (!arg.startsWith('-')) {
           positional.push(arg);
         } else {
@@ -148,6 +181,17 @@ Options:
   --detect-modules     Run module unpacker detection even in single-engine mode
   --config <path>      Path to config file (.jsmaprc, jsmap.config.json)
   --help, -h           Show this help message
+
+Optional community-tool passes (require optionalDependencies; each degrades to
+a no-op + warning if its package is missing):
+  --restringer         Safe restringer pre-pass (string/proxy/sequence untangling
+                       without eval; behavior-preserving)
+  --lebab              lebab ES5->ES6 modernization (var->const, fn->arrow, ...)
+  --putout             putout cleanup plugins (remove-debugger, dead code, ...)
+  --jscodeshift <f>    Run a jscodeshift codemod module against each JS file
+  --ast-grep <f>       Apply ast-grep {pattern, fix} rules from a JSON file
+  --humanify           LLM-assisted renaming (needs OPENAI_API_KEY / GEMINI_API_KEY;
+                       skips cleanly when no credentials are present)
 `);
 }
 
@@ -509,6 +553,25 @@ async function main() {
     results: [],
   };
 
+  // Load ast-grep rules from a JSON file when --ast-grep <file> is provided.
+  let astGrepRules = null;
+  if (flags.astGrep) {
+    try {
+      const raw = require('node:fs').readFileSync(path.resolve(flags.astGrep), 'utf8');
+      const parsed = JSON.parse(raw);
+      astGrepRules = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.rules) ? parsed.rules : null);
+      if (!astGrepRules) {
+        console.error(`--ast-grep: expected a JSON array of {pattern, fix} or { "rules": [...] } in ${flags.astGrep}`);
+        process.exitCode = 1;
+        return;
+      }
+    } catch (error) {
+      console.error(`--ast-grep: failed to read rules: ${error.message}`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
   const transformOptions = {
     generateSourceMaps: options.generateSourceMaps,
     renameVariables: options.renameVariables,
@@ -517,6 +580,14 @@ async function main() {
     engine: flags.engine,
     detectModules: flags.detectModules ?? flags.engine === 'both',
     progressEvents: options.verbose,
+    // Optional community-tool passes (opt-in via flags).
+    restringer: flags.restringer,
+    lebab: flags.lebab,
+    putout: flags.putout,
+    humanify: flags.humanify,
+    jscodeshift: flags.jscodeshift ? path.resolve(flags.jscodeshift) : undefined,
+    astGrep: Boolean(astGrepRules),
+    astGrepRules: astGrepRules || undefined,
   };
 
   // ── Partition files: passthrough vs transformable ──

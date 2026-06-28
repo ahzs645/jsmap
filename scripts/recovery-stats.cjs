@@ -3,6 +3,12 @@
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const { scoreReadability, gradeFor } = require('./lib/readability-score.cjs');
+
+// Readability scoring caps: skip files larger than this (AST parsing cost) and
+// stop after this many files so `stats` stays fast on huge recoveries.
+const READABILITY_MAX_FILE_BYTES = 1.5 * 1024 * 1024;
+const READABILITY_MAX_FILES = 600;
 
 function printUsage() {
   console.error('Usage: jsmap stats <recovery-or-linked-dir> [--json] [--out <file-prefix>]');
@@ -182,6 +188,76 @@ async function splitStats(recoveryRoot) {
       .map((part) => ({ ...part, classification: classifyPart(part) })),
     largestChunks: Object.values(byChunk).sort((a, b) => b.lines - a.lines || b.bytes - a.bytes).slice(0, 15),
   };
+}
+
+async function readabilityStats(recoveryRoot) {
+  // Score the deobfuscated snapshots — these are the post-pipeline outputs whose
+  // readability tells humans/agents how much manual cleanup remains.
+  const deobfuscatedRoot = path.join(recoveryRoot, 'recovery/deobfuscated');
+  const summary = {
+    scope: 'recovery/deobfuscated',
+    filesScored: 0,
+    filesSkippedLarge: 0,
+    filesUnparsed: 0,
+    averageScore: null,
+    medianScore: null,
+    grade: 'n/a',
+    gradeDistribution: { A: 0, B: 0, C: 0, D: 0, F: 0 },
+    worstFiles: [],
+    bestFiles: [],
+  };
+  if (!exists(deobfuscatedRoot)) return summary;
+
+  const jsFiles = (await walk(deobfuscatedRoot)).filter((file) => /\.[cm]?jsx?$/i.test(file));
+  const scored = [];
+  let truncated = false;
+  for (const file of jsFiles) {
+    if (scored.length >= READABILITY_MAX_FILES) {
+      truncated = true;
+      break;
+    }
+    let stat;
+    try {
+      stat = fs.statSync(file);
+    } catch {
+      continue;
+    }
+    if (stat.size > READABILITY_MAX_FILE_BYTES) {
+      summary.filesSkippedLarge += 1;
+      continue;
+    }
+    const code = fs.readFileSync(file, 'utf8');
+    const result = scoreReadability(code);
+    if (result.score == null) continue;
+    if (!result.parsed) summary.filesUnparsed += 1;
+    scored.push({
+      file: toPosix(path.relative(deobfuscatedRoot, file)),
+      score: result.score,
+      grade: result.grade,
+      bytes: stat.size,
+      signals: result.signals,
+    });
+  }
+
+  if (scored.length === 0) return summary;
+
+  const scores = scored.map((entry) => entry.score).sort((a, b) => a - b);
+  const sum = scores.reduce((acc, value) => acc + value, 0);
+  summary.filesScored = scored.length;
+  summary.truncated = truncated;
+  summary.averageScore = Math.round(sum / scores.length);
+  summary.medianScore = scores[Math.floor((scores.length - 1) / 2)];
+  summary.grade = gradeFor(summary.averageScore);
+  for (const entry of scored) summary.gradeDistribution[entry.grade] += 1;
+  summary.worstFiles = [...scored]
+    .sort((a, b) => a.score - b.score || b.bytes - a.bytes)
+    .slice(0, 10)
+    .map((entry) => ({ file: entry.file, score: entry.score, grade: entry.grade, bytes: entry.bytes }));
+  summary.bestFiles = [...scored]
+    .sort((a, b) => b.score - a.score || b.bytes - a.bytes)
+    .slice(0, 5)
+    .map((entry) => ({ file: entry.file, score: entry.score, grade: entry.grade, bytes: entry.bytes }));
+  return summary;
 }
 
 function packageStats(recoveryRoot) {
@@ -404,6 +480,11 @@ function markdown(report) {
   lines.push(`- Linked entry files: ${report.linked.linkedEntryCount}`);
   lines.push(`- Inferred packages: ${report.packages.packageCount}`);
   lines.push(`- Quality warnings: ${report.quality.warningCount}`);
+  if (report.readability && report.readability.averageScore != null) {
+    const r = report.readability;
+    const dist = Object.entries(r.gradeDistribution).filter(([, v]) => v > 0).map(([k, v]) => `${k}:${v}`).join(' ');
+    lines.push(`- Readability: avg ${r.averageScore}/100 (${r.grade}), median ${r.medianScore}, ${r.filesScored} files [${dist}]`);
+  }
   if (report.linked.moduleIndexSummary?.byReadiness) {
     lines.push(`- Readiness: ${Object.entries(report.linked.moduleIndexSummary.byReadiness).map(([k, v]) => `${k}=${v}`).join(', ')}`);
   }
@@ -492,6 +573,24 @@ function markdown(report) {
   for (const entry of report.linked.largestLinkedEntries.slice(0, 10)) {
     lines.push(`- ${entry.file}: ${formatBytes(entry.bytes)}`);
   }
+  if (report.readability && report.readability.averageScore != null) {
+    const r = report.readability;
+    lines.push('');
+    lines.push('## Readability (heuristic, 0–100)');
+    lines.push('');
+    lines.push(`Scope: \`${r.scope}\` — ${r.filesScored} files scored, average **${r.averageScore}/100 (${r.grade})**, median ${r.medianScore}.`);
+    const dist = Object.entries(r.gradeDistribution).map(([k, v]) => `${k}=${v}`).join(', ');
+    lines.push(`Grade distribution: ${dist}.`);
+    if (r.filesSkippedLarge) lines.push(`Skipped ${r.filesSkippedLarge} file(s) over the size cap.`);
+    if (r.truncated) lines.push(`Note: stopped after ${r.filesScored} files (cap reached).`);
+    if (r.worstFiles.length) {
+      lines.push('');
+      lines.push('Lowest-scoring files (best manual-cleanup targets):');
+      for (const entry of r.worstFiles) {
+        lines.push(`- ${entry.file}: ${entry.score}/100 (${entry.grade}), ${formatBytes(entry.bytes)}`);
+      }
+    }
+  }
   if (report.quality.warningCodes.length) {
     lines.push('');
     lines.push('## Quality Warnings');
@@ -521,6 +620,7 @@ async function main() {
     packages: packageStats(recoveryRoot),
     linked: linkedStats(root),
     quality: qualityStats(recoveryRoot),
+    readability: await readabilityStats(recoveryRoot),
     vendorReplacements: await vendorReplacementStats(root, recoveryRoot),
     wasmContracts: await wasmContractStats(root, recoveryRoot),
     extractionSummary: extraction.summary || null,

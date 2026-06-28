@@ -22,6 +22,7 @@
     "test:recovery-heuristics": "node scripts/test-recovery-heuristics.cjs",
     "test:runtime-patch": "node scripts/test-runtime-patch-plan.cjs",
     "test:static-runtime-tools": "node scripts/test-static-runtime-tools.cjs",
+    "test:deobfuscation-tools": "node scripts/test-deobfuscation-tools.cjs",
     "split:bundle": "node scripts/split-bundle-ast.cjs"
   },
   "dependencies": {
@@ -57,5 +58,14 @@
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.56.1",
     "vite": "^8.0.0"
+  },
+  "optionalDependencies": {
+    "@ast-grep/napi": "^0.44.0",
+    "debundle": "^0.5.4",
+    "humanifyjs": "^2.2.2",
+    "jscodeshift": "^17.3.0",
+    "lebab": "^3.2.9",
+    "putout": "^42.7.18",
+    "restringer": "^2.2.0"
   }
 }

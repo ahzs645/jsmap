@@ -12,7 +12,29 @@ const {
 const HOST = process.env.DEOBFUSCATION_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.DEOBFUSCATION_BRIDGE_PORT || 4318);
 const MAX_BODY_BYTES = Number(process.env.DEOBFUSCATION_BRIDGE_MAX_BODY_BYTES || 64 * 1024 * 1024);
-const CAPABILITIES = ['webcrack', 'wakaru', 'wakaru-unpacker', 'prettier-css', 'prettier-html', 'rename', 'alias-inline'];
+const CAPABILITIES = [
+  'webcrack', 'wakaru', 'wakaru-unpacker', 'prettier-css', 'prettier-html', 'rename', 'alias-inline',
+  // Optional community-tool passes (opt-in per request via `options`).
+  'restringer', 'lebab', 'putout', 'jscodeshift', 'ast-grep', 'humanify',
+];
+
+// Whitelist of request options that may toggle optional passes. Anything not
+// listed here is ignored so request bodies cannot inject arbitrary pipeline
+// options.
+const ALLOWED_OPTION_KEYS = new Set([
+  'engine', 'renameVariables', 'aggressiveBundles', 'detectModules',
+  'restringer', 'lebab', 'putout', 'humanify',
+  'jscodeshift', 'astGrep', 'astGrepRules', 'astGrepLang',
+]);
+
+function sanitizeOptions(rawOptions) {
+  if (!rawOptions || typeof rawOptions !== 'object') return {};
+  const clean = {};
+  for (const key of Object.keys(rawOptions)) {
+    if (ALLOWED_OPTION_KEYS.has(key)) clean[key] = rawOptions[key];
+  }
+  return clean;
+}
 
 function setCorsHeaders(response) {
   response.setHeader('Access-Control-Allow-Origin', '*');
@@ -70,6 +92,7 @@ function isBridgeFileInput(value) {
 async function handleDeobfuscation(request, response) {
   const body = await readJsonBody(request);
   const files = Array.isArray(body.files) ? body.files : null;
+  const requestOptions = sanitizeOptions(body.options);
 
   if (!files || files.some((entry) => !isBridgeFileInput(entry))) {
     sendJson(response, 400, {
@@ -104,7 +127,7 @@ async function handleDeobfuscation(request, response) {
     }
 
     const kind = isJavaScriptPath(file.path) ? 'js' : isCSSPath(file.path) ? 'css' : isHTMLPath(file.path) ? 'html' : 'copy';
-    const transformed = await transformFile(file.path, file.content);
+    const transformed = await transformFile(file.path, file.content, requestOptions);
     if (transformed.changed) {
       transformedCount += 1;
     }
