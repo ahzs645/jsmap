@@ -37,7 +37,8 @@ const RECOVERY_MODES = new Set(['balanced', 'inspect-first']);
 
 function printUsage() {
   console.error(
-    'Usage: jsmap recover <input-dir> [output-dir] [--force] [--repair-wasm] [--recovery-mode balanced|inspect-first] [--large-js-mode preserve|split-raw|full] [--module-granularity grouped|declarations] [--engine webcrack|wakaru|both] [--timeout seconds] [--concurrency N] [--max-transform-mb N] [--min-split-kb N] [--max-split-mb N]',
+    'Usage: jsmap recover <input-dir> [output-dir] [--force] [--repair-wasm] [--recovery-mode balanced|inspect-first] [--large-js-mode preserve|split-raw|full] [--module-granularity grouped|declarations] [--engine webcrack|wakaru|both] [--timeout seconds] [--concurrency N] [--max-transform-mb N] [--min-split-kb N] [--max-split-mb N]\n' +
+      '  Optional community-tool passes: [--restringer] [--lebab] [--putout] [--humanify] [--jscodeshift <transform.js>] [--ast-grep <rules.json>]',
   );
 }
 
@@ -54,6 +55,12 @@ function parseArgs(argv) {
     maxTransformBytes: DEFAULT_MAX_TRANSFORM_BYTES,
     minSplitBytes: DEFAULT_MIN_SPLIT_BYTES,
     maxSplitBytes: DEFAULT_MAX_SPLIT_BYTES,
+    restringer: false,
+    lebab: false,
+    putout: false,
+    humanify: false,
+    jscodeshift: null,
+    astGrep: null,
   };
   const positional = [];
 
@@ -70,6 +77,12 @@ function parseArgs(argv) {
     else if (arg === '--max-transform-mb') flags.maxTransformBytes = Number(argv[++i]) * 1024 * 1024;
     else if (arg === '--min-split-kb') flags.minSplitBytes = Number(argv[++i]) * 1024;
     else if (arg === '--max-split-mb') flags.maxSplitBytes = Number(argv[++i]) * 1024 * 1024;
+    else if (arg === '--restringer') flags.restringer = true;
+    else if (arg === '--lebab') flags.lebab = true;
+    else if (arg === '--putout') flags.putout = true;
+    else if (arg === '--humanify') flags.humanify = true;
+    else if (arg === '--jscodeshift') flags.jscodeshift = argv[++i];
+    else if (arg === '--ast-grep' || arg === '--astgrep') flags.astGrep = argv[++i];
     else if (arg === '--help' || arg === '-h') {
       printUsage();
       process.exit(0);
@@ -2234,6 +2247,13 @@ async function main() {
   if (flags.timeoutSeconds !== null) deobfuscateArgs.push('--timeout', String(flags.timeoutSeconds));
   if (flags.concurrency !== null) deobfuscateArgs.push('--concurrency', String(flags.concurrency));
   deobfuscateArgs.push('--engine', flags.engine);
+  // Forward optional community-tool passes into the recovery deobfuscation step.
+  if (flags.restringer) deobfuscateArgs.push('--restringer');
+  if (flags.lebab) deobfuscateArgs.push('--lebab');
+  if (flags.putout) deobfuscateArgs.push('--putout');
+  if (flags.humanify) deobfuscateArgs.push('--humanify');
+  if (flags.jscodeshift) deobfuscateArgs.push('--jscodeshift', path.resolve(flags.jscodeshift));
+  if (flags.astGrep) deobfuscateArgs.push('--ast-grep', path.resolve(flags.astGrep));
   for (const rel of excludedLargeJs) {
     deobfuscateArgs.push('--exclude', rel);
   }

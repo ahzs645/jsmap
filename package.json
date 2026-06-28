@@ -62,7 +62,7 @@
   "optionalDependencies": {
     "@ast-grep/napi": "^0.44.0",
     "debundle": "^0.5.4",
-    "humanify": "^2.2.27",
+    "humanifyjs": "^2.2.2",
     "jscodeshift": "^17.3.0",
     "lebab": "^3.2.9",
     "putout": "^42.7.18",

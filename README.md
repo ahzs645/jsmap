@@ -155,9 +155,17 @@ node scripts/jsmap.cjs deobfuscate ./snapshot ./clean --force \
   --humanify                           # LLM rename (needs OPENAI_API_KEY/GEMINI_API_KEY)
 ```
 
+The same flags work on the `recover` command (they are forwarded into the recovery
+deobfuscation step) and can be toggled per-request through the local deobfuscation
+bridge via an `options` object (e.g. `{ "options": { "putout": true } }`).
+
 Pass ordering inside the pipeline is: aggressive unwrap → **restringer (pre-pass)** →
 webcrack → wakaru → context rename → **lebab → ast-grep → jscodeshift → putout →
 humanify (post-passes)**.
+
+`--humanify` uses [`humanifyjs`](https://github.com/jehna/humanify) (the LLM
+deobfuscator) and requires `OPENAI_API_KEY`, `GEMINI_API_KEY`, or a downloaded local
+model; without credentials it skips cleanly.
 
 Important behavior note discovered while testing: **restringer runs in safe mode by
 default**. Its unsafe (eval-based) methods will execute code to fold values, which
@@ -170,9 +178,11 @@ arrays safely.
 `--ast-grep <file>` takes a JSON file of `{ "rules": [{ "pattern", "fix" }] }`, where
 `fix` may reference ast-grep metavariables (`$VAR`, `$$$VAR`). `--jscodeshift <file>`
 runs a standard jscodeshift transform module against each JS file. The `debundle`
-subcommand wraps the external `debundle`/`reliable-debundle` debundlers
-(`reliable-debundle` is a GitHub-only fork — set `RELIABLE_DEBUNDLE_BIN`); jsmap's own
-`split-wp` remains the primary dependency-free webpack extractor.
+subcommand wraps the external `debundle`/`reliable-debundle` debundlers and works on
+classic array-style webpack/browserify bundles (entry point defaults to module 0);
+`reliable-debundle` is a GitHub-only fork — set `RELIABLE_DEBUNDLE_BIN` to prefer it.
+jsmap's own `split-wp` remains the primary dependency-free webpack extractor for
+modern bundle shapes.
 
 These passes are exercised against an obfuscator.io preset matrix (string-array
 base64/rc4, control-flow flattening, dead-code injection, full obfuscation) with

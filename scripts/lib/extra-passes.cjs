@@ -442,11 +442,13 @@ async function astGrepPass(code, options = {}) {
 
 // ── humanify: LLM-assisted renaming (optional, requires credentials) ──
 
+// Maps available credentials to a humanifyjs subcommand. humanifyjs supports
+// openai, gemini, and local (downloaded) models — there is no Anthropic
+// provider, so ANTHROPIC_API_KEY is intentionally not mapped here.
 function detectLlmCredentials() {
   const env = process.env;
   if (env.OPENAI_API_KEY) return { provider: 'openai', flag: 'openai' };
   if (env.GEMINI_API_KEY || env.GOOGLE_API_KEY) return { provider: 'gemini', flag: 'gemini' };
-  if (env.ANTHROPIC_API_KEY) return { provider: 'anthropic', flag: 'anthropic' };
   if (env.HUMANIFY_LOCAL_MODEL || env.HUMANIFY_LOCAL) return { provider: 'local', flag: 'local' };
   return null;
 }
@@ -465,21 +467,24 @@ async function humanifyPass(code, options = {}) {
     return result;
   }
 
-  // Confirm the dependency is present before attempting to use it.
+  // humanifyjs (jehna/humanify) ships its CLI at dist/index.mjs with the bin
+  // name `humanify`. Resolve it directly so a missing install is reported
+  // cleanly instead of throwing.
+  let humanifyBin;
   try {
-    await loadModule('humanify');
+    humanifyBin = require.resolve('humanifyjs/dist/index.mjs', { paths: [process.cwd()] });
   } catch (error) {
     result.warnings.push({
       stage: 'humanify',
       message: isProbablyUnavailable(error)
-        ? 'humanify not installed (npm i -D humanify to enable).'
-        : `humanify load failed: ${error.message}`,
+        ? 'humanifyjs not installed (npm i -D humanifyjs to enable LLM renaming).'
+        : `humanifyjs resolve failed: ${error.message}`,
     });
     return result;
   }
 
-  // humanify's stable interface is its CLI; drive it through a subprocess so we
-  // inherit its model orchestration, caching, and provider handling.
+  // Drive humanifyjs through a subprocess so we inherit its model orchestration,
+  // caching, and provider handling. CLI shape: humanify <provider> -o <dir> <input>.
   const { spawnSync } = require('node:child_process');
   const fs = require('node:fs');
   const os = require('node:os');
@@ -488,17 +493,23 @@ async function humanifyPass(code, options = {}) {
   const outDir = path.join(tmpDir, 'out');
   try {
     fs.writeFileSync(inputFile, code, 'utf8');
-    const humanifyBin = require.resolve('humanify/dist/index.mjs', { paths: [process.cwd()] });
-    const args = [humanifyBin, creds.flag, '--outputDir', outDir, inputFile];
+    const args = [humanifyBin, creds.flag, '--outputDir', outDir];
     if (options.model) args.push('--model', options.model);
+    args.push(inputFile);
     const proc = spawnSync(process.execPath, args, {
       encoding: 'utf8',
+      input: '',
       timeout: options.timeoutMs || 300_000,
     });
     if (proc.status !== 0) {
+      const stderr = String(proc.stderr || '')
+        .split('\n')
+        .filter((line) => !/DeprecationWarning|punycode|trace-deprecation/.test(line))
+        .join('\n')
+        .trim();
       result.warnings.push({
         stage: 'humanify',
-        message: `humanify CLI exited with ${proc.status}: ${(proc.stderr || '').slice(0, 300)}`,
+        message: `humanify CLI exited with ${proc.status}: ${(stderr || proc.stdout || '').slice(-300)}`,
       });
       return result;
     }
@@ -578,10 +589,18 @@ async function debundleBundle(code, options = {}) {
   try {
     fs.writeFileSync(inputFile, code, 'utf8');
     // debundle 0.5.x reads a JSON config describing the bundle + output target.
+    // It only handles classic array/object-style bundles and requires
+    // `knownPaths`; webpack also needs an `entryPoint` module id (browserify is
+    // auto-discovered). Default the entry to module 0, which is correct for the
+    // simple IIFE bundles debundle targets. For anything more complex, jsmap's
+    // own split-wp is the robust path.
+    const bundleType = options.bundleType || 'webpack';
     const config = options.config || {
-      type: options.bundleType || 'webpack',
-      entryPoint: options.entryPoint || undefined,
-      knownPaths: {},
+      type: bundleType,
+      entryPoint: options.entryPoint !== undefined
+        ? options.entryPoint
+        : (bundleType === 'webpack' ? 0 : undefined),
+      knownPaths: options.knownPaths || {},
       options: { outputDirectory: outDir },
     };
     fs.writeFileSync(configFile, JSON.stringify(config, null, 2), 'utf8');
@@ -589,6 +608,9 @@ async function debundleBundle(code, options = {}) {
     const args = [resolved.bin, '--input', inputFile, '--output', outDir, '--config', configFile];
     const proc = spawnSync(process.execPath, args, {
       encoding: 'utf8',
+      // Close stdin so debundle's interactive inquirer prompts get EOF and fail
+      // fast instead of hanging until the timeout.
+      input: '',
       timeout: options.timeoutMs || 120_000,
     });
     if (proc.status !== 0) {

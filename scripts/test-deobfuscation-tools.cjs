@@ -303,15 +303,22 @@ async function main() {
     return `ran with ${creds.provider}`;
   });
 
-  // ── 8. debundle availability + graceful report ──
+  // ── 8. debundle: real extraction when installed, graceful report otherwise ──
   section('8. debundle integration');
-  await test('debundle returns a structured report', async () => {
-    const report = await debundleBundle('(function(){var a=1;})();');
+  await test('debundle extracts modules from a classic webpack bundle', async () => {
+    const fs = require('node:fs');
+    const bundle = fs.readFileSync(
+      path.resolve(__dirname, '../fixtures/deobfuscation/webpack-classic-bundle.js'),
+      'utf8',
+    );
+    const report = await debundleBundle(bundle, { bundleType: 'webpack' });
     assert.ok(report && Array.isArray(report.modules), 'expected a structured debundle report');
-    assert.ok(typeof report.ok === 'boolean', 'expected an ok flag');
-    return report.tool
-      ? `tool=${report.tool} ok=${report.ok} modules=${report.modules.length}`
-      : `no debundler installed (graceful): ${report.warnings[0] || ''}`;
+    if (!report.tool) {
+      return `no debundler installed (graceful): ${report.warnings[0] || ''}`;
+    }
+    assert.ok(report.ok, `debundle did not extract modules: ${report.warnings.join('; ')}`);
+    assert.ok(report.modules.length >= 2, `expected >=2 modules, got ${report.modules.length}`);
+    return `tool=${report.tool} extracted ${report.modules.length} modules: ${report.modules.join(', ')}`;
   });
 
   // ── Summary ──
