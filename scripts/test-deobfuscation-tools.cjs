@@ -29,6 +29,7 @@ const {
   detectLlmCredentials,
 } = require('../scripts/lib/extra-passes.cjs');
 const { transformJavaScript } = require('../scripts/lib/deobfuscation-pipeline.cjs');
+const { scoreReadability, compareReadability } = require('../scripts/lib/readability-score.cjs');
 
 // ── Test runner scaffolding ──
 
@@ -320,6 +321,81 @@ async function main() {
     assert.ok(report.modules.length >= 2, `expected >=2 modules, got ${report.modules.length}`);
     return `tool=${report.tool} extracted ${report.modules.length} modules: ${report.modules.join(', ')}`;
   });
+
+  // ── 9. Readability improvement matrix (JsDeObsBench-style) ──
+  section('9. Readability improvement (heuristic 0–100; pipeline must not regress)');
+  await test('readability scorer ranks clean > minified > obfuscated', () => {
+    const clean = scoreReadability(
+      'function calculateTotal(items, rate) {\n  return items.reduce((sum, item) => sum + item.price, 0) * (1 + rate);\n}',
+    ).score;
+    const minified = scoreReadability('function c(a,b){return a.reduce((s,i)=>s+i.price,0)*(1+b);}').score;
+    const obfuscated = scoreReadability(obfuscate(ORACLE_SOURCE, PRESETS['full-obfuscation'])).score;
+    assert.ok(clean > minified, `clean (${clean}) should beat minified (${minified})`);
+    assert.ok(minified > obfuscated, `minified (${minified}) should beat obfuscated (${obfuscated})`);
+    return `clean ${clean} > minified ${minified} > obfuscated ${obfuscated}`;
+  });
+  const readabilityRows = [];
+  for (const [presetName, preset] of Object.entries(PRESETS)) {
+    const obfuscated = obfuscate(ORACLE_SOURCE, preset);
+    const res = await transformJavaScript('sample.js', obfuscated, {
+      engine: 'both',
+      restringer: true,
+      lebab: true,
+      putout: true,
+      renameVariables: false,
+      aggressiveBundles: false,
+      detectModules: false,
+    });
+    const cmp = compareReadability(obfuscated, res.code);
+    readabilityRows.push({ presetName, ...cmp });
+    await test(`[${presetName}] pipeline does not reduce readability`, () => {
+      assert.ok(cmp.before.score != null && cmp.after.score != null, 'failed to score readability');
+      assert.ok(
+        cmp.after.score >= cmp.before.score,
+        `readability regressed: ${cmp.before.score} → ${cmp.after.score}`,
+      );
+      const sign = cmp.delta >= 0 ? '+' : '';
+      return `${cmp.before.score} (${cmp.before.grade}) → ${cmp.after.score} (${cmp.after.grade})  [${sign}${cmp.delta}, ${sign}${cmp.percentDelta}%]`;
+    });
+  }
+
+  console.log('\n  Readability matrix (obfuscated → pipeline):');
+  console.log('  ' + 'preset'.padEnd(26) + 'obf'.padStart(5) + 'deob'.padStart(6) + 'delta'.padStart(7));
+  for (const row of readabilityRows) {
+    const sign = row.delta >= 0 ? '+' : '';
+    console.log(
+      '  ' +
+        row.presetName.padEnd(26) +
+        String(row.before.score).padStart(5) +
+        String(row.after.score).padStart(6) +
+        `${sign}${row.delta}`.padStart(7),
+    );
+  }
+
+  // Per-tool readability lift on a single obfuscated sample (informational).
+  section('10. Per-tool readability lift on string-array-base64 sample');
+  const sample = obfuscate(ORACLE_SOURCE, PRESETS['string-array-base64']);
+  const baseScore = scoreReadability(sample).score;
+  const toolConfigs = [
+    ['webcrack+wakaru', { engine: 'both' }],
+    ['+restringer', { engine: 'both', restringer: true }],
+    ['+restringer+lebab', { engine: 'both', restringer: true, lebab: true }],
+    ['+restringer+lebab+putout', { engine: 'both', restringer: true, lebab: true, putout: true }],
+  ];
+  for (const [label, cfg] of toolConfigs) {
+    const res = await transformJavaScript('s.js', sample, {
+      ...cfg,
+      renameVariables: false,
+      aggressiveBundles: false,
+      detectModules: false,
+    });
+    const score = scoreReadability(res.code).score;
+    await test(`config "${label}" produces a valid readability score`, () => {
+      assert.ok(typeof score === 'number', 'expected a numeric score');
+      const delta = score - baseScore;
+      return `score ${score}/100 (${delta >= 0 ? '+' : ''}${delta} vs obfuscated ${baseScore})`;
+    });
+  }
 
   // ── Summary ──
   console.log(`\n${'='.repeat(60)}`);

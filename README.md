@@ -80,7 +80,12 @@ files under `.jsmap-promote-preview` without changing the runnable rebuild; use
 `--write` only after reviewing the preview.
 `stats` produces a compact report of inferred packages, recovered file counts,
 largest remaining chunks, readiness breakdowns, promotion outputs, and quality
-warnings.
+warnings. It also scores the readability of the deobfuscated snapshots with a
+heuristic, JsDeObsBench-style metric (0–100, A–F) — a weighted blend of identifier
+clarity (non-`_0x`/non-single-char names), dot vs. bracket-string member access,
+line formatting, average identifier length, and escape-sequence cleanliness. The
+report shows the average/median score, grade distribution, and the lowest-scoring
+files as concrete manual-cleanup targets.
 
 For preserved static runtimes that need to be made operable with fake data,
 use the static harness and shim toolset:
@@ -186,7 +191,9 @@ modern bundle shapes.
 
 These passes are exercised against an obfuscator.io preset matrix (string-array
 base64/rc4, control-flow flattening, dead-code injection, full obfuscation) with
-semantic-equivalence assertions:
+semantic-equivalence assertions, and a readability matrix that reports how much each
+preset's score improves (typically F → A/B, +40–50 points) and asserts the pipeline
+never regresses readability:
 
 ```bash
 npm run test:deobfuscation-tools
