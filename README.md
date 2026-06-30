@@ -207,9 +207,32 @@ fake-credential paths a flag unlocks (`__e2eTests → accessToken`), and exposed
 hooks (`__e2eStore`), then prints a boot recipe + bootstrap `<script>`. On the
 AutoCAD capture, applying it routes init past the `getUserSettings()` backend
 call and the app reaches **"Initializing AutoCAD"** — the real app booting,
-not the marketing page. See [docs/auth-skip.md](docs/auth-skip.md) for the full
-four-stage case study (Sign In → shell mounts → app boots → backend territory)
-and the exact boundary.
+not the marketing page.
+
+### Mapping and driving a booted capture (`action-catalog`, `drive`)
+
+```bash
+node scripts/jsmap.cjs action-catalog <file-or-dir> --top 40   # static map
+node scripts/jsmap.cjs drive <served-url> --param fabricTests=1 --dump-store
+```
+
+Once a capture boots, it often *idles* on a loader — waiting, not erroring.
+`action-catalog` maps the redux layer statically: the guarded `window.__store`
+handle, the **boot-gate flags** (`*Initialized`/`*Ready` that a backend/config
+response was supposed to flip), the saga effect vocabulary, and the dispatchable
+action types — so you know what is stalling and what you could dispatch. `drive`
+then boots the served capture in headless Chromium with a reusable offline-stub
+ruleset (config/flag services answered with a completing stream, identity with a
+profile, analytics swallowed), auto-detects the store, dumps its state,
+dispatches actions, and screenshots. Needs Playwright (`npm i -D playwright-core`).
+
+On the AutoCAD capture these confirm the exact boundary: the store
+(`window.__e2eStore`) is never exposed because the real app-mount is gated behind
+a backend-driven boot-gate chain (`defaultAppSettingsLoaded` → `canvasLoaded` →
+`dwgReady`) — so a static capture idles at "Initializing". See
+[docs/auth-skip.md](docs/auth-skip.md) for the full five-stage case study (Sign
+In → shell mounts → app boots → walls mapped → backend territory) and the exact
+boundary.
 
 For preserved static runtimes that need to be made operable with fake data,
 use the static harness and shim toolset:

@@ -135,9 +135,59 @@ exposed hooks:  window.__e2eStore  window.__e2eTestFabric
 Pasting that bootstrap `<script>` into the harness `<head>` (before the bundles)
 and loading with `?fabricTests=1` routes init down the offline/default path. The
 `getUserSettings()` crash disappears and the app reaches **"Initializing
-AutoCAD"** — the real open-DWG flow, not the marketing page. It then waits on a
-document/CAD-kernel-ready event that the e2e harness or backend would normally
-drive (the store is on `window.__e2eStore` if you want to drive it further).
+AutoCAD"** — the real open-DWG flow, not the marketing page.
+
+## Mapping the remaining walls (`action-catalog` + `drive`)
+
+Past the crash the app *idles* on a loader — not erroring, waiting. To see what
+on, map the redux layer statically:
+
+```bash
+node scripts/jsmap.cjs action-catalog ./recovered-project/public --top 40
+```
+
+On the AutoCAD capture this prints, in one shot, what took many manual probes to
+find:
+
+```
+Reach the live store:  window.__e2eStore = t   [guard: window.__e2eTests || M]
+Boot-gate flags:       featureFlagsInitialized, defaultAppSettingsLoaded,
+                       canvasLoaded, canvasReady, dwgReady, isReady, …
+Action types:          fileManager/NEW_DRAWING, file/UPLOAD, fileManager/START_SAVE, …
+```
+
+The **boot-gate flags** are the things an init poll/saga waits on; each is
+normally flipped by a backend/config response that never arrives offline (the
+first, `featureFlagsInitialized`, is gated on LaunchDarkly, which returns `204`
+with no server). The **store handle** is how you would reach in and drive it; the
+**action types** are what you would dispatch (e.g. `fileManager/NEW_DRAWING`).
+
+Then boot it for real and try to drive it:
+
+```bash
+# serve the capture (jsmap harness), then:
+node scripts/jsmap.cjs drive http://localhost:5292/ \
+  --param fabricTests=1 --set __e2eTests=true \
+  --userinfo ./userinfo.json --dump-store \
+  --dispatch '{"type":"fileManager/NEW_DRAWING"}' --screenshot out.png
+```
+
+`drive` boots the capture in headless Chromium with a reusable **offline-stub
+ruleset** (config/flag services answered with a stream that *completes* init,
+identity endpoints with a profile, analytics swallowed, generic APIs given an
+empty-but-valid shape), auto-detects the redux store, dumps its state, dispatches
+your actions, and screenshots. It is the runtime end of the same workflow.
+
+### Where it actually stops, and why
+
+On AutoCAD, `drive --dump-store` reports **no store** — `window.__e2eStore` is
+never set even though its guard (`window.__e2eTests`) is satisfied. The reason is
+structural: the store is exposed inside the **real app-mount** function, and that
+mount never runs. "Initializing AutoCAD" is painted by an *earlier* bootstrap
+stage; the real mount is gated behind the boot-gate chain above
+(`defaultAppSettingsLoaded` → `canvasLoaded` → `dwgReady`), every link of which a
+backend or the e2e harness would normally drive. No amount of client-side
+patching supplies that data.
 
 ## What you can realistically expect
 
@@ -148,19 +198,22 @@ The capture's recovery progresses in clear stages, each removing one wall:
 | 1 | (none) | Sign In landing |
 | 2 | `auth-scan --apply` | login wall gone; shell mounts, throws on `getUserSettings()` |
 | 3 | `offline-mode` recipe | backend path skipped; app boots to "Initializing AutoCAD" |
-| 4 | drive `window.__e2eStore` / supply a document + WASM kernel | app-specific; backend territory |
+| 4 | `action-catalog` + `drive` | map the boot-gate chain + store handle; confirm the real mount is backend-gated |
+| 5 | supply a document + WASM kernel + drive the gate chain | rebuilding the backend; out of scope for static recovery |
 
 - ✅ The login landing disappears and the **real app** boots.
 - ✅ Init runs past identity/settings via the app's own offline mode.
-- ⛔ The editor canvas needs a document + the streamed WASM CAD kernel; in a
-  static capture that data is either absent or driven by the e2e harness, so the
-  app idles at "Initializing".
+- ✅ The boot-gate chain and store handle are mapped, so you know *exactly* what
+  is missing rather than guessing.
+- ⛔ The editor canvas needs a document + the streamed WASM CAD kernel, and the
+  app-mount that exposes the store is gated on backend-driven boot flags. In a
+  static capture that data is absent, so the app idles at "Initializing".
 
-Stage 4 — driving the exposed store or stubbing the document/kernel — is a
-separate, app-specific effort (see `jsmap editable`, which scaffolds fake stubs
-for injected backend/auth dependencies). It is closer to rebuilding the backend
-than to recovering the frontend, which is why this toolkit stops at giving you
-the switches and an honest map of the remaining walls.
+The toolkit deliberately stops at giving you the switches, the map, and an honest
+boundary. Going further (driving the gate chain, stubbing the document/kernel) is
+a separate, app-specific effort — see `jsmap editable`, which scaffolds fake
+stubs for injected backend/auth dependencies — and is closer to rebuilding the
+backend than to recovering the frontend.
 
 ## A note on intended use
 

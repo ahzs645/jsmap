@@ -197,6 +197,22 @@ Commands:
       __e2eStore). Prints a concrete boot recipe + a bootstrap <script>. Pair
       with auth-scan to also remove the login wall. See docs/auth-skip.md.
 
+  action-catalog <file-or-dir> [--json] [--out <prefix>] [--top N]
+      Map a captured redux/saga app for driving: the guarded window.__store
+      handle, boot-gate flags (*Initialized/*Ready that stall init offline), the
+      saga effect vocabulary, and the dispatchable action types. Pairs with
+      auth-scan + offline-mode + drive. See docs/auth-skip.md.
+
+  drive <served-url> [--param k=v] [--set name=value] [--userinfo <file>]
+        [--wait ms] [--store-global <name>] [--dispatch <json>] [--eval <js>]
+        [--dump-store] [--screenshot <path>] [--exe <chromium>]
+      Boot a *served* capture in headless Chromium with an offline-stub ruleset
+      (flag/config services answered with a completing stream, identity with a
+      profile, analytics swallowed), auto-detect its redux store, dump state,
+      dispatch actions, and screenshot. Needs Playwright. Serve the capture with
+      'harness', apply auth-scan/offline-mode, use action-catalog for the store
+      key + action types, then drive it.
+
   harness <recovery-dir> [--framework next]
       Create or update a scripts/serve-public.mjs static runtime harness for a
       preserved public/ directory. Includes SPA route fallback, extensionless
@@ -598,6 +614,13 @@ function main() {
     case 'offline-modes':
     case 'test-mode':
       runScript('scan-offline-modes.cjs', subArgs);
+      break;
+    case 'action-catalog':
+    case 'actions':
+      runScript('scan-redux-actions.cjs', subArgs);
+      break;
+    case 'drive':
+      runScript('drive-capture.cjs', subArgs);
       break;
     case 'rename-plan':
       runScript('rename-plan.cjs', subArgs);
