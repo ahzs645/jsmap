@@ -170,6 +170,31 @@ real auth + backend to render, even with all chunks present.) This is exactly ho
 the two AutoCAD captures differ: a 3-bundle capture is `missing-static-chunks`,
 while a richer 6-bundle capture reaches `entry-runs-but-dynamic-chunks-missing`.
 
+### Skipping the login wall (`auth-scan`)
+
+```bash
+node scripts/jsmap.cjs auth-scan <file-or-dir>            # scan: report gates
+node scripts/jsmap.cjs auth-scan ./public/app.js --apply  # write *.authskip.js
+```
+
+A captured SPA served statically lands on its signed-out "Sign In" landing even
+when you have all the JS, because a **client-side** auth gate decides — before
+anything renders — that there is no logged-in user. That gate is deterministic
+and lives in the bundle, so it can be found and forced open for a
+human-in-the-loop review. `auth-scan` detects the three gate shapes (auth-status
+enum switches like `AUTHENTICATED`/`NOT_AUTHENTICATED`, `isLoggedIn()`-style
+predicate methods, and login-route redirects) and, with `--apply`, writes
+neutralized `*.authskip.js` copies (originals untouched) plus an
+`auth-skip-manifest.json`.
+
+This only removes the **client-side** wall. The authenticated experience is
+backend-driven — identity, settings, documents, entitlements, and any streamed
+WASM kernel are not in a static capture — so expect the app shell to mount and
+then error on its first backend call. On the AutoCAD capture this flips the Sign
+In landing into a mounting app shell that then throws on
+`session.identity.getUserSettings()`. See [docs/auth-skip.md](docs/auth-skip.md)
+for the full case study and the exact boundary.
+
 For preserved static runtimes that need to be made operable with fake data,
 use the static harness and shim toolset:
 

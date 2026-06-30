@@ -179,6 +179,16 @@ Commands:
       then reports missing chunks/entry modules and separate runtimes. Exits 3
       when a required chunk was not captured (the app would render nothing).
 
+  auth-scan <file-or-dir> [--apply] [--json] [--out <prefix>]
+      Find client-side authentication gates that keep a captured SPA on its
+      signed-out "Sign In" landing: auth-status enum switches
+      (AUTHENTICATED/NOT_AUTHENTICATED), isLoggedIn()/isAuthenticated()
+      predicate methods, and login-route redirects. Scan-only by default. With
+      --apply, write neutralized <name>.authskip.js copies (originals untouched)
+      plus auth-skip-manifest.json so a human-in-the-loop can load the
+      authenticated shell. Neutralizing only removes the client-side login wall;
+      the authenticated experience is still backend-driven (see docs/auth-skip.md).
+
   harness <recovery-dir> [--framework next]
       Create or update a scripts/serve-public.mjs static runtime harness for a
       preserved public/ directory. Includes SPA route fallback, extensionless
@@ -245,6 +255,8 @@ Examples:
   node scripts/jsmap.cjs rename-plan ./recovered-project-linked --scope promoted
   node scripts/jsmap.cjs editable ./recovered-project-linked ./recovered-editable --top 25
   node scripts/jsmap.cjs rename-apply ./recovered-project-linked --dry-run
+  node scripts/jsmap.cjs auth-scan ./recovered-project/public --out ./auth-gates
+  node scripts/jsmap.cjs auth-scan ./public/app.js --apply
   node scripts/jsmap.cjs harness ./recovered-project --framework next
   node scripts/jsmap.cjs next-doctor ./recovered-project
   node scripts/jsmap.cjs shim-api ./recovered-project --record
@@ -568,6 +580,10 @@ function main() {
     case 'boot-check':
     case 'boot-readiness':
       runScript('analyze-boot-readiness.cjs', subArgs);
+      break;
+    case 'auth-scan':
+    case 'auth-skip':
+      runScript('scan-auth-gates.cjs', subArgs);
       break;
     case 'rename-plan':
       runScript('rename-plan.cjs', subArgs);
