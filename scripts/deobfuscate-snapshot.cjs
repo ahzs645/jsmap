@@ -9,6 +9,9 @@ const {
   isCSSPath,
   isHTMLPath,
   isTransformablePath,
+  unwrapHtmlWrappedJs,
+  classifySourceMapContent,
+  repairBeautifierDamageIfBroken,
   loadConfigFile,
   mergeConfigWithFlags,
   matchesExcludePattern,
@@ -549,6 +552,12 @@ async function main() {
     htmlTransformedCount: 0,
     unpackedBundleCount: 0,
     excludedCount: 0,
+    htmlUnwrappedCount: 0,
+    htmlUnwrappedFiles: [],
+    beautifierRepairedCount: 0,
+    beautifierRepairedFiles: [],
+    invalidSourceMapCount: 0,
+    invalidSourceMaps: [],
     concurrency,
     results: [],
   };
@@ -602,10 +611,28 @@ async function main() {
     if (matchesExcludePattern(normalizedPath, options.exclude)) {
       passthroughFiles.push({ absoluteFilePath, normalizedPath, excluded: true });
     } else {
-      const content = await fs.readFile(absoluteFilePath, 'utf8').catch(() => null);
+      let content = await fs.readFile(absoluteFilePath, 'utf8').catch(() => null);
       if (content == null || !isTransformablePath(normalizedPath)) {
         passthroughFiles.push({ absoluteFilePath, normalizedPath, excluded: false });
       } else {
+        // Repair HTML-wrapped JS captures (browser "Save as"/view-source/mirror)
+        // so the pipeline transforms real JavaScript instead of an HTML document.
+        if (isJavaScriptPath(normalizedPath)) {
+          const recovered = unwrapHtmlWrappedJs(content);
+          if (recovered) {
+            report.htmlUnwrappedCount += 1;
+            report.htmlUnwrappedFiles.push(normalizedPath);
+            content = recovered.code;
+          }
+          // Repair pretty-printer damage (split compound tokens) that makes the
+          // captured JS unparseable, but only when it actually fixes parsing.
+          const repaired = repairBeautifierDamageIfBroken(content);
+          if (repaired) {
+            report.beautifierRepairedCount += 1;
+            report.beautifierRepairedFiles.push({ path: normalizedPath, repairs: repaired.repairs });
+            content = repaired.code;
+          }
+        }
         transformableFiles.push({ absoluteFilePath, normalizedPath, content });
       }
     }
@@ -623,6 +650,18 @@ async function main() {
     const kind = isJavaScriptPath(normalizedPath) ? 'js'
       : isCSSPath(normalizedPath) ? 'css'
         : isHTMLPath(normalizedPath) ? 'html' : 'copy';
+    // Flag captured source maps that are not usable maps (e.g. the SPA/app-shell
+    // HTML returned for a missing .map route) instead of copying them silently.
+    if (!excluded && /\.map$/i.test(normalizedPath)) {
+      const mapContent = await fs.readFile(absoluteFilePath, 'utf8').catch(() => null);
+      if (mapContent != null) {
+        const verdict = classifySourceMapContent(mapContent);
+        if (!verdict.valid) {
+          report.invalidSourceMapCount += 1;
+          report.invalidSourceMaps.push({ path: normalizedPath, reason: verdict.reason });
+        }
+      }
+    }
     const result = { path: normalizedPath, kind, changed: false, excluded };
     report.results.push(result);
     if (excluded) report.excludedCount += 1;
@@ -738,6 +777,15 @@ async function main() {
   }
   if (report.unpackedBundleCount > 0) {
     parts.push(`Detected embedded module wrappers in ${report.unpackedBundleCount} files.`);
+  }
+  if (report.htmlUnwrappedCount > 0) {
+    parts.push(`Repaired ${report.htmlUnwrappedCount} HTML-wrapped JS capture(s).`);
+  }
+  if (report.beautifierRepairedCount > 0) {
+    parts.push(`Repaired pretty-printer damage in ${report.beautifierRepairedCount} JS file(s).`);
+  }
+  if (report.invalidSourceMapCount > 0) {
+    parts.push(`Warning: ${report.invalidSourceMapCount} captured .map file(s) are not usable source maps (e.g. SPA/app-shell HTML).`);
   }
   if (report.excludedCount > 0) {
     parts.push(`Excluded ${report.excludedCount} files.`);

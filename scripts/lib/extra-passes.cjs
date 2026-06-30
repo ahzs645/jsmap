@@ -326,7 +326,6 @@ async function jscodeshiftPass(code, options = {}) {
   let transform;
   try {
     const resolved = path.resolve(transformPath);
-    // eslint-disable-next-line global-require, import/no-dynamic-require
     const transformModule = require(resolved);
     transform = transformModule.default || transformModule;
   } catch (error) {

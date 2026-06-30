@@ -2,6 +2,7 @@ const path = require('node:path');
 const { webcrack } = require('webcrack');
 const { runTransformationRules } = require('@wakaru/unminify');
 const { unpack } = require('@wakaru/unpacker');
+const acornLoose = require('acorn-loose');
 
 const JS_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx']);
 const CSS_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less']);
@@ -54,6 +55,157 @@ function isHTMLPath(filePath) {
 
 function isTransformablePath(filePath) {
   return isJavaScriptPath(filePath) || isCSSPath(filePath) || isHTMLPath(filePath);
+}
+
+// ── Captured-source sanitization ──
+//
+// Real-world captures (browser "Save as", view-source, naive site mirrors, or a
+// server that returns its SPA index.html for unknown routes) frequently save
+// JavaScript and source-map responses wrapped in an HTML document. A captured
+// `.js` then looks like `<html>…<pre>(()=&gt;{…}</pre></html>` with the code
+// HTML-entity-encoded, and a captured `.js.map` is often just the app shell
+// HTML. Classifying by file extension alone makes the pipeline transform that
+// HTML as if it were JavaScript (a no-op that is reported as success) and treat
+// the fake map as a real source map. These helpers detect and repair that.
+
+const HTML_DOCUMENT_START = /^\uFEFF?\s*<(?:!doctype\s+html|!--|html\b|head\b|body\b|pre\b|div\b)/i;
+
+function looksLikeHtmlDocument(content) {
+  if (typeof content !== 'string' || !content) return false;
+  return HTML_DOCUMENT_START.test(content.slice(0, 256));
+}
+
+function decodeHtmlEntities(input) {
+  return input
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => safeFromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => safeFromCodePoint(parseInt(dec, 10)))
+    .replace(/&amp;/g, '&'); // must be decoded last so other entities are not double-decoded
+}
+
+function safeFromCodePoint(code) {
+  if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return '';
+  try {
+    return String.fromCodePoint(code);
+  } catch {
+    return '';
+  }
+}
+
+// Attempt to recover JavaScript text from an HTML-wrapped capture.
+// Returns { code, method } when recovery looks viable, otherwise null.
+function unwrapHtmlWrappedJs(content) {
+  if (!looksLikeHtmlDocument(content)) return null;
+  // Browsers wrap raw text/JS responses in a single <pre> block.
+  const pre = /<pre\b[^>]*>([\s\S]*?)<\/pre>/i.exec(content);
+  if (pre) {
+    const code = decodeHtmlEntities(pre[1]).trim();
+    if (code) return { code, method: 'pre-unwrap' };
+  }
+  return null; // looked like HTML but no recoverable code block (e.g. a real SPA shell)
+}
+
+// Classify the content of a captured `.map` file.
+// Returns { valid, reason } so callers can warn precisely instead of silently
+// skipping a map that is actually an HTML shell or a degenerate no-op map.
+function classifySourceMapContent(content) {
+  if (typeof content !== 'string' || !content.trim()) {
+    return { valid: false, reason: 'empty' };
+  }
+  if (looksLikeHtmlDocument(content)) {
+    return { valid: false, reason: 'html-shell' };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return { valid: false, reason: 'not-json' };
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    return { valid: false, reason: 'not-object' };
+  }
+  if (parsed.version !== 3 && parsed.version !== '3') {
+    return { valid: false, reason: 'no-version-3' };
+  }
+  const hasMappings = typeof parsed.mappings === 'string' && parsed.mappings.length > 0;
+  const hasSections = Array.isArray(parsed.sections) && parsed.sections.length > 0;
+  if (!hasMappings && !hasSections) {
+    return { valid: false, reason: 'no-mappings' };
+  }
+  return { valid: true, reason: 'ok' };
+}
+
+// ── Beautifier-damage repair ──
+//
+// Some captures save JavaScript that was run through a buggy pretty-printer which
+// inserts whitespace inside compound tokens, producing code that no longer parses
+// (and so silently fails to load in the browser). The spaced forms below are not
+// valid JavaScript, so reversing them is deterministic:
+//   a?.b      -> a ? .b       (optional chaining)
+//   a??b      -> a ? ? b      (nullish coalescing)
+//   a??=b     -> a ?? = b     (logical assignment; also ||= &&=)
+//   import(x) -> import (x)   (dynamic import)
+//   yield f() -> yield<newline>f()
+//   4n,0x1Fn  -> 4 n, 0x1F n  (BigInt literals)
+//   {#x}      -> {# x}        (private class fields)
+const BEAUTIFIER_REPAIRS = [
+  ['optional-chaining', /\?[ \t]+\.(?=[A-Za-z_$([])/g, '?.'],
+  ['nullish-coalescing', /\?[ \t]+\?/g, '??'],
+  ['nullish-assign', /\?\?[ \t]+=(?!=)/g, '??='],
+  ['or-assign', /\|\|[ \t]+=(?!=)/g, '||='],
+  ['and-assign', /&&[ \t]+=(?!=)/g, '&&='],
+  ['dynamic-import', /\bimport[ \t]+\(/g, 'import('],
+  ['yield-split', /\byield[ \t]*\n[ \t]*(?=[A-Za-z_$`'"([!~]|import\b)/g, 'yield '],
+  ['bigint-literal', /\b(0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|\d+)[ \t]+n(?![\w$])/g, '$1n'],
+  ['private-field', /#[ \t\r\n]+(?=[A-Za-z_$])/g, '#'],
+];
+
+// Apply the deterministic compound-token repairs. Returns { code, repairs, total }.
+function repairBeautifierDamage(code) {
+  let result = code;
+  const repairs = {};
+  for (const [name, pattern, replacement] of BEAUTIFIER_REPAIRS) {
+    const matches = result.match(pattern);
+    if (matches && matches.length) {
+      repairs[name] = matches.length;
+      result = result.replace(pattern, replacement);
+    }
+  }
+  const total = Object.values(repairs).reduce((sum, count) => sum + count, 0);
+  return { code: result, repairs, total };
+}
+
+let _acorn = null;
+function getAcorn() {
+  if (!_acorn) _acorn = require('acorn');
+  return _acorn;
+}
+
+function isStrictlyParseable(code) {
+  const acorn = getAcorn();
+  for (const sourceType of ['script', 'module']) {
+    try {
+      acorn.parse(code, { ecmaVersion: 'latest', sourceType, allowReturnOutsideFunction: true });
+      return true;
+    } catch { /* try next */ }
+  }
+  return false;
+}
+
+// Repair beautifier damage only when the input does not parse but the repaired
+// version does. This is conservative: valid code is never touched, and a partial
+// repair that still does not parse is discarded. Returns { code, repairs, total }
+// or null.
+function repairBeautifierDamageIfBroken(code) {
+  if (typeof code !== 'string' || !code) return null;
+  if (isStrictlyParseable(code)) return null;
+  const repaired = repairBeautifierDamage(code);
+  if (repaired.total > 0 && isStrictlyParseable(repaired.code)) return repaired;
+  return null;
 }
 
 async function withMutedConsoleError(callback) {
@@ -196,22 +348,82 @@ function inferVariableRenames(code) {
   return renames;
 }
 
+// Decide whether an Identifier node sits in a position that is a genuine
+// variable reference (safe to rename) rather than a property name, key, label,
+// or import/export alias (which would change semantics if renamed).
+function isRenamableIdentifierPosition(node, parent) {
+  if (!parent) return true;
+  // Non-computed member property: `a.b` — `b` is a property, not the variable.
+  if (parent.type === 'MemberExpression' && parent.property === node && !parent.computed) return false;
+  // Object/pattern property key (including shorthand, where key === value).
+  if (parent.type === 'Property' && parent.key === node && !parent.computed) return false;
+  // Class field / method key.
+  if ((parent.type === 'PropertyDefinition' || parent.type === 'MethodDefinition') &&
+    parent.key === node && !parent.computed) return false;
+  // Labels are their own namespace.
+  if ((parent.type === 'LabeledStatement' || parent.type === 'BreakStatement' ||
+    parent.type === 'ContinueStatement') && parent.label === node) return false;
+  // import { foo as local } / export { local as foo } — only the local binding renames.
+  if (parent.type === 'ImportSpecifier' && parent.imported === node && parent.imported !== parent.local) return false;
+  if (parent.type === 'ExportSpecifier' && parent.local !== node) return false;
+  return true;
+}
+
+// AST-based identifier rename. A previous regex implementation rewrote every
+// `\b`-bounded occurrence, which corrupted member accesses (`obj.e` → `obj.event`),
+// object keys, and identifier-like text inside strings/comments/regex literals.
+// This walks the parsed AST and rewrites only real reference positions.
 function applyVariableRenames(code, renames) {
   if (renames.size === 0) return code;
 
-  // Only apply renames that are safe - single-char variables that won't collide
-  // We do a conservative approach: only rename if the new name doesn't already exist
-  let result = code;
+  // Keep a conservative collision guard: never rename to a name that already
+  // appears in the file, so we cannot merge two distinct identifiers.
+  const activeRenames = new Map();
   for (const [oldName, newName] of renames) {
-    // Skip if the new name is already used as an identifier in the code
-    const newNamePattern = new RegExp(`\\b${newName}\\b`);
-    if (newNamePattern.test(result)) continue;
+    if (new RegExp(`\\b${newName}\\b`).test(code)) continue;
+    activeRenames.set(oldName, newName);
+  }
+  if (activeRenames.size === 0) return code;
 
-    // Replace only whole-word occurrences of the single-char variable
-    const pattern = new RegExp(`\\b${oldName}\\b`, 'g');
-    result = result.replace(pattern, newName);
+  let ast;
+  try {
+    ast = acornLoose.parse(code, { ecmaVersion: 2022 });
+  } catch {
+    // Never rename content we cannot parse as JavaScript.
+    return code;
   }
 
+  const edits = [];
+  const visit = (node, parent) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child, parent);
+      return;
+    }
+    if (typeof node.type !== 'string') return;
+    if (
+      node.type === 'Identifier' &&
+      activeRenames.has(node.name) &&
+      typeof node.start === 'number' &&
+      isRenamableIdentifierPosition(node, parent)
+    ) {
+      edits.push({ start: node.start, end: node.end, text: activeRenames.get(node.name) });
+    }
+    for (const key of Object.keys(node)) {
+      if (key === 'type' || key === 'start' || key === 'end' || key === 'loc' || key === 'range') continue;
+      const value = node[key];
+      if (value && typeof value === 'object') visit(value, node);
+    }
+  };
+  visit(ast, null);
+
+  if (edits.length === 0) return code;
+  // Apply right-to-left so earlier offsets stay valid.
+  edits.sort((a, b) => b.start - a.start);
+  let result = code;
+  for (const edit of edits) {
+    result = result.slice(0, edit.start) + edit.text + result.slice(edit.end);
+  }
   return result;
 }
 
@@ -709,6 +921,12 @@ module.exports = {
   isCSSPath,
   isHTMLPath,
   isTransformablePath,
+  looksLikeHtmlDocument,
+  decodeHtmlEntities,
+  unwrapHtmlWrappedJs,
+  classifySourceMapContent,
+  repairBeautifierDamage,
+  repairBeautifierDamageIfBroken,
   normalizeCode,
   transformJavaScript,
   transformCSS,

@@ -532,8 +532,22 @@ async function main() {
     return;
   }
   if (!exists(root)) throw new Error(`Directory not found: ${root}`);
-  const stats = inferStats(root);
-  if (!stats) throw new Error(`Missing stats in ${root}. Run jsmap stats <linked-dir> --out <linked-dir>/recovery-workflow/stats-after first.`);
+  let stats = inferStats(root);
+  if (!stats) {
+    // Generate the stats integrate depends on instead of failing. recovery-stats
+    // writes a JSON file only with --out, so target the default path inferStats reads.
+    console.log('No recovery stats found — generating recovery-stats.json...');
+    const statsScript = path.join(__dirname, 'recovery-stats.cjs');
+    const result = spawnSync(process.execPath, [statsScript, root, '--out', path.join(root, 'recovery-stats')], { stdio: 'inherit' });
+    if (result.status === 0) stats = inferStats(root);
+  }
+  if (!stats) {
+    throw new Error(
+      `Could not produce recovery stats for ${root}. Ensure it is a linked rebuild dir ` +
+      `(run 'jsmap rebuild <recovery-dir> ${root}' first), or generate stats manually with ` +
+      `'jsmap stats ${root} --out ${path.join(root, 'recovery-stats')}'.`,
+    );
+  }
   const promotedModules = await collectPromotedModules(root);
   const plan = buildPlan(root, flags, stats, promotedModules);
   const prefix = flags.out ? path.resolve(flags.out) : path.join(root, 'recovery-integration-plan');

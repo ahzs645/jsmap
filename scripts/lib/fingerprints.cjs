@@ -27,7 +27,10 @@ const DEPENDENCY_FINGERPRINTS = [
     name: '@react-three/fiber',
     version: '^9.4.2',
     evidence: 'React Three Fiber symbols',
-    patterns: [/@react-three\/fiber|__r3f|useFrame|<Canvas|Canvas\s*\(/],
+    // Use only distinctive R3F symbols. A bare `Canvas(`/`<Canvas` matches any
+    // identifier ending in "Canvas" (e.g. an ordinary 2D canvas call), which
+    // produced a false @react-three/fiber match on bundles that never use R3F.
+    patterns: [/@react-three\/fiber|__r3f\b|\buseFrame\b/],
   },
   {
     name: 'monaco-editor',
@@ -212,7 +215,11 @@ function detectDependencyFingerprints(text) {
     if (fingerprint.patterns.some((pattern) => pattern.test(text))) {
       deps.push({
         name: fingerprint.name,
-        version: fingerprint.version,
+        // A content fingerprint proves the package is present, not which version.
+        // The curated version is kept as a non-authoritative hint, not a pin.
+        version: null,
+        lastKnownVersion: fingerprint.version,
+        resolution: 'content-fingerprint',
         evidence: fingerprint.evidence,
       });
     }

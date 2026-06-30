@@ -240,6 +240,54 @@ function findMainScript(html) {
     /<script\b[^>]*src=["']\/?assets\/([^"']+\.js)["'][^>]*type=["']module["'][^>]*>\s*<\/script>/i.exec(html)?.[1];
 }
 
+// Order preserved bundles the way a webpack app loads them: runtime/bootstrap
+// first, vendors next, then application chunks (largest last).
+function orderPreservedBundles(files) {
+  const rank = (name) => {
+    if (/bootstrap|runtime|manifest/i.test(name)) return 0;
+    if (/vendor|polyfill|framework/i.test(name)) return 1;
+    return 2;
+  };
+  return [...files].sort((a, b) => rank(a.name) - rank(b.name) || a.size - b.size);
+}
+
+// Synthesize a minimal entry page for a bundle-only capture (no captured HTML).
+// It loads the preserved, repaired bundles best-effort so the rebuild is a
+// valid, inspectable workspace; the durable deliverable is recovery-module-index.json.
+async function synthesizeBundleOnlyHtml(publicDir) {
+  let bundles = [];
+  try {
+    const entries = await fsp.readdir(publicDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !/\.[cm]?js$/i.test(entry.name)) continue;
+      const size = (await fsp.stat(path.join(publicDir, entry.name))).size;
+      bundles.push({ name: entry.name, size });
+    }
+  } catch {
+    bundles = [];
+  }
+  const scripts = orderPreservedBundles(bundles)
+    .map((b) => `    <script src="/${b.name}"></script>`)
+    .join('\n');
+  return [
+    '<!doctype html>',
+    '<html lang="en">',
+    '  <head>',
+    '    <meta charset="utf-8" />',
+    '    <meta name="viewport" content="width=device-width, initial-scale=1" />',
+    '    <title>jsmap recovered bundle</title>',
+    '  </head>',
+    '  <body>',
+    '    <!-- Synthesized by jsmap rebuild for a bundle-only capture (no index.html was captured).',
+    '         The preserved bundles are loaded best-effort; the recovered module index drives promotion. -->',
+    '    <div id="root"></div>',
+    scripts,
+    '  </body>',
+    '</html>',
+    '',
+  ].join('\n');
+}
+
 function rewriteHtml(html, entryFile) {
   let next = html
     .replace(/<script\b[^>]*src=["']https:\/\/www\.googletagmanager\.com\/[^>]*>\s*<\/script>/gi, '')
@@ -328,6 +376,22 @@ function lineNumberAt(content, offset) {
   return line;
 }
 
+// A webpack module body is an anonymous factory `function(module,exports,require){…}`.
+// Return the statements inside that single wrapper (so analysis sees the real
+// inner declarations) plus the factory's parameter names, or the original
+// top-level nodes when there is no such wrapper.
+function unwrapModuleFactory(astBody) {
+  const nodes = astBody || [];
+  if (nodes.length !== 1) return { nodes, factoryParams: [] };
+  const only = nodes[0];
+  const fn = /^(?:FunctionDeclaration|FunctionExpression|ArrowFunctionExpression)$/.test(only.type)
+    ? only
+    : (only.type === 'ExpressionStatement' && /^(?:FunctionExpression|ArrowFunctionExpression)$/.test(only.expression?.type) ? only.expression : null);
+  if (!fn || fn.body?.type !== 'BlockStatement') return { nodes, factoryParams: [] };
+  const factoryParams = (fn.params || []).map((param) => (param.type === 'Identifier' ? param.name : null)).filter(Boolean);
+  return { nodes: fn.body.body, factoryParams };
+}
+
 function collectLeafCandidates(content, item) {
   const candidates = [];
   let ast;
@@ -336,7 +400,8 @@ function collectLeafCandidates(content, item) {
   } catch {
     return candidates;
   }
-  for (const node of ast.body || []) {
+  const { nodes, factoryParams } = unwrapModuleFactory(ast.body);
+  for (const node of nodes) {
     let name = null;
     let params = [];
     let start = node.start;
@@ -351,12 +416,15 @@ function collectLeafCandidates(content, item) {
         params = (decl.init.params || []).map((param) => param.type === 'Identifier' ? param.name : null).filter(Boolean);
       }
     }
-    if (!name || /^[A-Za-z_$][\w$]?$/.test(name)) continue;
+    // Require a real, multi-character identifier. This rejects the acorn-loose
+    // error placeholder ("✖", emitted for anonymous factories at statement
+    // position) and ultra-short minified names.
+    if (!name || !/^[A-Za-z_$][\w$]{2,}$/.test(name)) continue;
     const body = content.slice(start, end);
       const lines = body.split('\n').length;
       if (lines > 80) continue;
       const externalIdentifiers = collectExternalIdentifiers(body, [name, ...params]);
-      const allowed = new Set(params);
+      const allowed = new Set([...params, ...factoryParams]);
       const unresolved = externalIdentifiers.filter((identifier) => !allowed.has(identifier));
       if (unresolved.length > 4) continue;
       const startLine = (item.startLine || 1) + lineNumberAt(content, start) - 1;
@@ -455,10 +523,36 @@ async function main() {
   const publicDir = path.join(recoveryDir, 'public');
   const siteRoot = findSiteRoot(publicDir);
   const htmlFile = await chooseHtml(siteRoot, flags);
-  if (!htmlFile) throw new Error(`No HTML file found under ${siteRoot}`);
-  const html = await fsp.readFile(htmlFile, 'utf8');
-  const mainScript = findMainScript(html);
-  if (!mainScript) throw new Error(`Could not find module script under /assets/*.js in ${htmlFile}`);
+  const chunksRootExists = await pathExists(path.join(recoveryDir, 'src/recovered-chunks'));
+
+  // Bundle-only captures (raw JS chunks, no captured index.html — e.g. a webpack
+  // app split into modules) cannot be wired into a captured SPA, but their
+  // recovered modules should still flow into the promotion pipeline. In that case
+  // we synthesize a minimal entry and build the module index directly from the
+  // split manifests instead of requiring an HTML entry + /assets/*.js main script.
+  const bundleOnly = !htmlFile;
+  if (bundleOnly && !chunksRootExists) {
+    throw new Error(
+      `No HTML entry and no recovered chunks under ${recoveryDir}. There is nothing to rebuild.\n` +
+      `Re-run 'jsmap recover' with --large-js-mode split-raw (or --recovery-mode inspect-first) so the captured ` +
+      `bundles are split into src/recovered-chunks/, or pass an HTML entry with --html <file>.`,
+    );
+  }
+  let html = '';
+  let mainScript = null;
+  if (!bundleOnly) {
+    html = await fsp.readFile(htmlFile, 'utf8');
+    mainScript = findMainScript(html);
+    if (!mainScript) {
+      throw new Error(
+        `Could not find a module script under /assets/*.js in ${htmlFile}.\n` +
+        `'rebuild' links the captured SPA entry to recovered chunks; the HTML must reference its main bundle as ` +
+        `<script type="module" src="/assets/<name>.js">. Pass a different page with --html <file> if this is not the app entry.`,
+      );
+    }
+  } else {
+    console.log('No captured HTML entry found — rebuilding in bundle-only mode (module index for promotion; preserved bundles loaded best-effort).');
+  }
 
   const outputPublicDir = path.join(outputDir, 'public');
   await fsp.cp(siteRoot, outputPublicDir, { recursive: true });
@@ -472,8 +566,9 @@ async function main() {
     generatedAt: new Date().toISOString(),
     recoveryDir,
     siteRoot: toPosix(path.relative(recoveryDir, siteRoot)),
-    html: toPosix(path.relative(siteRoot, htmlFile)),
+    html: htmlFile ? toPosix(path.relative(siteRoot, htmlFile)) : null,
     mainScript,
+    bundleOnly,
     entries: {},
     copiedModules: [],
     routeStubs: routeStubMap(),
@@ -500,10 +595,13 @@ async function main() {
     const chunkName = path.basename(chunkDir);
     const manifest = JSON.parse(await fsp.readFile(manifestPath, 'utf8'));
     if (!manifest.source || !manifest.source.endsWith('.js')) continue;
+    // AST splits expose `files`; webpack-module splits expose `modules`. Both
+    // entries carry file/startLine/endLine/lines, so normalize to one list.
+    const manifestItems = manifest.files || manifest.modules || [];
     const outputSource = manifest.source;
     const parts = [];
-    for (let index = 0; index < manifest.files.length; index++) {
-      const item = manifest.files[index];
+    for (let index = 0; index < manifestItems.length; index++) {
+      const item = manifestItems[index];
       const sourceFile = path.join(chunkDir, item.file);
       const content = await fsp.readFile(sourceFile, 'utf8');
       const analysis = analyzeRecoveredPart(content, item);
@@ -551,7 +649,7 @@ async function main() {
     plan.entries[outputSource] = {
       source: manifest.source,
       chunk: chunkName,
-      totalFiles: manifest.totalFiles,
+      totalFiles: manifest.totalFiles ?? manifest.moduleCount ?? manifestItems.length,
       totalLines: manifest.totalLines,
       linkMode: 'ordered-concat',
       parts,
@@ -573,8 +671,19 @@ async function main() {
     };
   }
 
-  if (!plan.entries[mainScript]) {
+  if (Object.keys(plan.entries).length === 0) {
+    throw new Error(`No recovered chunk manifests were found under ${chunksRoot}. Re-run 'jsmap recover' with --large-js-mode split-raw so the captured bundles are split for rebuild.`);
+  }
+  if (!bundleOnly && !plan.entries[mainScript]) {
     throw new Error(`Main script ${mainScript} was not found in recovered chunk manifests.`);
+  }
+  // In bundle-only mode, pick a representative entry for the synthesized page:
+  // prefer a bootstrap/runtime/main bundle, else the entry with the most parts.
+  if (bundleOnly && !mainScript) {
+    const entryNames = Object.keys(plan.entries);
+    mainScript = entryNames.find((name) => /bootstrap|runtime|main|index|entry/i.test(name)) ||
+      entryNames.sort((a, b) => plan.entries[b].parts.length - plan.entries[a].parts.length)[0];
+    plan.mainScript = mainScript;
   }
 
   const recoveredEntryDir = path.join(outputDir, 'src/recovered-entry');
@@ -589,7 +698,10 @@ async function main() {
 
   await fsp.writeFile(path.join(outputDir, 'recovery-link-plan.json'), JSON.stringify(plan, null, 2) + '\n', 'utf8');
   await fsp.writeFile(path.join(outputDir, 'recovery-module-index.json'), JSON.stringify(moduleIndex, null, 2) + '\n', 'utf8');
-  await fsp.writeFile(path.join(outputDir, 'index.html'), rewriteHtml(html, mainScript), 'utf8');
+  const indexHtml = bundleOnly
+    ? await synthesizeBundleOnlyHtml(outputPublicDir)
+    : rewriteHtml(html, mainScript);
+  await fsp.writeFile(path.join(outputDir, 'index.html'), indexHtml, 'utf8');
   await fsp.writeFile(path.join(outputDir, 'package.json'), JSON.stringify({
     name: `${path.basename(recoveryDir).replace(/[^a-zA-Z0-9-]+/g, '-')}-linked-rebuild`,
     private: true,

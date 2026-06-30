@@ -87,6 +87,165 @@ line formatting, average identifier length, and escape-sequence cleanliness. The
 report shows the average/median score, grade distribution, and the lowest-scoring
 files as concrete manual-cleanup targets.
 
+### Imperfect real-world captures
+
+Captures are frequently lossy, and jsmap now detects and repairs the common
+defects instead of silently producing garbage:
+
+- **HTML-wrapped JavaScript** (browser "Save as"/view-source/site mirrors save a
+  bundle as `<html>…<pre>(()=&gt;{…}</pre>` with entity-encoded code) is detected
+  and unwrapped during `recover`/`deobfuscate`, and `recover` repairs the
+  preserved `public/` copy in place so `npm run serve` still works. A
+  `html-wrapped-js-capture` warning records what was repaired.
+- **Fake source maps** (the SPA/app-shell HTML returned for a missing `.map`
+  route) are detected rather than treated as real maps. `recover` emits a
+  `source-map-is-html-shell` warning with a concrete re-fetch URL when one can be
+  derived from the bundle's `sourceMappingURL` or the inferred origin, and moves
+  the fake maps aside as `*.map.broken` in `public/`.
+- **Webpack bundles** (a single top-level IIFE) are routed to per-module
+  extraction during `recover` instead of being emitted as one giant chunk; an
+  `unsplit-large-bundle` warning flags any large bundle that still yields a single
+  chunk. A `no-op-transform` warning flags JS that deobfuscation left unchanged.
+- Inferred dependency versions from content fingerprints are written as `"*"`
+  (with the curated version kept as a non-authoritative `lastKnownVersion` hint),
+  so recovered `package.json` does not pin guessed versions.
+- `recover` exits non-zero on a fully-degenerate capture (nothing split, no
+  usable maps, nothing transformed); pass `--allow-empty` to treat that as
+  success.
+
+### Bundle-only captures (no HTML entry)
+
+When a capture is just JavaScript bundles with no `index.html` (for example a
+webpack app split into modules), `rebuild` runs in bundle-only mode: it builds
+`recovery-module-index.json` and `src/recovered-parts/*` directly from the split
+manifests and synthesizes a minimal entry page, so the recovered modules still
+flow into `promote-plan`, `structure-plan`, and `roadmap`.
+
+### Editable, hot-reloading workspace (`editable`)
+
+```bash
+node scripts/jsmap.cjs editable ./recovered-project-linked ./recovered-editable --top 25
+cd ./recovered-editable && npm install && npm run dev
+```
+
+`editable` turns a linked rebuild into a runnable, **hot-reloading** Vite
+workspace for human-in-the-loop recovery:
+
+- Promotes self-contained recovered functions — including the in-module helper
+  closures they need — into editable `src/recovered/*` modules.
+- Detects **injected backend/auth dependencies** (a recovered function calling a
+  non-built-in method on one of its parameters, e.g. `fileManager.itemForPath(p)`)
+  and scaffolds a fake provider in `src/stubs/*` so the function runs **without**
+  the real backend. The reviewer fills in realistic fake data.
+- Writes an interactive playground (`src/main.js` + `index.html`) that lists each
+  promoted function, runs it with editable args, and **hot-reloads** as you edit
+  `src/recovered/*`. `PROMOTION_MANIFEST.json` records what was promoted, stubbed,
+  and skipped (with reasons).
+
+The full captured app does not run standalone (it needs its real backend/auth and
+any WebGL/WASM runtimes); this is the editable **source layer** with a working
+dev/HMR loop that a human grows by promoting more modules.
+
+### Boot readiness (`boot-check`)
+
+```bash
+node scripts/jsmap.cjs boot-check <capture-or-recovery-dir>
+```
+
+Modern webpack/rspack apps defer their entry until specific chunks load
+(`__webpack_require__.O(void 0, [chunkIds], () => require(entryId))`), and then
+**lazy-load further chunks** at runtime via the chunk manifest
+(`__webpack_require__.u`). If a required chunk was never captured, the app renders
+nothing — with no error. `boot-check` finds the entry startup(s) and the chunks
+they statically wait for, extracts the dynamic chunk manifest, and reports module
+coverage, so you know exactly what to re-capture. Verdicts:
+
+- `missing-static-chunks` — the entry can't even start (a chunk it waits on is absent).
+- `entry-runs-but-dynamic-chunks-missing` — the entry starts but the app code-splits
+  and its lazy chunks weren't captured, so it stalls fetching them right after boot.
+- `entry-satisfiable` — static entry chunks present and no lazy gaps detected.
+
+It exits non-zero (3) when the capture cannot boot. (Most such apps also need their
+real auth + backend to render, even with all chunks present.) This is exactly how
+the two AutoCAD captures differ: a 3-bundle capture is `missing-static-chunks`,
+while a richer 6-bundle capture reaches `entry-runs-but-dynamic-chunks-missing`.
+
+### Skipping the login wall (`auth-scan`)
+
+```bash
+node scripts/jsmap.cjs auth-scan <file-or-dir>            # scan: report gates
+node scripts/jsmap.cjs auth-scan ./public/app.js --apply  # write *.authskip.js
+```
+
+A captured SPA served statically lands on its signed-out "Sign In" landing even
+when you have all the JS, because a **client-side** auth gate decides — before
+anything renders — that there is no logged-in user. That gate is deterministic
+and lives in the bundle, so it can be found and forced open for a
+human-in-the-loop review. `auth-scan` detects the three gate shapes (auth-status
+enum switches like `AUTHENTICATED`/`NOT_AUTHENTICATED`, `isLoggedIn()`-style
+predicate methods, and login-route redirects) and, with `--apply`, writes
+neutralized `*.authskip.js` copies (originals untouched) plus an
+`auth-skip-manifest.json`.
+
+This only removes the **client-side** wall. The authenticated experience is
+backend-driven — identity, settings, documents, entitlements, and any streamed
+WASM kernel are not in a static capture — so expect the app shell to mount and
+then error on its first backend call. On the AutoCAD capture this flips the Sign
+In landing into a mounting app shell that then throws on
+`session.identity.getUserSettings()`.
+
+### Booting past the backend (`offline-mode`)
+
+```bash
+node scripts/jsmap.cjs offline-mode <file-or-dir> --out ./offline-modes
+```
+
+Most non-trivial apps already contain a mode for running without a backend — the
+one their own e2e/storybook tests use. `offline-mode` finds the switches:
+URL-param gates (`?fabricTests`), `window.__*` flags (`__e2eTests`), the
+fake-credential paths a flag unlocks (`__e2eTests → accessToken`), and exposed
+hooks (`__e2eStore`), then prints a boot recipe + bootstrap `<script>`. On the
+AutoCAD capture, applying it routes init past the `getUserSettings()` backend
+call and the app reaches **"Initializing AutoCAD"** — the real app booting,
+not the marketing page.
+
+### Mapping and driving a booted capture (`action-catalog`, `drive`)
+
+```bash
+node scripts/jsmap.cjs action-catalog <file-or-dir> --top 40   # static map
+node scripts/jsmap.cjs drive <served-url> --param fabricTests=1 --dump-store
+```
+
+Once a capture boots, it often *idles* on a loader — waiting, not erroring.
+`action-catalog` maps the redux layer statically: the guarded `window.__store`
+handle, the **boot-gate flags** (`*Initialized`/`*Ready`/`ready` that a
+backend/config response was supposed to flip) **and the action that forces each
+one** (`ready → app/readyAction`), the saga effect vocabulary, and the
+dispatchable action types — so you know what is stalling and exactly what to
+dispatch. `drive` then boots the served capture in headless Chromium with a
+reusable offline-stub ruleset (config/flag services answered with a completing
+stream, identity with a profile, analytics swallowed), auto-detects the store,
+dumps its state, dispatches actions, and screenshots. Needs Playwright
+(`npm i -D playwright-core`).
+
+On the AutoCAD capture these boot it **past the login wall into the real
+application shell**: `?e2eTests=1` exposes the store, and dispatching the
+boot-gate force-actions (`app/readyAction`, `fabric/canvasLoadSuccess`) mounts the
+app shell and a left navigation sidebar (the editor's toolbar/status-bar
+components mount into the DOM too). It does **not** become a usable editor: a
+`"Initializing AutoCAD"` document-open dialog stalls on top and never closes,
+because that sequence is driven by the WASM CAD kernel, which never loads a
+document offline — forcing `canvasLoaded=true` only tells the UI the canvas is
+ready. When the capture is missing assets, `drive --backfill <origin>` re-fetches
+same-origin lazy chunks on demand (and `--save` writes them back), while
+`--passthrough <regex>` loads external public assets (fonts, a CDN viewer SDK)
+live — clearing the `ChunkLoadError`/`Autodesk is not defined` errors (the dialog
+still stalls). The drawing surface needs the WASM kernel + a real model — native
+code + server data, not static assets. See
+[docs/auth-skip.md](docs/auth-skip.md) for the full case study (Sign In → shell
+mounts → app boots → walls mapped → **app shell + sidebar render, dialog stalls**
+→ assets backfilled → WASM/model wall) and the exact boundary.
+
 For preserved static runtimes that need to be made operable with fake data,
 use the static harness and shim toolset:
 

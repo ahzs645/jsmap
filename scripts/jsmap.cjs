@@ -166,6 +166,68 @@ Commands:
   rename-apply <linked-rebuild-dir> [--plan <file>] [--dry-run|--write] [--min-confidence N]
       Apply only reviewed low-risk rename suggestions from recovery-rename-plan.json.
 
+  editable <linked-rebuild-dir> [output-dir] [--top N] [--force]
+      Generate an editable, hot-reloading Vite workspace from a linked rebuild.
+      Promotes self-contained recovered functions (with their in-module helper
+      closures) into editable src/recovered/* modules, scaffolds fake stubs for
+      injected backend/auth dependencies so they run offline, and writes an
+      interactive playground that hot-reloads. A human reviews and grows it.
+
+  boot-check <dir-or-recovery-or-linked> [--json] [--out <prefix>]
+      Diagnose whether a captured bundle set can boot. Finds the deferred
+      webpack/rspack entry startup, the chunks it waits for, and module coverage,
+      then reports missing chunks/entry modules and separate runtimes. Exits 3
+      when a required chunk was not captured (the app would render nothing).
+
+  auth-scan <file-or-dir> [--apply] [--json] [--out <prefix>]
+      Find client-side authentication gates that keep a captured SPA on its
+      signed-out "Sign In" landing: auth-status enum switches
+      (AUTHENTICATED/NOT_AUTHENTICATED), isLoggedIn()/isAuthenticated()
+      predicate methods, and login-route redirects. Scan-only by default. With
+      --apply, write neutralized <name>.authskip.js copies (originals untouched)
+      plus auth-skip-manifest.json so a human-in-the-loop can load the
+      authenticated shell. Neutralizing only removes the client-side login wall;
+      the authenticated experience is still backend-driven (see docs/auth-skip.md).
+
+  offline-mode <file-or-dir> [--json] [--out <prefix>]
+      Find a capture's built-in test/dev escape hatches that let it boot without
+      its backend: URL-param test gates (e.g. ?fabricTests), window.__* mode
+      flags (e.g. __e2eTests, which often mints a fake token), the
+      fake-credential paths those flags unlock, and exposed test hooks (e.g.
+      __e2eStore). Prints a concrete boot recipe + a bootstrap <script>. Pair
+      with auth-scan to also remove the login wall. See docs/auth-skip.md.
+
+  repair-stubs <capture-dir> [--backfill <origin>] [--json]
+      Find placeholder/corrupt assets a capture tool left behind: files that
+      exist but whose content is a stub — "No Content: <url>" placeholders, HTML
+      error pages where a script was expected, or binaries with the wrong magic
+      bytes (e.g. an 88-byte AcFabricBackend.wasm). The capture serves these with
+      HTTP 200, so a 404-based backfill misses them. With --backfill, re-fetch the
+      real bytes from the origin and write them back.
+
+  action-catalog <file-or-dir> [--json] [--out <prefix>] [--top N]
+      Map a captured redux/saga app for driving: the guarded window.__store
+      handle, boot-gate flags (*Initialized/*Ready that stall init offline), the
+      saga effect vocabulary, and the dispatchable action types. Pairs with
+      auth-scan + offline-mode + drive. See docs/auth-skip.md.
+
+  stub-backend <scaffold|gaps|lint> ... (Path B backend-reconstruction workbench)
+      Manage an offline backend stub map for a captured SPA. scaffold a stub map
+      from a 'drive --record-backend' recording, list gaps (recorded requests no
+      rule covers), or lint a map. The human curates each canned response until
+      the app's boot sequence completes offline. See docs/auth-skip.md.
+
+  drive <served-url> [--param k=v] [--set name=value] [--userinfo <file>]
+        [--wait ms] [--store-global <name>] [--dispatch <json>] [--eval <js>]
+        [--dump-store] [--screenshot <path>] [--exe <chromium>]
+        [--stub-map <file>] [--record-backend <file>] [--gaps]
+      Boot a *served* capture in headless Chromium with an offline-stub ruleset
+      (flag/config services answered with a completing stream, identity with a
+      profile, analytics swallowed), auto-detect its redux store, dump state,
+      dispatch actions, and screenshot. Needs Playwright. Serve the capture with
+      'harness', apply auth-scan/offline-mode, use action-catalog for the store
+      key + action types, then drive it.
+
   harness <recovery-dir> [--framework next]
       Create or update a scripts/serve-public.mjs static runtime harness for a
       preserved public/ directory. Includes SPA route fallback, extensionless
@@ -230,7 +292,11 @@ Examples:
   node scripts/jsmap.cjs integrate ./recovered-project-linked --dry-run
   node scripts/jsmap.cjs runtime-patch ./recovered-project-linked
   node scripts/jsmap.cjs rename-plan ./recovered-project-linked --scope promoted
+  node scripts/jsmap.cjs editable ./recovered-project-linked ./recovered-editable --top 25
   node scripts/jsmap.cjs rename-apply ./recovered-project-linked --dry-run
+  node scripts/jsmap.cjs auth-scan ./recovered-project/public --out ./auth-gates
+  node scripts/jsmap.cjs auth-scan ./public/app.js --apply
+  node scripts/jsmap.cjs offline-mode ./recovered-project/public --out ./offline-modes
   node scripts/jsmap.cjs harness ./recovered-project --framework next
   node scripts/jsmap.cjs next-doctor ./recovered-project
   node scripts/jsmap.cjs shim-api ./recovered-project --record
@@ -546,6 +612,38 @@ function main() {
     case 'runtime-replacement-plan':
     case 'adapter-promote':
       runScript('runtime-patch-plan.cjs', subArgs);
+      break;
+    case 'editable':
+    case 'editable-workspace':
+      runScript('generate-editable-workspace.cjs', subArgs);
+      break;
+    case 'boot-check':
+    case 'boot-readiness':
+      runScript('analyze-boot-readiness.cjs', subArgs);
+      break;
+    case 'auth-scan':
+    case 'auth-skip':
+      runScript('scan-auth-gates.cjs', subArgs);
+      break;
+    case 'offline-mode':
+    case 'offline-modes':
+    case 'test-mode':
+      runScript('scan-offline-modes.cjs', subArgs);
+      break;
+    case 'action-catalog':
+    case 'actions':
+      runScript('scan-redux-actions.cjs', subArgs);
+      break;
+    case 'drive':
+      runScript('drive-capture.cjs', subArgs);
+      break;
+    case 'repair-stubs':
+    case 'repair-capture-stubs':
+      runScript('repair-capture-stubs.cjs', subArgs);
+      break;
+    case 'stub-backend':
+    case 'fake-backend':
+      runScript('stub-backend.cjs', subArgs);
       break;
     case 'rename-plan':
       runScript('rename-plan.cjs', subArgs);

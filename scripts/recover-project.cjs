@@ -26,6 +26,11 @@ const {
   extractPackageCoordinateFromReference,
   primaryRuntimeSignal,
 } = require('./lib/fingerprints.cjs');
+const {
+  looksLikeHtmlDocument,
+  unwrapHtmlWrappedJs,
+  classifySourceMapContent,
+} = require('./lib/deobfuscation-pipeline.cjs');
 
 const SCRIPTS_DIR = __dirname;
 const DEFAULT_MAX_TRANSFORM_BYTES = 5 * 1024 * 1024;
@@ -37,7 +42,7 @@ const RECOVERY_MODES = new Set(['balanced', 'inspect-first']);
 
 function printUsage() {
   console.error(
-    'Usage: jsmap recover <input-dir> [output-dir] [--force] [--repair-wasm] [--recovery-mode balanced|inspect-first] [--large-js-mode preserve|split-raw|full] [--module-granularity grouped|declarations] [--engine webcrack|wakaru|both] [--timeout seconds] [--concurrency N] [--max-transform-mb N] [--min-split-kb N] [--max-split-mb N]\n' +
+    'Usage: jsmap recover <input-dir> [output-dir] [--force] [--repair-wasm] [--allow-empty] [--recovery-mode balanced|inspect-first] [--large-js-mode preserve|split-raw|full] [--module-granularity grouped|declarations] [--engine webcrack|wakaru|both] [--timeout seconds] [--concurrency N] [--max-transform-mb N] [--min-split-kb N] [--max-split-mb N]\n' +
       '  Optional community-tool passes: [--restringer] [--lebab] [--putout] [--humanify] [--jscodeshift <transform.js>] [--ast-grep <rules.json>]',
   );
 }
@@ -46,6 +51,7 @@ function parseArgs(argv) {
   const flags = {
     force: false,
     repairWasm: false,
+    allowEmpty: false,
     recoveryMode: 'balanced',
     largeJsMode: 'preserve',
     timeoutSeconds: null,
@@ -68,6 +74,7 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === '--force') flags.force = true;
     else if (arg === '--repair-wasm') flags.repairWasm = true;
+    else if (arg === '--allow-empty') flags.allowEmpty = true;
     else if (arg === '--recovery-mode') flags.recoveryMode = argv[++i];
     else if (arg === '--large-js-mode') flags.largeJsMode = argv[++i];
     else if (arg === '--timeout') flags.timeoutSeconds = Number(argv[++i]);
@@ -214,10 +221,18 @@ function mergeDependencyEvidence(items) {
     const current = deps.get(item.name) || {
       name: item.name,
       version: item.version || '*',
+      // Track the curated "last known" version separately so package.json is not
+      // pinned to a guessed version when only a content fingerprint matched.
+      lastKnownVersion: item.lastKnownVersion || null,
+      resolution: item.version ? (item.resolution || 'exact') : (item.resolution || 'inferred'),
       evidence: item.evidence || item.detail || 'package evidence',
       evidenceItems: [],
     };
-    if ((!current.version || current.version === '*') && item.version) current.version = item.version;
+    if ((!current.version || current.version === '*') && item.version) {
+      current.version = item.version;
+      current.resolution = item.resolution || 'exact';
+    }
+    if (!current.lastKnownVersion && item.lastKnownVersion) current.lastKnownVersion = item.lastKnownVersion;
     const evidenceItem = {
       type: item.evidenceType || item.type || 'fingerprint',
       detail: item.detail || item.evidence || '',
@@ -278,6 +293,56 @@ async function collectSourceMapEvidence(rootDir) {
   }
 
   return evidence;
+}
+
+// Read the last `bytes` of a file without loading the whole thing (bundles can
+// be very large, and sourceMappingURL comments live at the end).
+async function readFileTail(filePath, bytes) {
+  let handle;
+  try {
+    handle = await fsp.open(filePath, 'r');
+    const { size } = await handle.stat();
+    const length = Math.min(bytes, size);
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, size - length);
+    return buffer.toString('utf8');
+  } catch {
+    return '';
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+// Suggest where a genuine source map could be re-fetched from for an invalid
+// (e.g. HTML-shell) captured `.map`. Prefers the sibling bundle's
+// //# sourceMappingURL comment, then origin + the map's path.
+async function suggestMapRefetchUrl(inputDir, mapRel, inputRelSet, origin) {
+  const bundleRel = mapRel.replace(/\.map$/i, '');
+  if (inputRelSet.has(bundleRel)) {
+    const tail = await readFileTail(path.join(inputDir, bundleRel), 8192);
+    const match = /[#@]\s*sourceMappingURL=([^\s'"]+)/.exec(tail);
+    if (match) {
+      const ref = match[1].trim();
+      if (/^https?:\/\//i.test(ref)) return ref;
+      if (origin && !ref.startsWith('data:')) {
+        try { return new URL(ref, `${origin}/${path.posix.dirname(bundleRel)}/`).toString(); } catch { /* ignore */ }
+      }
+    }
+  }
+  if (origin) return `${origin.replace(/\/$/, '')}/${mapRel}`;
+  return null;
+}
+
+// Read the deobfuscation report to learn which JS assets were actually
+// transformed vs. passed through unchanged (a no-op transform often means the
+// input was already source-like, or was corrupt/unparseable).
+async function readDeobfuscationReport(deobfuscatedDir) {
+  try {
+    const report = JSON.parse(await fsp.readFile(path.join(deobfuscatedDir, 'deobfuscation-report.json'), 'utf8'));
+    return Array.isArray(report.results) ? report : { results: [] };
+  } catch {
+    return { results: [] };
+  }
 }
 
 function dedupeSourceMapEvidence(evidence) {
@@ -880,6 +945,83 @@ function createRecoveryAudit(splitEntries, splitManifests, sourceMapEvidence, op
       code: 'no-source-map-package-evidence',
       message: 'No source-map package coordinates were found. Package detection is based on runtime/export/content heuristics only.',
       patchSurface: 'evidence-gap',
+    });
+  }
+
+  const htmlWrappedCaptures = options?.htmlWrappedCaptures || [];
+  if (htmlWrappedCaptures.length) {
+    const repaired = htmlWrappedCaptures.filter((c) => c.recovered);
+    const unrecovered = htmlWrappedCaptures.filter((c) => !c.recovered);
+    warnings.push({
+      severity: 'warning',
+      code: 'html-wrapped-js-capture',
+      message: `${htmlWrappedCaptures.length} captured JS file(s) were saved as HTML (browser "Save as"/view-source/mirror), not raw JavaScript. ${repaired.length} were unwrapped and entity-decoded before recovery${unrecovered.length ? `; ${unrecovered.length} could not be unwrapped` : ''}. Re-capture these as raw responses to avoid lossy repair.`,
+      patchSurface: 'capture-quality',
+      examples: htmlWrappedCaptures.slice(0, 12),
+    });
+    actions.push({
+      priority: 0,
+      action: 'Re-fetch the affected bundles as raw JavaScript responses (curl/wget against the asset URL) rather than saving rendered HTML pages, then rerun recover.',
+      relatedWarning: 'html-wrapped-js-capture',
+    });
+  }
+
+  const invalidSourceMaps = options?.invalidSourceMaps || [];
+  if (invalidSourceMaps.length) {
+    const htmlShells = invalidSourceMaps.filter((m) => m.reason === 'html-shell');
+    const origin = options?.origin;
+    const knownUrls = invalidSourceMaps.map((m) => m.refetchUrl).filter(Boolean);
+    const refetchHint = knownUrls.length
+      ? `Re-fetch the real maps from: ${[...new Set(knownUrls)].slice(0, 6).join(', ')}.`
+      : origin
+        ? `Re-fetch the real maps from the app origin (${origin}), e.g. ${origin}/<bundle>.js.map.`
+        : 'Re-fetch the real .map files directly from the asset URLs (bundle URL + ".map"). The capture had no origin or sourceMappingURL to derive an exact URL.';
+    warnings.push({
+      severity: 'warning',
+      code: 'source-map-is-html-shell',
+      message: `${invalidSourceMaps.length} captured .map file(s) are not usable source maps${htmlShells.length ? ` (${htmlShells.length} are the SPA/app-shell HTML returned for a missing .map route)` : ''}. They were ignored, so package/symbol recovery fell back to heuristics. ${refetchHint}`,
+      patchSurface: 'capture-quality',
+      examples: invalidSourceMaps.slice(0, 12),
+    });
+    actions.push({
+      priority: 1,
+      action: 'Obtain genuine source maps (valid JSON with version:3 and mappings) for the captured bundles and place them next to the .js files before rerunning recover.',
+      relatedWarning: 'source-map-is-html-shell',
+    });
+  }
+
+  const noopTransforms = options?.noopTransforms || [];
+  if (noopTransforms.length) {
+    const withParserWarnings = noopTransforms.filter((entry) => (entry.warnings || []).length);
+    warnings.push({
+      severity: withParserWarnings.length ? 'warning' : 'info',
+      code: 'no-op-transform',
+      message: `${noopTransforms.length} JavaScript asset(s) were unchanged by deobfuscation (output bytes == input bytes)${withParserWarnings.length ? `; ${withParserWarnings.length} also produced parser warnings, which usually means corrupt or unparseable input` : ', which usually means the input was already source-like or could not be improved'}.`,
+      patchSurface: 'capture-quality-or-classifier',
+      examples: noopTransforms.slice(0, 12),
+    });
+  }
+
+  // Flag any preserved large bundle that produced a single chunk: a webpack
+  // registry that the AST splitter could not break apart looks like one giant
+  // module instead of recovered source.
+  const giantSingleChunks = splitManifests.filter((manifest) =>
+    (manifest.totalFiles || 0) <= 1 &&
+    /raw-large|raw-inspect-first|deobfuscated/.test(`${manifest.mode || ''}`) &&
+    !/webpack-modules/.test(`${manifest.mode || ''}`)
+  );
+  if (giantSingleChunks.length) {
+    warnings.push({
+      severity: 'warning',
+      code: 'unsplit-large-bundle',
+      message: `${giantSingleChunks.length} preserved bundle(s) split into a single chunk instead of per-module files. If the bundle is webpack/rollup, module extraction did not engage; inspect the chunk and consider split-wp manually.`,
+      patchSurface: 'splitter-or-classifier',
+      examples: giantSingleChunks.slice(0, 12).map((m) => ({ source: m.source, output: m.output, mode: m.mode, totalFiles: m.totalFiles })),
+    });
+    actions.push({
+      priority: 2,
+      action: 'Run `node scripts/jsmap.cjs split-wp <bundle.js> <out> --force` on single-chunk preserved bundles to recover individual webpack modules.',
+      relatedWarning: 'unsplit-large-bundle',
     });
   }
 
@@ -2191,10 +2333,81 @@ async function copyProjectFiles(inputDir, outputDir, force) {
   await fsp.cp(inputDir, path.join(outputDir, 'public'), { recursive: true });
 }
 
+// public/ is advertised as the preserved, runnable capture, but a verbatim
+// mirror of an imperfect capture is not runnable: HTML-wrapped JS would be sent
+// to the browser as a script (and fail), and fake .map files (SPA shells) would
+// be loaded as source maps. Repair those assets in place so the preserved app
+// can actually run. Only detected corruption is touched; clean captures are
+// left byte-for-byte intact.
+async function repairPublicCapture(publicDir) {
+  const summary = { repairedJs: [], brokenMaps: [] };
+  const files = await walkDirectory(publicDir);
+  for (const file of files) {
+    const rel = toPosix(path.relative(publicDir, file));
+    if (isJavaScript(rel)) {
+      const content = await fsp.readFile(file, 'utf8').catch(() => null);
+      if (content == null || !looksLikeHtmlDocument(content)) continue;
+      const recovered = unwrapHtmlWrappedJs(content);
+      if (recovered) {
+        await fsp.writeFile(file, recovered.code, 'utf8');
+        summary.repairedJs.push(rel);
+      }
+    } else if (/\.map$/i.test(rel)) {
+      const content = await fsp.readFile(file, 'utf8').catch(() => null);
+      if (content == null) continue;
+      const verdict = classifySourceMapContent(content);
+      if (!verdict.valid) {
+        // Move the fake map aside (preserved as evidence) so the browser does
+        // not fetch the SPA shell as a source map.
+        await fsp.rename(file, `${file}.broken`).catch(() => {});
+        summary.brokenMaps.push({ map: rel, reason: verdict.reason });
+      }
+    }
+  }
+  return summary;
+}
+
 function runNodeScript(scriptName, args) {
   execFileSync(process.execPath, [path.join(SCRIPTS_DIR, scriptName), ...args], {
     stdio: 'inherit',
   });
+}
+
+// Run a helper script without throwing on a non-zero exit, so the caller can
+// fall back to an alternative (e.g. try webpack module extraction, then fall
+// back to generic AST splitting).
+function tryRunNodeScript(scriptName, args) {
+  try {
+    execFileSync(process.execPath, [path.join(SCRIPTS_DIR, scriptName), ...args], {
+      stdio: 'inherit',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Heuristic: does this source look like a webpack module-registry bundle that
+// the webpack splitter can break into per-module files? Matches the explicit
+// `__webpack_modules__` name, the `webpackChunk…` push form, or several
+// numeric-keyed factory functions ({ 12345: function(e,t,r){…}, … }).
+function looksLikeWebpackBundle(code) {
+  if (typeof code !== 'string' || !code) return false;
+  if (/__webpack_modules__|webpackChunk[\w$]*|webpackJsonp/.test(code.slice(0, 5000))) return true;
+  const factoryMatches = code.match(/\b\d{2,7}\s*:\s*(?:function\b|\([\w$,\s]*\)\s*=>)/g);
+  return Array.isArray(factoryMatches) && factoryMatches.length >= 2;
+}
+
+// Split a JS bundle for inspection. Webpack bundles are routed to the webpack
+// module extractor first (one file per module); everything else — and any
+// webpack bundle the extractor cannot parse — falls back to AST splitting.
+function splitBundleForInspection(inputFile, outDir, { code, astArgs }) {
+  if (looksLikeWebpackBundle(code)) {
+    const ok = tryRunNodeScript('split-webpack-bundle.cjs', [inputFile, outDir, '--force']);
+    if (ok) return 'webpack-modules';
+  }
+  runNodeScript('split-bundle-ast.cjs', [inputFile, outDir, ...astArgs]);
+  return 'ast-split';
 }
 
 async function main() {
@@ -2213,6 +2426,7 @@ async function main() {
   await copyProjectFiles(absoluteInputDir, outputDir, flags.force);
 
   const publicDir = path.join(outputDir, 'public');
+  const publicRepairs = await repairPublicCapture(publicDir);
   const origin = await inferOriginFromHtml(absoluteInputDir);
   const wasmRepairs = flags.repairWasm ? await repairWasmAssets(publicDir, origin) : [];
 
@@ -2241,6 +2455,59 @@ async function main() {
       });
     }
   }
+  const excludedLargeJsSet = new Set(excludedLargeJs);
+
+  // ── Capture sanitization ──
+  // Detect HTML-wrapped JS captures (browser "Save as"/view-source/mirror) and
+  // unusable source maps (SPA shells returned for missing .map routes). The
+  // deobfuscate step repairs HTML-wrapped JS it transforms, but excluded large
+  // bundles are raw-split straight from the input, so we stage cleaned copies of
+  // those here. Both problems are also surfaced as quality-audit warnings.
+  const sanitizedDir = path.join(outputDir, 'recovery/sanitized-input');
+  const sanitizedInputByRel = new Map();
+  const htmlWrappedCaptures = [];
+  for (const file of inputFiles) {
+    const rel = toPosix(path.relative(absoluteInputDir, file));
+    if (!isJavaScript(rel)) continue;
+    const content = await fsp.readFile(file, 'utf8').catch(() => null);
+    if (content == null || !looksLikeHtmlDocument(content)) continue;
+    const recovered = unwrapHtmlWrappedJs(content);
+    htmlWrappedCaptures.push({
+      file: rel,
+      recovered: Boolean(recovered),
+      bytesBefore: Buffer.byteLength(content),
+      bytesAfter: recovered ? Buffer.byteLength(recovered.code) : null,
+      method: recovered ? recovered.method : null,
+    });
+    if (recovered && excludedLargeJsSet.has(rel)) {
+      const stagedPath = path.join(sanitizedDir, rel);
+      await fsp.mkdir(path.dirname(stagedPath), { recursive: true });
+      await fsp.writeFile(stagedPath, recovered.code, 'utf8');
+      sanitizedInputByRel.set(rel, stagedPath);
+    }
+  }
+
+  // Classify captured source maps so we can report fakes instead of silently
+  // skipping them. extractPackageCoordinate-style evidence is gathered later;
+  // here we only flag maps that are not usable as source maps at all.
+  const invalidSourceMaps = [];
+  const inputRelSet = new Set(inputFiles.map((file) => toPosix(path.relative(absoluteInputDir, file))));
+  for (const file of inputFiles) {
+    const rel = toPosix(path.relative(absoluteInputDir, file));
+    if (!/\.map$/i.test(rel)) continue;
+    const content = await fsp.readFile(file, 'utf8').catch(() => null);
+    if (content == null) continue;
+    const verdict = classifySourceMapContent(content);
+    if (!verdict.valid) {
+      invalidSourceMaps.push({
+        map: rel,
+        reason: verdict.reason,
+        // Best-effort URL to re-fetch a genuine map from: the sibling bundle's
+        // //# sourceMappingURL comment if present, else origin + map path.
+        refetchUrl: await suggestMapRefetchUrl(absoluteInputDir, rel, inputRelSet, origin),
+      });
+    }
+  }
 
   const deobfuscatedDir = path.join(outputDir, 'recovery/deobfuscated');
   const deobfuscateArgs = [absoluteInputDir, deobfuscatedDir, '--force', '--verbose'];
@@ -2259,10 +2526,23 @@ async function main() {
   }
   runNodeScript('deobfuscate-snapshot.cjs', deobfuscateArgs);
 
+  const deobReport = await readDeobfuscationReport(deobfuscatedDir);
+  const noopTransforms = deobReport.results
+    .filter((result) =>
+      result.kind === 'js' &&
+      !result.excluded &&
+      result.changed === false &&
+      typeof result.originalBytes === 'number' &&
+      result.originalBytes === result.outputBytes)
+    .map((result) => ({
+      file: result.path,
+      bytes: result.originalBytes,
+      warnings: (result.warnings || []).map((warning) => warning.message).slice(0, 2),
+    }));
+
   const deobfuscatedFiles = await walkDirectory(deobfuscatedDir);
   const filesByRel = {};
   const splitOutputs = [];
-  const excludedLargeJsSet = new Set(excludedLargeJs);
 
   for (const file of deobfuscatedFiles) {
     const rel = toPosix(path.relative(deobfuscatedDir, file));
@@ -2279,8 +2559,11 @@ async function main() {
       const splitName = path.basename(file, path.extname(file));
       const out = path.join(outputDir, 'src/recovered-chunks', splitName);
       if (flags.moduleGranularity === 'declarations') {
-        runNodeScript('split-bundle-ast.cjs', [file, out, '--force', '--summary', '--deep-huge-nodes', '--module-granularity', 'declarations']);
-        splitOutputs.push({ source: rel, output: toPosix(path.relative(outputDir, out)), bytes: stat.size, mode: 'deobfuscated-declarations' });
+        const strategy = splitBundleForInspection(file, out, {
+          code: content,
+          astArgs: ['--force', '--summary', '--deep-huge-nodes', '--module-granularity', 'declarations'],
+        });
+        splitOutputs.push({ source: rel, output: toPosix(path.relative(outputDir, out)), bytes: stat.size, mode: strategy === 'webpack-modules' ? 'deobfuscated-webpack-modules' : 'deobfuscated-declarations' });
       } else {
         runNodeScript('split-bundle.cjs', [file, out, '--force']);
         splitOutputs.push({ source: rel, output: toPosix(path.relative(outputDir, out)), bytes: stat.size, mode: 'deobfuscated' });
@@ -2290,12 +2573,19 @@ async function main() {
 
   if (flags.largeJsMode === 'split-raw' || flags.recoveryMode === 'inspect-first') {
     for (const rel of excludedLargeJs) {
-      const inputFile = path.join(absoluteInputDir, rel);
+      // Prefer a sanitized copy when the captured bundle was HTML-wrapped, so we
+      // split real JavaScript rather than an HTML document.
+      const inputFile = sanitizedInputByRel.get(rel) || path.join(absoluteInputDir, rel);
       const stat = await fsp.stat(inputFile);
-      const splitName = `${path.basename(inputFile, path.extname(inputFile))}-raw`;
+      const splitName = `${path.basename(rel, path.extname(rel))}-raw`;
       const out = path.join(outputDir, 'src/recovered-chunks', splitName);
-      runNodeScript('split-bundle-ast.cjs', [inputFile, out, '--force', '--summary', '--deep-huge-nodes']);
-      splitOutputs.push({ source: rel, output: toPosix(path.relative(outputDir, out)), bytes: stat.size, mode: flags.recoveryMode === 'inspect-first' ? 'raw-inspect-first' : 'raw-large' });
+      const code = await fsp.readFile(inputFile, 'utf8').catch(() => '');
+      const strategy = splitBundleForInspection(inputFile, out, {
+        code,
+        astArgs: ['--force', '--summary', '--deep-huge-nodes'],
+      });
+      const baseMode = flags.recoveryMode === 'inspect-first' ? 'raw-inspect-first' : 'raw-large';
+      splitOutputs.push({ source: rel, output: toPosix(path.relative(outputDir, out)), bytes: stat.size, mode: strategy === 'webpack-modules' ? `${baseMode}-webpack-modules` : baseMode });
     }
   }
 
@@ -2312,6 +2602,10 @@ async function main() {
     recoveryMode: flags.recoveryMode,
     transformRiskFiles,
     inspectFirstSkipped: flags.recoveryMode === 'inspect-first' ? excludedLargeJsDetails : [],
+    htmlWrappedCaptures,
+    invalidSourceMaps,
+    noopTransforms,
+    origin,
   });
   const extractionPlan = createExtractionPlan(boundaries, splitManifestData.manifests, splitManifestData.entries, sourceMapEvidence, recoveryAudit);
   await writeWorkspace(outputDir, boundaries, dependencies, {
@@ -2323,6 +2617,8 @@ async function main() {
     excludedLargeJs,
     excludedLargeJsDetails,
     transformRiskFiles,
+    htmlWrappedCaptures,
+    invalidSourceMaps,
     splitOutputs,
     splitManifests: splitManifestData.manifests.map((manifest) => ({
       source: manifest.source,
@@ -2333,6 +2629,7 @@ async function main() {
     })),
     sourceMapEvidence,
     wasmRepairs,
+    publicRepairs,
     timeoutSeconds: flags.timeoutSeconds,
     concurrency: flags.concurrency,
     engine: flags.engine,
@@ -2375,8 +2672,29 @@ async function main() {
   console.log(`Recovery mode: ${flags.recoveryMode}`);
   console.log(`Large JS mode: ${flags.largeJsMode}`);
   if (recoveryAudit.summary.warningCount) console.log(`Quality audit warnings: ${recoveryAudit.summary.warningCount} (see recovery/QUALITY_AUDIT.md)`);
+  if (htmlWrappedCaptures.length) console.log(`Repaired HTML-wrapped JS captures: ${htmlWrappedCaptures.filter((c) => c.recovered).length}/${htmlWrappedCaptures.length}`);
+  if (publicRepairs.repairedJs.length || publicRepairs.brokenMaps.length) {
+    console.log(`Repaired preserved public/: ${publicRepairs.repairedJs.length} JS file(s) unwrapped, ${publicRepairs.brokenMaps.length} fake map(s) set aside (.broken)`);
+  }
+  if (invalidSourceMaps.length) console.log(`Unusable captured source maps: ${invalidSourceMaps.length} (see source-map-is-html-shell warning)`);
   if (excludedLargeJs.length) console.log(`Preserved large JS: ${excludedLargeJs.join(', ')}`);
   if (wasmRepairs.length) console.log(`WASM repairs: ${wasmRepairs.map((item) => `${item.file}:${item.status}`).join(', ')}`);
+
+  // Signal a fully-degenerate capture (nothing inspectable or source-like was
+  // recovered) with a non-zero exit so automation can detect it. Normal
+  // recoveries — anything split, any real map, or any transformed JS — exit 0.
+  const changedJsCount = deobReport.results.filter((result) => result.kind === 'js' && result.changed === true).length;
+  const recoveredNothing = splitOutputs.length === 0 && sourceMapEvidence.length === 0 && changedJsCount === 0;
+  if (recoveredNothing && !flags.allowEmpty) {
+    console.error(
+      '\nRecovery is empty: no chunks were split, no usable source maps were found, and no JavaScript was transformed.\n' +
+      (htmlWrappedCaptures.some((capture) => !capture.recovered)
+        ? 'Some captured JS could not be unwrapped from its HTML page. Re-capture the bundles as raw JavaScript responses.\n'
+        : 'The input may be empty, already source, or not recoverable JavaScript.\n') +
+      'Exiting non-zero. Pass --allow-empty to treat this as success.',
+    );
+    process.exitCode = 2;
+  }
 }
 
 main().catch((error) => {
