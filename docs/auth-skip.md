@@ -255,6 +255,39 @@ chrome (the left sidebar) mounts and is visible; the rest of the chrome is in th
 DOM but is not presented as a working editor, and the drawing surface never
 appears.
 
+## Reconstructing the backend offline (`stub-backend` + `drive`)
+
+Getting past that wall *without* the live server means giving the app the
+backend responses its boot needs — user settings, feature flags, document
+metadata, a blank-document open sequence — until init proceeds. That is
+protocol-by-protocol work, so the toolkit provides a human-in-the-loop
+record → curate → replay loop instead of a magic button:
+
+```bash
+# 1. RECORD what the app asks the backend (optionally with live responses)
+jsmap drive http://localhost:5292/ --param fabricTests=1 --param e2eTests=1 \
+  --record-backend rec.json --gaps          # --gaps lists what's unstubbed
+
+# 2. SCAFFOLD an editable stub map, observed responses pre-filled as a start
+jsmap stub-backend scaffold rec.json -o stub-map.json --bodies responses/
+
+# 3. CURATE — a human edits stub-map.json / responses/* so the boot proceeds
+#    (each rule is { match:{method,url-glob}, response:{status,body|$file}, note })
+
+# 4. REPLAY the curated backend and see how much further it gets + new gaps
+jsmap drive http://localhost:5292/ --stub-map stub-map.json --gaps
+# …repeat 3–4 until the boot sequence completes offline
+```
+
+`drive` answers each request from the stub map first, then any `--passthrough`
+live asset, then the generic offline stub — and records every request so
+`stub-backend gaps` / `--gaps` always shows the next thing to curate. On the
+AutoCAD capture an initial pass records ~24 requests (LaunchDarkly flag/event
+endpoints, fonts, identity) and scaffolds 9 rules to start from. This is the
+"Path B" route to an offline-bootable app; it is real, iterative work, and how
+far it goes depends on how much of the backend protocol you reconstruct (the CAD
+kernel + a translated document being the deepest layer).
+
 ## What you can realistically expect
 
 The capture's recovery progresses in clear stages, each removing one wall:

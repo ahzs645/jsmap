@@ -211,9 +211,16 @@ Commands:
       saga effect vocabulary, and the dispatchable action types. Pairs with
       auth-scan + offline-mode + drive. See docs/auth-skip.md.
 
+  stub-backend <scaffold|gaps|lint> ... (Path B backend-reconstruction workbench)
+      Manage an offline backend stub map for a captured SPA. scaffold a stub map
+      from a 'drive --record-backend' recording, list gaps (recorded requests no
+      rule covers), or lint a map. The human curates each canned response until
+      the app's boot sequence completes offline. See docs/auth-skip.md.
+
   drive <served-url> [--param k=v] [--set name=value] [--userinfo <file>]
         [--wait ms] [--store-global <name>] [--dispatch <json>] [--eval <js>]
         [--dump-store] [--screenshot <path>] [--exe <chromium>]
+        [--stub-map <file>] [--record-backend <file>] [--gaps]
       Boot a *served* capture in headless Chromium with an offline-stub ruleset
       (flag/config services answered with a completing stream, identity with a
       profile, analytics swallowed), auto-detect its redux store, dump state,
@@ -633,6 +640,10 @@ function main() {
     case 'repair-stubs':
     case 'repair-capture-stubs':
       runScript('repair-capture-stubs.cjs', subArgs);
+      break;
+    case 'stub-backend':
+    case 'fake-backend':
+      runScript('stub-backend.cjs', subArgs);
       break;
     case 'rename-plan':
       runScript('rename-plan.cjs', subArgs);

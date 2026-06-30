@@ -36,6 +36,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const stub = require('./stub-backend.cjs');
 
 // ── reusable offline-stub ruleset (pure, unit-tested) ───────────────────────
 
@@ -84,7 +85,8 @@ function classifyRequest(url, opts = {}) {
 
 function parseArgs(argv) {
   const o = { url: null, params: [], sets: [], userinfo: null, wait: 9000, storeGlobal: null,
-    dispatches: [], evals: [], dumpStore: false, screenshot: null, exe: null, backfill: null, save: null, passthrough: [] };
+    dispatches: [], evals: [], dumpStore: false, screenshot: null, exe: null, backfill: null, save: null, passthrough: [],
+    stubMap: null, recordBackend: null, gaps: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--param') o.params.push(argv[++i]);
@@ -98,6 +100,9 @@ function parseArgs(argv) {
     else if (a === '--backfill') o.backfill = argv[++i];
     else if (a === '--passthrough') o.passthrough.push(argv[++i]);
     else if (a === '--save') o.save = argv[++i];
+    else if (a === '--stub-map') o.stubMap = argv[++i];
+    else if (a === '--record-backend') o.recordBackend = argv[++i];
+    else if (a === '--gaps') o.gaps = true;
     else if (a === '--screenshot') o.screenshot = argv[++i];
     else if (a === '--exe') o.exe = argv[++i];
     else if (a === '--help' || a === '-h') o.help = true;
@@ -184,6 +189,20 @@ async function main() {
   const backfillBase = opts.backfill ? opts.backfill.replace(/\/$/, '') : null;
   const passedThrough = [];   // external assets fetched live instead of stubbed
   const passthroughRe = opts.passthrough.length ? new RegExp(opts.passthrough.join('|')) : null;
+
+  // Path B: load a curated stub map, and/or record what the app asks the backend.
+  let stubMap = null;
+  if (opts.stubMap) { try { stubMap = stub.loadStubMap(opts.stubMap); } catch (e) { console.error(`drive: bad --stub-map: ${e.message}`); process.exitCode = 1; return; } }
+  const recording = { url: target, requests: [] };
+  const TEXT_CT = /json|text|javascript|xml|css|html|event-stream/;
+  function record(method, url, status, contentType, body, servedFrom) {
+    if (!opts.recordBackend) return;
+    let b = '';
+    if (Buffer.isBuffer(body)) b = TEXT_CT.test(contentType || '') ? body.slice(0, 524288).toString('utf8') : `[binary ${body.length} bytes]`;
+    else if (typeof body === 'string') b = body.slice(0, 524288);
+    recording.requests.push({ method, url, status, contentType: contentType || '', body: b, servedFrom });
+  }
+
   await ctx.route('**/*', async (route) => {
     const url = route.request().url();
     if (url.startsWith(localOrigin)) {
@@ -203,8 +222,19 @@ async function main() {
       } catch { /* fall through to the original 404 */ }
       return route.fulfill({ response: resp });
     }
-    // passthrough: fetch a matching external *public asset* live (via the proxy)
-    // instead of stubbing it — e.g. a CDN-hosted viewer SDK the app expects.
+    const method = route.request().method();
+
+    // 1. curated stub map (the human's reconstructed backend) wins
+    if (stubMap) {
+      const rule = stub.matchRule(stubMap.__compiled, method, url);
+      if (rule) {
+        const res = stub.resolveResponse(rule, stubMap.__dir);
+        record(method, url, res.status, res.contentType, res.body, 'map');
+        return route.fulfill({ status: res.status, contentType: res.contentType, body: res.body });
+      }
+    }
+
+    // 2. passthrough: fetch a matching external *public asset* live (via the proxy)
     if (passthroughRe && passthroughRe.test(url)) {
       try {
         const r = await fetch(url);
@@ -212,12 +242,16 @@ async function main() {
           const body = Buffer.from(await r.arrayBuffer());
           passedThrough.push(`${url.slice(0, 80)} (${body.length}b)`);
           if (opts.save) { const f = path.join(opts.save, '_external', new URL(url).hostname + new URL(url).pathname); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, body); }
+          record(method, url, 200, r.headers.get('content-type'), body, 'live');
           return route.fulfill({ status: 200, contentType: r.headers.get('content-type') || 'application/javascript', body });
         }
       } catch { /* fall through to stub */ }
     }
+
+    // 3. generic offline stub (the fallback — these are the gaps to curate)
     const decision = classifyRequest(url, { localOrigin, userinfo });
     if (decision.action === 'continue') return route.continue();
+    record(method, url, decision.status, decision.contentType, decision.body, 'generic');
     return route.fulfill({ status: decision.status, contentType: decision.contentType, body: decision.body });
   });
 
@@ -267,6 +301,19 @@ async function main() {
     console.log(`drive: passed through ${passedThrough.length} external asset(s) live`);
     if (passedThrough.length) console.log(passedThrough.slice(0, 15).map((b) => '  > ' + b).join('\n'));
   }
+  if (opts.recordBackend) {
+    fs.writeFileSync(opts.recordBackend, JSON.stringify(recording, null, 2));
+    const byKind = recording.requests.reduce((a, r) => ((a[r.servedFrom] = (a[r.servedFrom] || 0) + 1), a), {});
+    console.log(`drive: recorded ${recording.requests.length} backend request(s) → ${opts.recordBackend} (${Object.entries(byKind).map(([k, v]) => `${k}:${v}`).join(' ')})`);
+    console.log(`  next: jsmap stub-backend scaffold ${opts.recordBackend} -o stub-map.json --bodies responses/`);
+  }
+  if (opts.gaps) {
+    // requests served by the generic fallback are the unstubbed gaps
+    const seen = new Set();
+    const gaps = recording.requests.filter((r) => r.servedFrom === 'generic').filter((r) => { const k = r.method + ' ' + stub.urlToPattern(r.url); if (seen.has(k)) return false; seen.add(k); return true; });
+    console.log(`drive: ${gaps.length} unstubbed backend request(s) (the next things to curate):`);
+    for (const g of gaps.slice(0, 40)) console.log(`  ${g.method} ${stub.urlToPattern(g.url)}`);
+  }
   if (errors.length) { console.log('drive: page errors:'); console.log(errors.slice(0, 10).map((e) => '  ' + e).join('\n')); }
 
   await browser.close();
@@ -291,6 +338,12 @@ Usage:
   --passthrough <regex> fetch matching *external* URLs live instead of stubbing
                         them (e.g. a CDN-hosted viewer SDK). Repeatable.
   --save <dir>          also save backfilled/passthrough assets under <dir>
+  --stub-map <file>     serve a curated offline backend from a stub map (Path B);
+                        matched requests win over passthrough/generic stubs
+  --record-backend <f>  record every backend request + response to <f> (feed to
+                        'jsmap stub-backend scaffold')
+  --gaps                after the run, list backend requests served by the generic
+                        fallback (the unstubbed gaps to curate next)
   --screenshot <path>   write a PNG
   --exe <path>          Chromium executable path
 

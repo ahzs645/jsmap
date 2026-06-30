@@ -30,6 +30,7 @@
     "test:action-catalog": "node scripts/test-action-catalog.cjs",
     "test:drive-capture": "node scripts/test-drive-capture.cjs",
     "test:repair-stubs": "node scripts/test-repair-stubs.cjs",
+    "test:stub-backend": "node scripts/test-stub-backend.cjs",
     "test:recovery-heuristics": "node scripts/test-recovery-heuristics.cjs",
     "test:runtime-patch": "node scripts/test-runtime-patch-plan.cjs",
     "test:static-runtime-tools": "node scripts/test-static-runtime-tools.cjs",
