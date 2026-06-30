@@ -202,19 +202,45 @@ Dispatching those (`drive --dispatch '{"type":"app/readyAction","payload":true}'
 the **real AutoCAD editor chrome renders**: the UNDO/REDO and ZOOM toolbars and
 the OSNAP/OTRACK/ORTHO/POLAR drafting status bar, plus the editor `<canvas>`.
 
-### Where it actually stops
-
-The drawing *area* stays empty, and the console shows the honest reason:
+The drawing *area* is still empty, and the console shows the honest reasons:
 
 ```
 ChunkLoadError: Loading chunk 19129 failed     # a lazy chunk never captured
 ReferenceError: Autodesk is not defined        # the Forge viewer SDK isn't present
 ```
 
-The chrome is in the captured bundles; the viewport content is not. It needs a
-lazy chunk that was never captured (exactly what `jsmap boot-check` flags), the
-Forge viewer global, and the streamed WASM CAD kernel + an actual document. Those
-are data, not code — no client-side move conjures them.
+### Backfilling the missing assets (`drive --backfill` / `--passthrough`)
+
+Those two are *assets*, not logic — and if you can still reach the origin, you
+can fill them in. `drive` does it on demand:
+
+```bash
+node scripts/jsmap.cjs drive http://localhost:5292/ \
+  --param fabricTests=1 --param e2eTests=1 \
+  --backfill https://web.autocad.com --save ./backfill \
+  --passthrough 'swc\.autodesk\.com' \
+  --dispatch '{"type":"app/readyAction","payload":true}' …
+```
+
+- `--backfill <origin>` — when a **same-origin** asset 404s in the capture (the
+  missing lazy chunk), re-fetch it from the live origin, serve it, and (`--save`)
+  write it back to complete the capture. On AutoCAD this fetches chunk `19129`,
+  the `ChunkLoadError` clears, and more UI appears (the *Filter* and *Spec*
+  panels).
+- `--passthrough <regex>` — fetch matching **external** public assets live
+  instead of stubbing them (e.g. the editor fonts on `swc.autodesk.com`). For the
+  Forge viewer SDK, dropping `viewer3D.min.js` into the harness `<head>` defines
+  the `Autodesk` global and clears `Autodesk is not defined`.
+
+### Where it actually stops
+
+Each asset you supply clears its error and reveals the next dependency — a
+*moving* wall. After the chunk and the viewer, the next is
+`Cannot read properties of undefined (reading 'HostAPI')` (an Autodesk-internal
+viewer API), and behind that the drawing canvas itself needs the streamed **WASM
+CAD kernel** and an **actual model/document** translated by the backend. Those
+are native code + server data, not static assets — no fetch completes them. The
+editor *chrome* is fully recoverable; the *drawing surface* is not.
 
 ## What you can realistically expect
 
@@ -227,20 +253,23 @@ The capture's recovery progresses in clear stages, each removing one wall:
 | 3 | `offline-mode` recipe | backend path skipped; app boots to "Initializing AutoCAD" |
 | 4 | `action-catalog` + `drive` (`?e2eTests=1`) | store exposed + dumped; boot-gate chain + force-actions mapped |
 | 5 | `drive --dispatch` the gate force-actions | **the real editor chrome renders** (toolbars, drafting status bar) |
-| 6 | supply the missing lazy chunk + Forge viewer + WASM kernel + a document | the drawing canvas; needs data the capture doesn't contain |
+| 6 | `drive --backfill`/`--passthrough` + inject the viewer | missing chunk + fonts + Forge viewer filled in; chrome complete, asset errors cleared |
+| 7 | supply the WASM kernel + a translated model/document | the drawing surface; native code + backend data the capture can't contain |
 
 - ✅ The login landing disappears and the **real app** boots.
 - ✅ Init runs past identity/settings via the app's own offline mode.
 - ✅ The store is exposed, dumped, and **driven** — the editor interface chrome
   renders from a static capture.
-- ⛔ The drawing canvas needs an uncaptured lazy chunk, the Forge viewer, and the
-  streamed WASM kernel + a document — data, not code.
+- ✅ Missing same-origin chunks are **backfilled** from the origin and external
+  public assets (fonts, viewer SDK) are **passed through** live, clearing the
+  asset-load errors.
+- ⛔ The drawing surface needs the streamed WASM CAD kernel and a real
+  model/document — native code + server data, not static assets.
 
-The toolkit gets you to a **rendered editor interface** and an honest map of the
-one remaining wall (uncaptured assets + the WASM kernel). Filling that in is a
-separate effort — see `jsmap boot-check` for the missing chunks and `jsmap
-editable` for scaffolding fake stubs — and is closer to rebuilding the backend
-than to recovering the frontend.
+The toolkit gets you to a **rendered editor interface** with its assets filled
+in, and an honest map of the one remaining wall (the WASM kernel + a live model).
+That last step is native + backend, not frontend recovery — see `jsmap
+boot-check` for the missing chunks and `jsmap editable` for scaffolding stubs.
 
 ## A note on intended use
 

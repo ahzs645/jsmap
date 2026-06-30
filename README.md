@@ -233,12 +233,16 @@ interface**: `?e2eTests=1` exposes the store, and dispatching the boot-gate
 force-actions (`app/readyAction`, `fabric/canvasLoadSuccess`,
 `app/setIsModalDialogOpen`) flips `app.ready` and closes the init modal so the
 real editor chrome renders — the UNDO/REDO and ZOOM toolbars and the
-OSNAP/OTRACK/ORTHO/POLAR drafting status bar. The drawing *canvas* stays empty
-because the viewport needs an uncaptured lazy chunk (which `jsmap boot-check`
-flags), the Forge viewer, and the WASM kernel — data, not code. See
-[docs/auth-skip.md](docs/auth-skip.md) for the full six-stage case study (Sign In
-→ shell mounts → app boots → walls mapped → **editor chrome renders** → missing
-assets) and the exact boundary.
+OSNAP/OTRACK/ORTHO/POLAR drafting status bar. When the capture is missing assets,
+`drive --backfill <origin>` re-fetches same-origin lazy chunks on demand (and
+`--save` writes them back to complete the capture), while `--passthrough <regex>`
+loads external public assets (fonts, a CDN viewer SDK) live instead of stubbing
+them — clearing the `ChunkLoadError`/`Autodesk is not defined` errors and filling
+in more UI. The drawing *surface* still needs the WASM kernel + a real model —
+native code + server data, not static assets. See
+[docs/auth-skip.md](docs/auth-skip.md) for the full seven-stage case study (Sign
+In → shell mounts → app boots → walls mapped → **editor chrome renders** → assets
+backfilled → WASM/model wall) and the exact boundary.
 
 For preserved static runtimes that need to be made operable with fake data,
 use the static harness and shim toolset:

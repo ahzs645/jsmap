@@ -84,7 +84,7 @@ function classifyRequest(url, opts = {}) {
 
 function parseArgs(argv) {
   const o = { url: null, params: [], sets: [], userinfo: null, wait: 9000, storeGlobal: null,
-    dispatches: [], evals: [], dumpStore: false, screenshot: null, exe: null };
+    dispatches: [], evals: [], dumpStore: false, screenshot: null, exe: null, backfill: null, save: null, passthrough: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--param') o.params.push(argv[++i]);
@@ -95,6 +95,9 @@ function parseArgs(argv) {
     else if (a === '--dispatch') o.dispatches.push(argv[++i]);
     else if (a === '--eval') o.evals.push(argv[++i]);
     else if (a === '--dump-store') o.dumpStore = true;
+    else if (a === '--backfill') o.backfill = argv[++i];
+    else if (a === '--passthrough') o.passthrough.push(argv[++i]);
+    else if (a === '--save') o.save = argv[++i];
     else if (a === '--screenshot') o.screenshot = argv[++i];
     else if (a === '--exe') o.exe = argv[++i];
     else if (a === '--help' || a === '-h') o.help = true;
@@ -177,8 +180,43 @@ async function main() {
     return `window.${name} = ${typeof val === 'string' && val[0] !== '"' ? val : JSON.stringify(val)};`; }).join('\n');
   await page.addInitScript(PAGE_HELPERS + '\n' + setters);
 
+  const backfilled = [];   // local 404s re-fetched from the origin
+  const backfillBase = opts.backfill ? opts.backfill.replace(/\/$/, '') : null;
+  const passedThrough = [];   // external assets fetched live instead of stubbed
+  const passthroughRe = opts.passthrough.length ? new RegExp(opts.passthrough.join('|')) : null;
   await ctx.route('**/*', async (route) => {
-    const decision = classifyRequest(route.request().url(), { localOrigin, userinfo });
+    const url = route.request().url();
+    if (url.startsWith(localOrigin)) {
+      if (!backfillBase) return route.continue();
+      // serve from the local capture; if it 404s, re-fetch the asset from the origin
+      let resp; try { resp = await route.fetch(); } catch { return route.continue(); }
+      if (resp.status() !== 404) return route.fulfill({ response: resp });
+      const pathname = new URL(url).pathname;
+      try {
+        const r = await fetch(backfillBase + pathname);
+        if (r.ok) {
+          const body = Buffer.from(await r.arrayBuffer());
+          backfilled.push(`${pathname} (${body.length}b)`);
+          if (opts.save) { const f = path.join(opts.save, pathname.replace(/^\//, '')); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, body); }
+          return route.fulfill({ status: 200, contentType: r.headers.get('content-type') || 'application/javascript', body });
+        }
+      } catch { /* fall through to the original 404 */ }
+      return route.fulfill({ response: resp });
+    }
+    // passthrough: fetch a matching external *public asset* live (via the proxy)
+    // instead of stubbing it — e.g. a CDN-hosted viewer SDK the app expects.
+    if (passthroughRe && passthroughRe.test(url)) {
+      try {
+        const r = await fetch(url);
+        if (r.ok) {
+          const body = Buffer.from(await r.arrayBuffer());
+          passedThrough.push(`${url.slice(0, 80)} (${body.length}b)`);
+          if (opts.save) { const f = path.join(opts.save, '_external', new URL(url).hostname + new URL(url).pathname); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, body); }
+          return route.fulfill({ status: 200, contentType: r.headers.get('content-type') || 'application/javascript', body });
+        }
+      } catch { /* fall through to stub */ }
+    }
+    const decision = classifyRequest(url, { localOrigin, userinfo });
     if (decision.action === 'continue') return route.continue();
     return route.fulfill({ status: decision.status, contentType: decision.contentType, body: decision.body });
   });
@@ -221,6 +259,14 @@ async function main() {
 
   const dom = await page.evaluate(() => ({ text: document.body.innerText.replace(/\s+/g, ' ').slice(0, 200), buttons: document.querySelectorAll('button').length, canvas: document.querySelectorAll('canvas').length }));
   console.log(`drive: dom text="${dom.text}" buttons=${dom.buttons} canvas=${dom.canvas}`);
+  if (backfillBase) {
+    console.log(`drive: backfilled ${backfilled.length} asset(s) from ${backfillBase}${opts.save ? ` → ${opts.save}` : ''}`);
+    if (backfilled.length) console.log(backfilled.slice(0, 30).map((b) => '  + ' + b).join('\n'));
+  }
+  if (passthroughRe) {
+    console.log(`drive: passed through ${passedThrough.length} external asset(s) live`);
+    if (passedThrough.length) console.log(passedThrough.slice(0, 15).map((b) => '  > ' + b).join('\n'));
+  }
   if (errors.length) { console.log('drive: page errors:'); console.log(errors.slice(0, 10).map((e) => '  ' + e).join('\n')); }
 
   await browser.close();
@@ -240,6 +286,11 @@ Usage:
   --dispatch <json>     dispatch an action into the store (repeatable)
   --eval <js>           evaluate JS in the page, print result (repeatable)
   --dump-store          print the store's state keys + a shallow summary
+  --backfill <origin>   when a local asset 404s, re-fetch it from <origin> and
+                        serve it (completes a capture missing lazy chunks)
+  --passthrough <regex> fetch matching *external* URLs live instead of stubbing
+                        them (e.g. a CDN-hosted viewer SDK). Repeatable.
+  --save <dir>          also save backfilled/passthrough assets under <dir>
   --screenshot <path>   write a PNG
   --exe <path>          Chromium executable path
 

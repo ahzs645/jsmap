@@ -64,6 +64,19 @@ test('parseArgs collects repeatable options', () => {
   assert.equal(o.dumpStore, true);
 });
 
+test('parseArgs collects backfill, save, and repeatable passthrough', () => {
+  const o = parseArgs(['http://localhost:5292/', '--backfill', 'https://web.autocad.com',
+    '--save', './backfill', '--passthrough', 'viewer3D', '--passthrough', 'swc\\.autodesk\\.com']);
+  assert.equal(o.backfill, 'https://web.autocad.com');
+  assert.equal(o.save, './backfill');
+  assert.deepEqual(o.passthrough, ['viewer3D', 'swc\\.autodesk\\.com']);
+  // passthrough patterns are OR-combined into one matcher
+  const re = new RegExp(o.passthrough.join('|'));
+  assert.ok(re.test('https://swc.autodesk.com/fonts/x.woff2'));
+  assert.ok(re.test('https://cdn/viewer3D.min.js'));
+  assert.ok(!re.test('https://example.com/api/v2/docs'));
+});
+
 test('buildUrl appends query params', () => {
   const u = buildUrl('http://localhost:5292/', ['fabricTests=1', 'e2eTests=1']);
   assert.match(u, /fabricTests=1/);
