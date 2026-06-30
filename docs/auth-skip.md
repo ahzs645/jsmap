@@ -299,9 +299,35 @@ AutoCAD capture: starting from a clean bundle (no forced flags), adding only the
 LaunchDarkly module made `featureFlagsInitialized` flip **true on its own** — the
 boot advanced past the feature-flag gate with a *real* reconstructed response
 rather than a patched flag, and the gap list dropped from 9 to 4 (just fonts,
-which go via `--passthrough`). The app still stops at the document-open dialog;
-that next layer (real-auth identity → document metadata → the CAD kernel + a
-translated document) is the deeper, app-specific work the same loop drives.
+which go via `--passthrough`).
+
+### The identity layer (and where the backend ceiling actually is)
+
+The next iteration is identity — making `session.identity` real so the app stops
+crashing on `session.identity.user` and proceeds to its document flow. Two
+findings worth recording, because they bound how far backend reconstruction goes:
+
+1. **Authentication can be satisfied offline without patching the bundle.** On a
+   *pristine* bundle (no `auth-scan`), loading with `?e2eTests=1` (the app's own
+   e2e flag, which mints a token when acquisition fails) plus the LaunchDarkly
+   module is enough for the app to authenticate *naturally*: `session.identity`
+   populates and the master auth switch resolves on its own. This is cleaner
+   than the `auth-scan` force — the real flow runs, just satisfied offline.
+2. **But the identity is anonymous, and that is the ceiling.** The e2e token path
+   yields a built-in *anonymous* user (`{username:"Anonymous", …}`), not your
+   captured profile, and the app then makes **no** document/settings backend HTTP
+   calls at all before it stalls at "Initializing AutoCAD" — those are gated
+   behind the native kernel, not behind a stubbable request. A *named* identity
+   (which might make the app fetch a real document list — a genuine new gap)
+   needs a real Oxygen token, and the SDK decodes it as a **CBOR token with a
+   signature `verify()`** — unforgeable without Autodesk's signing key.
+
+So the offline-reachable backend surface is fully covered by the modules above
+(flags + analytics + fonts + the app's own anonymous identity); `--gaps` reports
+**zero** remaining. The wall past this point is not another backend response to
+write — it is the native WASM CAD kernel running an actual document, which a
+static capture cannot supply. Path B reconstructs the backend up to that line;
+the line itself is native (Path A) work.
 
 ## What you can realistically expect
 
