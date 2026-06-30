@@ -84,17 +84,52 @@ function detectSliceNames(code) {
   return [...out.keys()];
 }
 
+/**
+ * For each boot-gate flag, find the reducer that sets it and the slice it lives
+ * in, so the flag can be reported with the action that forces it true:
+ *   `ready` is set by `readyAction` in slice `app` → dispatch `app/readyAction`.
+ * Scoped per-flag with bounded back-scans, so it stays fast on huge bundles.
+ */
+function detectGateSetters(code, gateNames) {
+  const out = [];
+  for (const flag of gateNames) {
+    // an assignment `<obj>.<flag> =` (not `==`) inside a reducer arrow
+    const assignRe = new RegExp(`\\b[A-Za-z_$][\\w$]*\\.${flag}\\b\\s*=(?!=)`, 'g');
+    let m;
+    let found = null;
+    while ((m = assignRe.exec(code)) !== null) {
+      const back = code.slice(Math.max(0, m.index - 220), m.index);
+      // nearest `key: (e, M) => {` or `key: e => {` before the assignment
+      const red = back.match(/([A-Za-z_$][\w$]*)\s*:\s*(?:[A-Za-z_$][\w$]*|\([^)]{0,30}\))\s*=>\s*\{[^{}]*$/);
+      if (!red) continue;
+      const setter = red[1];
+      // nearest createSlice `name: "x"` before the reducer (the slice name)
+      const ctx = code.slice(Math.max(0, m.index - 4000), m.index);
+      const names = [...ctx.matchAll(/\bname\s*:\s*["'`]([A-Za-z0-9_]+)["'`]/g)];
+      const slice = names.length ? names[names.length - 1][1] : null;
+      found = { flag, setter, slice, action: slice ? `${slice}/${setter}` : setter };
+      break;
+    }
+    if (found) out.push(found);
+  }
+  return out;
+}
+
 /** Boot-gate flags: `<name>Initialized: !1` style initial-state booleans. */
 function detectBootGates(code) {
   const out = new Map();
-  // anchor on the suffix word, then read the (bounded) identifier prefix before it
+  const bump = (name, index) => {
+    if (!out.has(name)) out.set(name, { name, count: 0, firstIndex: index });
+    out.get(name).count++;
+  };
+  // (a) camelCase suffix gates: anchor on the suffix word, read the bounded prefix
   const re = new RegExp(`([A-Za-z_$][\\w$]{0,40}?${GATE_SUFFIX})\\s*:\\s*!1(?![\\w$])`, 'g');
   let m;
-  while ((m = re.exec(code)) !== null) {
-    const name = m[1];
-    if (!out.has(name)) out.set(name, { name, count: 0, firstIndex: m.index });
-    out.get(name).count++;
-  }
+  while ((m = re.exec(code)) !== null) bump(m[1], m.index);
+  // (b) common *bare* lowercase gate field names (`ready: !1`) that the suffix
+  // matcher misses; matched exactly so `already`/`unready` don't slip through.
+  const bare = /(?<![\w$])(ready|initialized|loaded|booted|mounted|hydrated|bootstrapped|appReady|isReady)\s*:\s*!1(?![\w$])/g;
+  while ((m = bare.exec(code)) !== null) bump(m[1], m.index);
   return [...out.values()].map((g) => ({ ...g, line: lineOf(code, g.firstIndex), snippet: tidy(code, g.firstIndex, g.firstIndex + 30) }));
 }
 
@@ -138,10 +173,12 @@ function detectSagaEffects(code) {
 }
 
 function detectActionCatalog(code) {
+  const bootGates = detectBootGates(code);
   return {
     actionTypes: detectActionTypes(code),
     sliceNames: detectSliceNames(code),
-    bootGates: detectBootGates(code),
+    bootGates,
+    gateSetters: detectGateSetters(code, bootGates.map((g) => g.name)),
     storeExposeSites: detectStoreExposeSites(code),
     sagaEffects: detectSagaEffects(code),
   };
@@ -166,11 +203,12 @@ function listJsFiles(target) {
 
 function mergeCatalogs(perFile) {
   const types = new Map(); const slices = new Set(); const gates = new Map();
-  const stores = new Map(); const sagaCounts = {}; const waits = new Set();
+  const stores = new Map(); const sagaCounts = {}; const waits = new Set(); const setters = new Map();
   for (const { catalog } of perFile) {
     for (const t of catalog.actionTypes) types.set(t.type, (types.get(t.type) || 0) + t.count);
     for (const s of catalog.sliceNames) slices.add(s);
     for (const g of catalog.bootGates) { if (!gates.has(g.name)) gates.set(g.name, g); else gates.get(g.name).count += g.count; }
+    for (const gs of catalog.gateSetters || []) if (!setters.has(gs.flag)) setters.set(gs.flag, gs);
     for (const s of catalog.storeExposeSites) if (!stores.has(s.name)) stores.set(s.name, s);
     for (const [k, v] of Object.entries(catalog.sagaEffects.counts)) sagaCounts[k] = (sagaCounts[k] || 0) + v;
     for (const a of catalog.sagaEffects.waitsForActions) waits.add(a);
@@ -179,6 +217,7 @@ function mergeCatalogs(perFile) {
     actionTypes: [...types.entries()].map(([type, count]) => ({ type, count })).sort((a, b) => b.count - a.count),
     sliceNames: [...slices].sort(),
     bootGates: [...gates.values()].sort((a, b) => b.count - a.count),
+    gateSetters: [...setters.values()],
     storeExposeSites: [...stores.values()],
     sagaEffects: { counts: sagaCounts, waitsForActions: [...waits] },
   };
@@ -195,7 +234,11 @@ function printReport(merged, top) {
   }
   if (merged.bootGates.length) {
     console.log('Boot-gate flags (init waits on these; force true if the app idles on a loader):');
-    for (const g of merged.bootGates) console.log(`  ${g.name}  (×${g.count}, first line ${g.line})`);
+    const setterFor = new Map((merged.gateSetters || []).map((s) => [s.flag, s.action]));
+    for (const g of merged.bootGates) {
+      const act = setterFor.get(g.name);
+      console.log(`  ${g.name}  (×${g.count}, first line ${g.line})${act ? `  → dispatch { type: "${act}", payload: true }` : ''}`);
+    }
     console.log('');
   }
   console.log(`Slices: ${merged.sliceNames.join(', ') || '(none detected)'}\n`);
@@ -205,9 +248,10 @@ function printReport(merged, top) {
   }
   console.log(`\nAction types (${merged.actionTypes.length} found, top ${top}):`);
   for (const t of merged.actionTypes.slice(0, top)) console.log(`  ${t.type}  (×${t.count})`);
-  console.log('\nHow to use: pair with `jsmap auth-scan` + `jsmap offline-mode` to boot, then');
-  console.log('reach window.__<store>, force any idling boot-gate flag, and dispatch the action');
-  console.log('types above (e.g. store.dispatch({ type: "<slice>/<action>" })) to drive the app.');
+  console.log('\nHow to use: pair with `jsmap auth-scan` + `jsmap offline-mode` to boot, reach');
+  console.log('window.__<store>, then `jsmap drive --dispatch` the boot-gate force-actions above');
+  console.log('(e.g. {"type":"app/readyAction","payload":true}) to push past an init loader, and');
+  console.log('the saga action types (e.g. fileManager/NEW_DRAWING) to drive the app further.');
 }
 
 function renderMarkdown(merged, top) {
@@ -215,7 +259,11 @@ function renderMarkdown(merged, top) {
   L.push('## Reach the store', '');
   for (const s of merged.storeExposeSites) L.push(`- \`window.__${s.name} = ${s.target}\`${s.guard ? ` — guard: \`${s.guard}\`` : ''} (line ${s.line})`);
   L.push('', '## Boot-gate flags', '');
-  for (const g of merged.bootGates) L.push(`- \`${g.name}\` (×${g.count})`);
+  const setterFor = new Map((merged.gateSetters || []).map((s) => [s.flag, s.action]));
+  for (const g of merged.bootGates) {
+    const act = setterFor.get(g.name);
+    L.push(`- \`${g.name}\` (×${g.count})${act ? ` — force via \`{ type: "${act}", payload: true }\`` : ''}`);
+  }
   L.push('', `## Slices`, '', merged.sliceNames.map((s) => `\`${s}\``).join(', '), '');
   L.push('## Action types', '');
   for (const t of merged.actionTypes.slice(0, top)) L.push(`- \`${t.type}\` (×${t.count})`);
@@ -276,6 +324,7 @@ module.exports = {
   detectActionTypes,
   detectSliceNames,
   detectBootGates,
+  detectGateSetters,
   detectStoreExposeSites,
   detectSagaEffects,
   mergeCatalogs,

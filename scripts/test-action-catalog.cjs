@@ -12,6 +12,7 @@ const {
   detectActionCatalog,
   detectActionTypes,
   detectBootGates,
+  detectGateSetters,
   detectStoreExposeSites,
   detectSagaEffects,
 } = require('./scan-redux-actions.cjs');
@@ -20,7 +21,11 @@ let passed = 0;
 function test(name, fn) { fn(); passed += 1; console.log(`  ok - ${name}`); }
 
 const APP = `
-var initial = { featureFlagsInitialized: !1, canvasReady: !1, isReady: !1, count: 0, name: "" };
+var initial = { featureFlagsInitialized: !1, canvasReady: !1, isReady: !1, ready: !1, count: 0, name: "" };
+var appSlice = createSlice({ name: "app", reducers: {
+  readyAction: (e, M) => { e.ready = M.payload, e.serialize = 1 },
+  setCanvasReady: (e, M) => { e.canvasReady = M.payload }
+} });
 function* watch(){ yield takeEvery("fileManager/NEW_DRAWING", onNew); yield take("editor/ready"); yield put(setReady()); }
 var openDrawing = createAction("fileManager/OPEN_DRAWING");
 var saveThunk = createAsyncThunk("file/SAVE", doSave);
@@ -37,11 +42,26 @@ test('extracts action types, ignoring mime types', () => {
   assert.ok(!types.includes('image/png'), 'mime type filtered');
 });
 
-test('detects boot-gate flags (*Initialized/*Ready starting false)', () => {
+test('detects boot-gate flags (*Initialized/*Ready + bare ready)', () => {
   const names = detectBootGates(APP).map((g) => g.name).sort();
-  assert.deepEqual(names, ['canvasReady', 'featureFlagsInitialized', 'isReady']);
+  assert.deepEqual(names, ['canvasReady', 'featureFlagsInitialized', 'isReady', 'ready']);
   // a plain `count: 0` / `name: ""` is not a gate
   assert.ok(!names.includes('count'));
+});
+
+test('bare-gate matching does not slip on already/unready', () => {
+  const names = detectBootGates('var x = { already: !1, unready: !1, ready: !1 };').map((g) => g.name);
+  assert.deepEqual(names, ['ready'], 'only the exact `ready` field, not already/unready');
+});
+
+test('maps each gate flag to the action that forces it', () => {
+  const gates = detectBootGates(APP);
+  const setters = detectGateSetters(APP, gates.map((g) => g.name));
+  const ready = setters.find((s) => s.flag === 'ready');
+  assert.ok(ready, 'finds a setter for ready');
+  assert.equal(ready.setter, 'readyAction');
+  assert.equal(ready.slice, 'app');
+  assert.equal(ready.action, 'app/readyAction');
 });
 
 test('detects the guarded store-expose site', () => {

@@ -180,14 +180,41 @@ your actions, and screenshots. It is the runtime end of the same workflow.
 
 ### Where it actually stops, and why
 
-On AutoCAD, `drive --dump-store` reports **no store** — `window.__e2eStore` is
-never set even though its guard (`window.__e2eTests`) is satisfied. The reason is
-structural: the store is exposed inside the **real app-mount** function, and that
-mount never runs. "Initializing AutoCAD" is painted by an *earlier* bootstrap
-stage; the real mount is gated behind the boot-gate chain above
-(`defaultAppSettingsLoaded` → `canvasLoaded` → `dwgReady`), every link of which a
-backend or the e2e harness would normally drive. No amount of client-side
-patching supplies that data.
+At first `drive --dump-store` reported **no store** — until `action-catalog`
+showed the expose is guarded by `window.__e2eTests`, and `offline-mode` had
+already recommended the matching **URL param** (`?e2eTests=1`). The catch: the
+bootstrap *re-derives* `window.__e2eTests` from that URL param, overwriting any
+value you set as a global — so you need the param, not just the global. Loading
+with `?fabricTests=1&e2eTests=1` exposes the store, and `drive --dump-store`
+prints the full state tree.
+
+With the store in hand, `action-catalog` also reports, for each idling boot-gate
+flag, the **action that forces it**:
+
+```
+ready         → dispatch { type: "app/readyAction", payload: true }
+canvasLoaded  → dispatch { type: "fabric/canvasLoadSuccess", payload: true }
+isModalDialogOpen (modal) → app/setIsModalDialogOpen
+```
+
+Dispatching those (`drive --dispatch '{"type":"app/readyAction","payload":true}'`
+…) flips `app.ready`, marks the canvas loaded, and closes the init modal — and
+the **real AutoCAD editor chrome renders**: the UNDO/REDO and ZOOM toolbars and
+the OSNAP/OTRACK/ORTHO/POLAR drafting status bar, plus the editor `<canvas>`.
+
+### Where it actually stops
+
+The drawing *area* stays empty, and the console shows the honest reason:
+
+```
+ChunkLoadError: Loading chunk 19129 failed     # a lazy chunk never captured
+ReferenceError: Autodesk is not defined        # the Forge viewer SDK isn't present
+```
+
+The chrome is in the captured bundles; the viewport content is not. It needs a
+lazy chunk that was never captured (exactly what `jsmap boot-check` flags), the
+Forge viewer global, and the streamed WASM CAD kernel + an actual document. Those
+are data, not code — no client-side move conjures them.
 
 ## What you can realistically expect
 
@@ -198,22 +225,22 @@ The capture's recovery progresses in clear stages, each removing one wall:
 | 1 | (none) | Sign In landing |
 | 2 | `auth-scan --apply` | login wall gone; shell mounts, throws on `getUserSettings()` |
 | 3 | `offline-mode` recipe | backend path skipped; app boots to "Initializing AutoCAD" |
-| 4 | `action-catalog` + `drive` | map the boot-gate chain + store handle; confirm the real mount is backend-gated |
-| 5 | supply a document + WASM kernel + drive the gate chain | rebuilding the backend; out of scope for static recovery |
+| 4 | `action-catalog` + `drive` (`?e2eTests=1`) | store exposed + dumped; boot-gate chain + force-actions mapped |
+| 5 | `drive --dispatch` the gate force-actions | **the real editor chrome renders** (toolbars, drafting status bar) |
+| 6 | supply the missing lazy chunk + Forge viewer + WASM kernel + a document | the drawing canvas; needs data the capture doesn't contain |
 
 - ✅ The login landing disappears and the **real app** boots.
 - ✅ Init runs past identity/settings via the app's own offline mode.
-- ✅ The boot-gate chain and store handle are mapped, so you know *exactly* what
-  is missing rather than guessing.
-- ⛔ The editor canvas needs a document + the streamed WASM CAD kernel, and the
-  app-mount that exposes the store is gated on backend-driven boot flags. In a
-  static capture that data is absent, so the app idles at "Initializing".
+- ✅ The store is exposed, dumped, and **driven** — the editor interface chrome
+  renders from a static capture.
+- ⛔ The drawing canvas needs an uncaptured lazy chunk, the Forge viewer, and the
+  streamed WASM kernel + a document — data, not code.
 
-The toolkit deliberately stops at giving you the switches, the map, and an honest
-boundary. Going further (driving the gate chain, stubbing the document/kernel) is
-a separate, app-specific effort — see `jsmap editable`, which scaffolds fake
-stubs for injected backend/auth dependencies — and is closer to rebuilding the
-backend than to recovering the frontend.
+The toolkit gets you to a **rendered editor interface** and an honest map of the
+one remaining wall (uncaptured assets + the WASM kernel). Filling that in is a
+separate effort — see `jsmap boot-check` for the missing chunks and `jsmap
+editable` for scaffolding fake stubs — and is closer to rebuilding the backend
+than to recovering the frontend.
 
 ## A note on intended use
 

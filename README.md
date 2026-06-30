@@ -218,21 +218,27 @@ node scripts/jsmap.cjs drive <served-url> --param fabricTests=1 --dump-store
 
 Once a capture boots, it often *idles* on a loader — waiting, not erroring.
 `action-catalog` maps the redux layer statically: the guarded `window.__store`
-handle, the **boot-gate flags** (`*Initialized`/`*Ready` that a backend/config
-response was supposed to flip), the saga effect vocabulary, and the dispatchable
-action types — so you know what is stalling and what you could dispatch. `drive`
-then boots the served capture in headless Chromium with a reusable offline-stub
-ruleset (config/flag services answered with a completing stream, identity with a
-profile, analytics swallowed), auto-detects the store, dumps its state,
-dispatches actions, and screenshots. Needs Playwright (`npm i -D playwright-core`).
+handle, the **boot-gate flags** (`*Initialized`/`*Ready`/`ready` that a
+backend/config response was supposed to flip) **and the action that forces each
+one** (`ready → app/readyAction`), the saga effect vocabulary, and the
+dispatchable action types — so you know what is stalling and exactly what to
+dispatch. `drive` then boots the served capture in headless Chromium with a
+reusable offline-stub ruleset (config/flag services answered with a completing
+stream, identity with a profile, analytics swallowed), auto-detects the store,
+dumps its state, dispatches actions, and screenshots. Needs Playwright
+(`npm i -D playwright-core`).
 
-On the AutoCAD capture these confirm the exact boundary: the store
-(`window.__e2eStore`) is never exposed because the real app-mount is gated behind
-a backend-driven boot-gate chain (`defaultAppSettingsLoaded` → `canvasLoaded` →
-`dwgReady`) — so a static capture idles at "Initializing". See
-[docs/auth-skip.md](docs/auth-skip.md) for the full five-stage case study (Sign
-In → shell mounts → app boots → walls mapped → backend territory) and the exact
-boundary.
+On the AutoCAD capture these take it all the way to a **rendered editor
+interface**: `?e2eTests=1` exposes the store, and dispatching the boot-gate
+force-actions (`app/readyAction`, `fabric/canvasLoadSuccess`,
+`app/setIsModalDialogOpen`) flips `app.ready` and closes the init modal so the
+real editor chrome renders — the UNDO/REDO and ZOOM toolbars and the
+OSNAP/OTRACK/ORTHO/POLAR drafting status bar. The drawing *canvas* stays empty
+because the viewport needs an uncaptured lazy chunk (which `jsmap boot-check`
+flags), the Forge viewer, and the WASM kernel — data, not code. See
+[docs/auth-skip.md](docs/auth-skip.md) for the full six-stage case study (Sign In
+→ shell mounts → app boots → walls mapped → **editor chrome renders** → missing
+assets) and the exact boundary.
 
 For preserved static runtimes that need to be made operable with fake data,
 use the static harness and shim toolset:
