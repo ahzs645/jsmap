@@ -59,6 +59,11 @@ Commands:
                --source-map, --no-rename, --no-aggressive, --exclude <pattern>,
                --config <path>, --concurrency <N>, --timeout <seconds>,
                --engine webcrack|wakaru|both, --detect-modules
+      Optional community-tool passes (require optionalDependencies):
+               --restringer (safe string/proxy untangling),
+               --lebab (ES5->ES6 modernization), --putout (cleanup plugins),
+               --jscodeshift <transform.js>, --ast-grep <rules.json>,
+               --humanify (LLM rename; needs OPENAI_API_KEY/GEMINI_API_KEY)
 
   split <input-file> [output-dir] [--force]
       Split a large JS bundle into smaller named files (line-based).
@@ -197,6 +202,11 @@ Commands:
   verify-static <url> [--expect-text <text>] [--expect-selector <selector>] [--click <selector>]
       Smoke-check a preserved static runtime URL. Uses Playwright when available
       and falls back to HTTP checks for environments without Playwright.
+
+  debundle <bundle.js> [output-dir] [--type webpack|browserify]
+      Run the external debundle/reliable-debundle tool over a bundle (optional
+      dependency). jsmap's own split-wp is the primary, dependency-free
+      webpack extractor; this wrapper is for comparison with external tools.
 
   analyze <directory>
       Analyze bundles locally (requires tsx/node with TS support).
@@ -580,6 +590,10 @@ function main() {
       break;
     case 'verify-static':
       runScript('static-runtime-tools.cjs', ['verify-static', ...subArgs]);
+      break;
+
+    case 'debundle':
+      runScript('debundle-bundle.cjs', subArgs);
       break;
 
     case 'analyze':
