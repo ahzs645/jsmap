@@ -11,6 +11,7 @@ const {
   isTransformablePath,
   unwrapHtmlWrappedJs,
   classifySourceMapContent,
+  repairBeautifierDamageIfBroken,
   loadConfigFile,
   mergeConfigWithFlags,
   matchesExcludePattern,
@@ -553,6 +554,8 @@ async function main() {
     excludedCount: 0,
     htmlUnwrappedCount: 0,
     htmlUnwrappedFiles: [],
+    beautifierRepairedCount: 0,
+    beautifierRepairedFiles: [],
     invalidSourceMapCount: 0,
     invalidSourceMaps: [],
     concurrency,
@@ -620,6 +623,14 @@ async function main() {
             report.htmlUnwrappedCount += 1;
             report.htmlUnwrappedFiles.push(normalizedPath);
             content = recovered.code;
+          }
+          // Repair pretty-printer damage (split compound tokens) that makes the
+          // captured JS unparseable, but only when it actually fixes parsing.
+          const repaired = repairBeautifierDamageIfBroken(content);
+          if (repaired) {
+            report.beautifierRepairedCount += 1;
+            report.beautifierRepairedFiles.push({ path: normalizedPath, repairs: repaired.repairs });
+            content = repaired.code;
           }
         }
         transformableFiles.push({ absoluteFilePath, normalizedPath, content });
@@ -769,6 +780,9 @@ async function main() {
   }
   if (report.htmlUnwrappedCount > 0) {
     parts.push(`Repaired ${report.htmlUnwrappedCount} HTML-wrapped JS capture(s).`);
+  }
+  if (report.beautifierRepairedCount > 0) {
+    parts.push(`Repaired pretty-printer damage in ${report.beautifierRepairedCount} JS file(s).`);
   }
   if (report.invalidSourceMapCount > 0) {
     parts.push(`Warning: ${report.invalidSourceMapCount} captured .map file(s) are not usable source maps (e.g. SPA/app-shell HTML).`);

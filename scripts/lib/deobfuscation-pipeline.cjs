@@ -139,6 +139,75 @@ function classifySourceMapContent(content) {
   return { valid: true, reason: 'ok' };
 }
 
+// ── Beautifier-damage repair ──
+//
+// Some captures save JavaScript that was run through a buggy pretty-printer which
+// inserts whitespace inside compound tokens, producing code that no longer parses
+// (and so silently fails to load in the browser). The spaced forms below are not
+// valid JavaScript, so reversing them is deterministic:
+//   a?.b      -> a ? .b       (optional chaining)
+//   a??b      -> a ? ? b      (nullish coalescing)
+//   a??=b     -> a ?? = b     (logical assignment; also ||= &&=)
+//   import(x) -> import (x)   (dynamic import)
+//   yield f() -> yield<newline>f()
+//   4n,0x1Fn  -> 4 n, 0x1F n  (BigInt literals)
+//   {#x}      -> {# x}        (private class fields)
+const BEAUTIFIER_REPAIRS = [
+  ['optional-chaining', /\?[ \t]+\.(?=[A-Za-z_$([])/g, '?.'],
+  ['nullish-coalescing', /\?[ \t]+\?/g, '??'],
+  ['nullish-assign', /\?\?[ \t]+=(?!=)/g, '??='],
+  ['or-assign', /\|\|[ \t]+=(?!=)/g, '||='],
+  ['and-assign', /&&[ \t]+=(?!=)/g, '&&='],
+  ['dynamic-import', /\bimport[ \t]+\(/g, 'import('],
+  ['yield-split', /\byield[ \t]*\n[ \t]*(?=[A-Za-z_$`'"([!~]|import\b)/g, 'yield '],
+  ['bigint-literal', /\b(0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|\d+)[ \t]+n(?![\w$])/g, '$1n'],
+  ['private-field', /#[ \t\r\n]+(?=[A-Za-z_$])/g, '#'],
+];
+
+// Apply the deterministic compound-token repairs. Returns { code, repairs, total }.
+function repairBeautifierDamage(code) {
+  let result = code;
+  const repairs = {};
+  for (const [name, pattern, replacement] of BEAUTIFIER_REPAIRS) {
+    const matches = result.match(pattern);
+    if (matches && matches.length) {
+      repairs[name] = matches.length;
+      result = result.replace(pattern, replacement);
+    }
+  }
+  const total = Object.values(repairs).reduce((sum, count) => sum + count, 0);
+  return { code: result, repairs, total };
+}
+
+let _acorn = null;
+function getAcorn() {
+  if (!_acorn) _acorn = require('acorn');
+  return _acorn;
+}
+
+function isStrictlyParseable(code) {
+  const acorn = getAcorn();
+  for (const sourceType of ['script', 'module']) {
+    try {
+      acorn.parse(code, { ecmaVersion: 'latest', sourceType, allowReturnOutsideFunction: true });
+      return true;
+    } catch { /* try next */ }
+  }
+  return false;
+}
+
+// Repair beautifier damage only when the input does not parse but the repaired
+// version does. This is conservative: valid code is never touched, and a partial
+// repair that still does not parse is discarded. Returns { code, repairs, total }
+// or null.
+function repairBeautifierDamageIfBroken(code) {
+  if (typeof code !== 'string' || !code) return null;
+  if (isStrictlyParseable(code)) return null;
+  const repaired = repairBeautifierDamage(code);
+  if (repaired.total > 0 && isStrictlyParseable(repaired.code)) return repaired;
+  return null;
+}
+
 async function withMutedConsoleError(callback) {
   const originalConsoleError = console.error;
   console.error = () => {};
@@ -856,6 +925,8 @@ module.exports = {
   decodeHtmlEntities,
   unwrapHtmlWrappedJs,
   classifySourceMapContent,
+  repairBeautifierDamage,
+  repairBeautifierDamageIfBroken,
   normalizeCode,
   transformJavaScript,
   transformCSS,
