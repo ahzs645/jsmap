@@ -153,13 +153,22 @@ node scripts/jsmap.cjs boot-check <capture-or-recovery-dir>
 ```
 
 Modern webpack/rspack apps defer their entry until specific chunks load
-(`__webpack_require__.O(void 0, [chunkIds], () => require(entryId))`). If a
-required chunk was never captured, the entry never runs and the app renders
-nothing — with no error. `boot-check` finds the entry startup(s), the chunks they
-wait for, and module coverage, then reports any **missing chunks** (and separate
-self-contained runtimes), so you know exactly what to re-capture. It exits non-zero
-(3) when the capture cannot boot. (Most such apps also need their real auth +
-backend to render, even with all chunks present.)
+(`__webpack_require__.O(void 0, [chunkIds], () => require(entryId))`), and then
+**lazy-load further chunks** at runtime via the chunk manifest
+(`__webpack_require__.u`). If a required chunk was never captured, the app renders
+nothing — with no error. `boot-check` finds the entry startup(s) and the chunks
+they statically wait for, extracts the dynamic chunk manifest, and reports module
+coverage, so you know exactly what to re-capture. Verdicts:
+
+- `missing-static-chunks` — the entry can't even start (a chunk it waits on is absent).
+- `entry-runs-but-dynamic-chunks-missing` — the entry starts but the app code-splits
+  and its lazy chunks weren't captured, so it stalls fetching them right after boot.
+- `entry-satisfiable` — static entry chunks present and no lazy gaps detected.
+
+It exits non-zero (3) when the capture cannot boot. (Most such apps also need their
+real auth + backend to render, even with all chunks present.) This is exactly how
+the two AutoCAD captures differ: a 3-bundle capture is `missing-static-chunks`,
+while a richer 6-bundle capture reaches `entry-runs-but-dynamic-chunks-missing`.
 
 For preserved static runtimes that need to be made operable with fake data,
 use the static harness and shim toolset:

@@ -50,6 +50,22 @@ function resolveBundleRoot(root) {
   return root;
 }
 
+// Extract the webpack/rspack chunk filename manifest (`__webpack_require__.u`),
+// which maps dynamically-loaded chunk ids to their on-disk filenames. Apps that
+// code-split lazy-load these at runtime; if they were not captured, the app boots
+// but stalls fetching them. Handles the ternary-chain form
+// (`"123"===e?"vendors.<hash>.js":...`) and the object-map form (`{123:"<hash>"}`).
+function extractChunkManifest(code) {
+  const manifest = new Map();
+  for (const m of code.matchAll(/"(\d{2,7})"\s*===\s*\w+\s*\?\s*"([^"]+\.js)"/g)) {
+    if (!manifest.has(m[1])) manifest.set(m[1], m[2]);
+  }
+  for (const m of code.matchAll(/[,{]\s*(\d{2,7})\s*:\s*"([^"]+\.js)"/g)) {
+    if (/\.(?:chunk\.)?js$/.test(m[2]) && !manifest.has(m[1])) manifest.set(m[1], m[2]);
+  }
+  return manifest;
+}
+
 function analyzeBundle(name, code) {
   const moduleIds = new Set();
   for (const m of code.matchAll(/(?:^|[,{])\s*(\d{3,7})\s*:\s*(?:function\b|\([\w$,\s]*\)\s*=>)/g)) {
@@ -71,7 +87,8 @@ function analyzeBundle(name, code) {
     entries.push({ entryModule: m[2], requiredChunks });
   }
   const standaloneRuntime = /__webpack_modules__\s*=/.test(code);
-  return { name, moduleIds, registeredChunks, entries, standaloneRuntime, bytes: code.length };
+  const chunkManifest = extractChunkManifest(code);
+  return { name, moduleIds, registeredChunks, entries, standaloneRuntime, chunkManifest, bytes: code.length };
 }
 
 async function main() {
@@ -123,14 +140,32 @@ async function main() {
   const standaloneRuntimes = bundles.filter((b) => b.standaloneRuntime && b.entries.length === 0)
     .map((b) => ({ name: b.name, moduleCount: b.moduleIds.size }));
 
+  // Dynamic (lazy) chunk manifest: filenames the runtime can fetch at runtime.
+  // Cross-reference against the actually-captured files (by basename).
+  const capturedFileNames = new Set(files.map((f) => path.basename(f)));
+  const dynamicManifest = new Map();
+  for (const b of bundles) for (const [id, file] of b.chunkManifest) if (!dynamicManifest.has(id)) dynamicManifest.set(id, file);
+  const dynamicPresent = [...dynamicManifest.values()].filter((file) => capturedFileNames.has(path.basename(file)));
+  const dynamicMissingSample = [...dynamicManifest.values()].filter((file) => !capturedFileNames.has(path.basename(file))).slice(0, 8);
+  const dynamicChunks = {
+    known: dynamicManifest.size,
+    present: dynamicPresent.length,
+    missing: dynamicManifest.size - dynamicPresent.length,
+    missingSample: dynamicMissingSample,
+  };
+
   const missingChunkSet = new Set(entryReports.flatMap((e) => e.missingChunks));
   let verdict;
   if (entryReports.length === 0) {
     verdict = 'no-deferred-entry-found';
   } else if (missingChunkSet.size > 0) {
-    verdict = 'missing-chunks';
+    verdict = 'missing-static-chunks';
   } else if (entryReports.some((e) => !e.entryModulePresent)) {
     verdict = 'missing-entry-module';
+  } else if (dynamicChunks.known > 0 && dynamicChunks.present === 0) {
+    // The entry can start, but the app code-splits and none of its lazy chunks
+    // were captured, so it will stall fetching them right after boot.
+    verdict = 'entry-runs-but-dynamic-chunks-missing';
   } else {
     verdict = 'entry-satisfiable';
   }
@@ -144,6 +179,7 @@ async function main() {
     entries: entryReports,
     standaloneRuntimes,
     missingChunks: [...missingChunkSet].sort(),
+    dynamicChunks,
     verdict,
   };
 
@@ -158,7 +194,9 @@ async function main() {
   if (flags.json) console.log(JSON.stringify(report, null, 2));
 
   // Non-zero exit when the capture cannot boot, so automation can detect it.
-  if (verdict === 'missing-chunks' || verdict === 'missing-entry-module') process.exitCode = 3;
+  if (verdict === 'missing-static-chunks' || verdict === 'missing-entry-module' || verdict === 'entry-runs-but-dynamic-chunks-missing') {
+    process.exitCode = 3;
+  }
 }
 
 function printReport(report, bundles) {
@@ -184,10 +222,21 @@ function printReport(report, bundles) {
     console.log(`\n  Separate self-contained runtime(s) (isolated module registry; not part of the entry above):`);
     for (const r of report.standaloneRuntimes) console.log(`    - ${r.name} (${r.moduleCount} modules)`);
   }
+  const dyn = report.dynamicChunks;
+  if (dyn && dyn.known > 0) {
+    console.log(`\n  Dynamic (lazy) chunk manifest: ${dyn.known} chunk file(s) the app can load at runtime, ${dyn.present} captured, ${dyn.missing} missing.`);
+    if (dyn.missing > 0) {
+      console.log(`    e.g. ${dyn.missingSample.join(', ')}${dyn.missing > dyn.missingSample.length ? ', …' : ''}`);
+    }
+  }
   console.log(`\n  Verdict: ${report.verdict}`);
-  if (report.verdict === 'missing-chunks') {
+  if (report.verdict === 'missing-static-chunks') {
     console.log(`  To boot this app you must re-capture the missing chunk file(s) for chunk id(s): ${report.missingChunks.join(', ')}.`);
     console.log(`  (Even with them, an app like this typically also needs its real auth + backend APIs to render.)`);
+  } else if (report.verdict === 'entry-runs-but-dynamic-chunks-missing') {
+    console.log(`  The entry can start, but the app code-splits and none of its ${dyn.known} lazy chunks were captured —`);
+    console.log(`  it will stall fetching them right after boot. Capture the chunk files the app requests at runtime`);
+    console.log(`  (DevTools → Network), in addition to the entry bundles. It also typically needs real auth + backend.`);
   }
 }
 
@@ -213,8 +262,15 @@ function markdown(report) {
     lines.push('', '## Separate self-contained runtimes', '');
     for (const r of report.standaloneRuntimes) lines.push(`- \`${r.name}\` (${r.moduleCount} modules, isolated registry)`);
   }
+  const dyn = report.dynamicChunks;
+  if (dyn && dyn.known > 0) {
+    lines.push('', '## Dynamic (lazy) chunks', '', `The app code-splits: ${dyn.known} lazy chunk file(s) are referenced in its chunk manifest, ${dyn.present} captured, **${dyn.missing} missing**.`);
+    if (dyn.missing > 0) lines.push('', `Examples not captured: ${dyn.missingSample.map((f) => `\`${f}\``).join(', ')}${dyn.missing > dyn.missingSample.length ? ', …' : ''}`);
+  }
   if (report.missingChunks.length) {
     lines.push('', '## To make it bootable', '', `Re-capture the chunk file(s) providing chunk id(s): **${report.missingChunks.join(', ')}**. Such apps also usually require their real auth + backend to render.`);
+  } else if (report.verdict === 'entry-runs-but-dynamic-chunks-missing') {
+    lines.push('', '## To make it bootable', '', 'The static entry can start, but the app lazy-loads chunks that were not captured. Capture the chunk files the app requests at runtime (DevTools → Network) alongside the entry bundles. It also typically needs its real auth + backend.');
   }
   lines.push('');
   return lines.join('\n');
