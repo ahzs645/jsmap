@@ -197,6 +197,14 @@ Commands:
       __e2eStore). Prints a concrete boot recipe + a bootstrap <script>. Pair
       with auth-scan to also remove the login wall. See docs/auth-skip.md.
 
+  repair-stubs <capture-dir> [--backfill <origin>] [--json]
+      Find placeholder/corrupt assets a capture tool left behind: files that
+      exist but whose content is a stub — "No Content: <url>" placeholders, HTML
+      error pages where a script was expected, or binaries with the wrong magic
+      bytes (e.g. an 88-byte AcFabricBackend.wasm). The capture serves these with
+      HTTP 200, so a 404-based backfill misses them. With --backfill, re-fetch the
+      real bytes from the origin and write them back.
+
   action-catalog <file-or-dir> [--json] [--out <prefix>] [--top N]
       Map a captured redux/saga app for driving: the guarded window.__store
       handle, boot-gate flags (*Initialized/*Ready that stall init offline), the
@@ -621,6 +629,10 @@ function main() {
       break;
     case 'drive':
       runScript('drive-capture.cjs', subArgs);
+      break;
+    case 'repair-stubs':
+    case 'repair-capture-stubs':
+      runScript('repair-capture-stubs.cjs', subArgs);
       break;
     case 'rename-plan':
       runScript('rename-plan.cjs', subArgs);
