@@ -271,6 +271,29 @@ in, and an honest map of the one remaining wall (the WASM kernel + a live model)
 That last step is native + backend, not frontend recovery — see `jsmap
 boot-check` for the missing chunks and `jsmap editable` for scaffolding stubs.
 
+## Does it generalize? (two builds, same recipe)
+
+The heuristics key on *stable* signals — RTK `slice/reducer` names, auth-status
+enum members, `window.__*` test flags — not on minified identifiers, so they
+survive a rebuild. Run against a second, independently-captured AutoCAD build
+(different bundle hashes, different minification), the tools produce the **same
+actionable recipe**:
+
+| | build 1 (`…e6a0beab…`) | build 2 (`…d5d68887…`) |
+| --- | --- | --- |
+| auth-status switch | `aZ.NOT_AUTHENTICATED` | `Im.NOT_AUTHENTICATED` |
+| store handle | `window.__e2eStore = t` | `window.__e2eStore = e` |
+| expose guard | `window.__e2eTests` | `window.__e2eTests` |
+| boot URL params | `?fabricTests=1 &e2eTests=1` | `?fabricTests=1 &e2eTests=1` |
+| force `ready` | `app/readyAction` | `app/readyAction` |
+| force canvas | `fabric/canvasLoadSuccess` | `fabric/canvasLoadSuccess` |
+
+The minified variable names differ (`aZ`→`Im`, `t`→`e`); the *recipe* is
+identical. The same `auth-scan --apply`, `offline-mode` bootstrap, and
+`drive --dispatch app/readyAction …` that took build 1 to a rendered editor work
+unchanged on build 2 — evidence the toolkit recovers a *class* of SPA, not one
+specific bundle.
+
 ## A note on intended use
 
 This neutralizes a *client-side* check on a build you already have. It does not
