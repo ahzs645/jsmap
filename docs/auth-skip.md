@@ -388,6 +388,45 @@ identical. The same `auth-scan --apply`, `offline-mode` bootstrap, and
 shell work unchanged on build 2 — evidence the toolkit recovers a *class* of SPA,
 not one specific bundle.
 
+## Path A — running it against the live backend
+
+The offline routes all stop short of a working editor because the kernel is
+downstream of real, credentialed auth. The other route is to *not* fake the
+backend at all: serve the recovered code locally and let it talk to the **live**
+Autodesk backend with a real login. Because it is the real app, this actually
+works end to end — but it is "running the real app from a local copy," not
+offline recovery, and it has one hard requirement.
+
+I tested how far it gets in a headless sandbox: serve the recovered bundles
+locally, pass every backend call through to live (`drive --passthrough
+'autodesk\.com'`, no test mode), and boot. Result: it reaches the **genuine Sign
+In landing**, talking to live where it needs to (fonts, etc.) — with a fresh
+browser and no stored session it makes no silent-auth call and simply shows
+"Sign In." The next step is an interactive login, which the sandbox can't do.
+
+**The hard requirement is the OAuth origin.** The app builds its redirect as
+`redirect_uri = ${window.location.origin}/auth/…`. Served from
+`http://localhost:5292`, that is `http://localhost:5292/auth/…`, which is **not a
+registered redirect URI** for AutoCAD's OAuth client — Autodesk rejects the
+login. The app's registered origin is `https://web.autocad.com`. So to complete
+Path A you must serve the recovered code *as that origin*:
+
+```
+# on your own machine (you provide the login; nothing here handles credentials)
+1. hosts:   127.0.0.1  web.autocad.com
+2. serve the recovered public/ over HTTPS as https://web.autocad.com
+            (a locally-trusted cert for web.autocad.com)
+3. let all non-served requests go to the live Autodesk backend
+4. open https://web.autocad.com/ and Sign In with your Autodesk account
+```
+
+With the registered origin, the real OAuth flow completes → a real (signed)
+token → real `session.identity` → the real boot runs → the Fabric worker spawns,
+the kernel WASM loads, and the editor opens your actual drawings. None of that
+needs jsmap's stubs; it is the live app served from your editable copy. jsmap's
+role in Path A is just the recovery (an editable, servable `public/`) and the
+honest map of why the offline path stops where it does.
+
 ## A note on intended use
 
 This neutralizes a *client-side* check on a build you already have. It does not
