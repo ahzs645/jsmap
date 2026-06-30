@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "description": "Reusable analytics/telemetry silencer — swallow common trackers so they neither hang nor error offline.",
+  "rules": [
+    { "match": { "method": "*", "url": "/mixpanel|segment\\.|amplitude|datadog|sentry|google-analytics|gtag|doubleclick|fullstory|adobedtm|honeycomb/" },
+      "response": { "status": 204, "contentType": "text/plain", "body": "" },
+      "note": "fire-and-forget analytics — 204 No Content" }
+  ]
+}

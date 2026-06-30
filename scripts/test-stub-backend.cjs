@@ -7,7 +7,7 @@
 
 const assert = require('node:assert');
 const {
-  globToRegex, compileRules, matchRule, urlToPattern,
+  globToRegex, compileRules, matchRule, matchEntry, composeCompiled, urlToPattern,
   scaffoldFromRecording, findGaps, resolveResponse, lintMap,
 } = require('./stub-backend.cjs');
 
@@ -77,6 +77,37 @@ test('resolveResponse: inline object body serializes to JSON string', () => {
   const r = resolveResponse({ response: { status: 200, contentType: 'application/json', body: { a: 1 } } }, '/tmp');
   assert.equal(r.status, 200);
   assert.equal(r.body, '{"a":1}');
+});
+
+test('matchEntry carries the rule baseDir (for $file resolution)', () => {
+  const compiled = compileRules([{ match: { url: '**/x*' }, response: { $file: 'r.json' } }], '/maps/a');
+  const e = matchEntry(compiled, 'GET', 'https://h/x');
+  assert.equal(e.baseDir, '/maps/a');
+  assert.ok(e.rule.response.$file);
+});
+
+test('composeCompiled: modules compose in order, first match wins', () => {
+  // two separate stub-map "modules", each with its own baseDir
+  const ld = { rules: [{ match: { method: 'GET', url: '**/sdk/evalx/**' }, response: { status: 200, body: {} } }], __dir: '/m/ld' };
+  ld.__compiled = compileRules(ld.rules, ld.__dir);
+  const idp = { rules: [{ match: { method: 'GET', url: '**/userinfo*' }, response: { status: 200, body: { sub: 'U' } } }], __dir: '/m/idp' };
+  idp.__compiled = compileRules(idp.rules, idp.__dir);
+  const combined = composeCompiled([ld, idp]);
+  assert.equal(combined.length, 2);
+  const a = matchEntry(combined, 'GET', 'https://app.launchdarkly.com/sdk/evalx/env/contexts/x');
+  assert.equal(a.baseDir, '/m/ld');
+  const b = matchEntry(combined, 'GET', 'https://x/oauth/userinfo');
+  assert.equal(b.baseDir, '/m/idp');
+});
+
+test('the shipped launchdarkly module lints and matches its endpoints', () => {
+  const fs = require('node:fs'); const path = require('node:path');
+  const map = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'examples', 'stubs', 'launchdarkly.json'), 'utf8'));
+  assert.equal(lintMap(map).length, 0);
+  const c = compileRules(map.rules, '/x');
+  assert.ok(matchEntry(c, 'GET', 'https://app.launchdarkly.com/sdk/evalx/env/contexts/abc'));
+  assert.ok(matchEntry(c, 'GET', 'https://clientstream.launchdarkly.com/eval/env/ctx'));
+  assert.ok(matchEntry(c, 'POST', 'https://events.launchdarkly.com/events/bulk/env'));
 });
 
 test('lintMap: flags bad patterns and missing responses', () => {

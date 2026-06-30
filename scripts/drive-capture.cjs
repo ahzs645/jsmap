@@ -86,7 +86,7 @@ function classifyRequest(url, opts = {}) {
 function parseArgs(argv) {
   const o = { url: null, params: [], sets: [], userinfo: null, wait: 9000, storeGlobal: null,
     dispatches: [], evals: [], dumpStore: false, screenshot: null, exe: null, backfill: null, save: null, passthrough: [],
-    stubMap: null, recordBackend: null, gaps: false };
+    stubMap: [], recordBackend: null, gaps: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--param') o.params.push(argv[++i]);
@@ -100,7 +100,7 @@ function parseArgs(argv) {
     else if (a === '--backfill') o.backfill = argv[++i];
     else if (a === '--passthrough') o.passthrough.push(argv[++i]);
     else if (a === '--save') o.save = argv[++i];
-    else if (a === '--stub-map') o.stubMap = argv[++i];
+    else if (a === '--stub-map') o.stubMap.push(argv[++i]);
     else if (a === '--record-backend') o.recordBackend = argv[++i];
     else if (a === '--gaps') o.gaps = true;
     else if (a === '--screenshot') o.screenshot = argv[++i];
@@ -190,9 +190,15 @@ async function main() {
   const passedThrough = [];   // external assets fetched live instead of stubbed
   const passthroughRe = opts.passthrough.length ? new RegExp(opts.passthrough.join('|')) : null;
 
-  // Path B: load a curated stub map, and/or record what the app asks the backend.
-  let stubMap = null;
-  if (opts.stubMap) { try { stubMap = stub.loadStubMap(opts.stubMap); } catch (e) { console.error(`drive: bad --stub-map: ${e.message}`); process.exitCode = 1; return; } }
+  // Path B: load curated stub map module(s), and/or record what the app asks the
+  // backend. Multiple --stub-map files compose into one ordered rule list.
+  let stubCompiled = null;
+  if (opts.stubMap.length) {
+    try {
+      const maps = opts.stubMap.map((f) => stub.loadStubMap(f));
+      stubCompiled = stub.composeCompiled(maps);
+    } catch (e) { console.error(`drive: bad --stub-map: ${e.message}`); process.exitCode = 1; return; }
+  }
   const recording = { url: target, requests: [] };
   const TEXT_CT = /json|text|javascript|xml|css|html|event-stream/;
   function record(method, url, status, contentType, body, servedFrom) {
@@ -224,11 +230,11 @@ async function main() {
     }
     const method = route.request().method();
 
-    // 1. curated stub map (the human's reconstructed backend) wins
-    if (stubMap) {
-      const rule = stub.matchRule(stubMap.__compiled, method, url);
-      if (rule) {
-        const res = stub.resolveResponse(rule, stubMap.__dir);
+    // 1. curated stub map module(s) (the human's reconstructed backend) win
+    if (stubCompiled) {
+      const entry = stub.matchEntry(stubCompiled, method, url);
+      if (entry) {
+        const res = stub.resolveResponse(entry.rule, entry.baseDir);
         record(method, url, res.status, res.contentType, res.body, 'map');
         return route.fulfill({ status: res.status, contentType: res.contentType, body: res.body });
       }
@@ -339,7 +345,8 @@ Usage:
                         them (e.g. a CDN-hosted viewer SDK). Repeatable.
   --save <dir>          also save backfilled/passthrough assets under <dir>
   --stub-map <file>     serve a curated offline backend from a stub map (Path B);
-                        matched requests win over passthrough/generic stubs
+                        matched requests win over passthrough/generic stubs.
+                        Repeatable — modules compose in order (first match wins).
   --record-backend <f>  record every backend request + response to <f> (feed to
                         'jsmap stub-backend scaffold')
   --gaps                after the run, list backend requests served by the generic

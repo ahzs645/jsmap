@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "description": "Reusable LaunchDarkly JS client SDK stub — empty flag set, initializes offline. Compose with: jsmap drive <url> --stub-map examples/stubs/launchdarkly.json",
+  "rules": [
+    { "match": { "method": "GET", "url": "**/sdk/evalx/**" },
+      "response": { "status": 200, "contentType": "application/json", "body": {} },
+      "note": "initial flag state; {} = no flags (valid) so the SDK fires 'ready'" },
+    { "match": { "method": "GET", "url": "**/sdk/goals/**" },
+      "response": { "status": 200, "contentType": "application/json", "body": [] },
+      "note": "click/pageview goals — an array" },
+    { "match": { "method": "GET", "url": "**clientstream.launchdarkly.com/eval/**" },
+      "response": { "status": 200, "contentType": "text/event-stream", "body": "event: put\ndata: {}\n\n" },
+      "note": "streaming: deliver an empty flag set so the SDK marks itself initialized" },
+    { "match": { "method": "POST", "url": "**/events/**" },
+      "response": { "status": 202, "contentType": "application/json", "body": "" },
+      "note": "analytics/diagnostic event ingestion — accept" }
+  ]
+}

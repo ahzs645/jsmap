@@ -281,12 +281,27 @@ jsmap drive http://localhost:5292/ --stub-map stub-map.json --gaps
 
 `drive` answers each request from the stub map first, then any `--passthrough`
 live asset, then the generic offline stub — and records every request so
-`stub-backend gaps` / `--gaps` always shows the next thing to curate. On the
-AutoCAD capture an initial pass records ~24 requests (LaunchDarkly flag/event
-endpoints, fonts, identity) and scaffolds 9 rules to start from. This is the
-"Path B" route to an offline-bootable app; it is real, iterative work, and how
-far it goes depends on how much of the backend protocol you reconstruct (the CAD
-kernel + a translated document being the deepest layer).
+`stub-backend gaps` / `--gaps` always shows the next thing to curate.
+
+**Modular by design.** `--stub-map` is repeatable, so you build the fake backend
+from small, focused, reusable modules that compose in order (first match wins):
+
+```bash
+jsmap drive <url> --stub-map examples/stubs/launchdarkly.json \
+                  --stub-map examples/stubs/analytics-silence.json \
+                  --stub-map ./stubs/identity.json   # your app-specific module
+```
+
+The repo ships reusable modules for backends many apps share — `examples/stubs/
+launchdarkly.json` (empty flag set; the SDK initializes immediately) and
+`analytics-silence.json` (swallow common trackers). One real iteration on the
+AutoCAD capture: starting from a clean bundle (no forced flags), adding only the
+LaunchDarkly module made `featureFlagsInitialized` flip **true on its own** — the
+boot advanced past the feature-flag gate with a *real* reconstructed response
+rather than a patched flag, and the gap list dropped from 9 to 4 (just fonts,
+which go via `--passthrough`). The app still stops at the document-open dialog;
+that next layer (real-auth identity → document metadata → the CAD kernel + a
+translated document) is the deeper, app-specific work the same loop drives.
 
 ## What you can realistically expect
 
