@@ -304,30 +304,34 @@ which go via `--passthrough`).
 ### The identity layer (and where the backend ceiling actually is)
 
 The next iteration is identity — making `session.identity` real so the app stops
-crashing on `session.identity.user` and proceeds to its document flow. Two
-findings worth recording, because they bound how far backend reconstruction goes:
+crashing on `session.identity.user` and proceeds to its document flow. Testing it
+carefully (and correcting an earlier write-up of mine) settles where the line is:
 
-1. **Authentication can be satisfied offline without patching the bundle.** On a
-   *pristine* bundle (no `auth-scan`), loading with `?e2eTests=1` (the app's own
-   e2e flag, which mints a token when acquisition fails) plus the LaunchDarkly
-   module is enough for the app to authenticate *naturally*: `session.identity`
-   populates and the master auth switch resolves on its own. This is cleaner
-   than the `auth-scan` force — the real flow runs, just satisfied offline.
-2. **But the identity is anonymous, and that is the ceiling.** The e2e token path
-   yields a built-in *anonymous* user (`{username:"Anonymous", …}`), not your
-   captured profile, and the app then makes **no** document/settings backend HTTP
-   calls at all before it stalls at "Initializing AutoCAD" — those are gated
-   behind the native kernel, not behind a stubbable request. A *named* identity
-   (which might make the app fetch a real document list — a genuine new gap)
-   needs a real Oxygen token, and the SDK decodes it as a **CBOR token with a
-   signature `verify()`** — unforgeable without Autodesk's signing key.
+1. **Offline you only get past the login wall via *test mode* or a *patch* — and
+   both bypass the real auth.** Verified directly: `?e2eTests=1` alone shows the
+   Sign In landing (it exposes the store and mints a token, but does **not**
+   satisfy the auth gate). Only `?fabricTests=1` (the app's own test mode) or
+   `auth-scan` (patching the auth switch) gets past it. `fabricTests` then
+   provides a built-in **anonymous** identity (`{username:"Anonymous", …}`), not
+   your captured profile; `auth-scan` forces the switch but skips the
+   identity-fetch entirely.
+2. **The real authentication can't be reconstructed offline.** A real, *named*
+   identity needs a real Oxygen token, and the SDK decodes it as a **CBOR token
+   with a signature `verify()`** — unforgeable without Autodesk's signing key.
+3. **And the real CAD kernel only runs *after* real auth.** This is the decisive
+   part. With the real 50 MB kernel WASM in place and `__skipFabric` off, the
+   fabric worker still **never spawns** and no document open ever starts — because
+   `fabricTests` (the only offline way past the gate) deliberately **mocks** the
+   fabric subsystem, and `auth-scan` never reaches the init that would spawn it.
+   The two offline routes past auth are exactly the two that skip/mock the kernel.
 
-So the offline-reachable backend surface is fully covered by the modules above
-(flags + analytics + fonts + the app's own anonymous identity); `--gaps` reports
-**zero** remaining. The wall past this point is not another backend response to
-write — it is the native WASM CAD kernel running an actual document, which a
-static capture cannot supply. Path B reconstructs the backend up to that line;
-the line itself is native (Path A) work.
+So the honest ceiling: the offline-reachable **backend HTTP** surface is fully
+covered by the modules above (flags + analytics + fonts + the app's own anonymous
+identity) — `--gaps` reports **zero**. But the editor never opens a drawing,
+because the real kernel sits *downstream of real authentication*, and real auth
+needs a signed token a static capture doesn't contain. Reconstructing more
+backend responses cannot cross that line; it is native + credentialed work, not
+frontend recovery.
 
 ## What you can realistically expect
 
