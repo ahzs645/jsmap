@@ -198,11 +198,21 @@ isModalDialogOpen (modal) → app/setIsModalDialogOpen
 ```
 
 Dispatching those (`drive --dispatch '{"type":"app/readyAction","payload":true}'`
-…) flips `app.ready`, marks the canvas loaded, and closes the init modal — and
-the **real AutoCAD editor chrome renders**: the UNDO/REDO and ZOOM toolbars and
-the OSNAP/OTRACK/ORTHO/POLAR drafting status bar, plus the editor `<canvas>`.
+…) flips `app.ready` and mounts the application shell: a left navigation sidebar
+renders, and the editor's toolbar/status-bar React components mount into the DOM
+(their `UNDO/REDO`, `ZOOM`, `OSNAP/OTRACK/ORTHO/POLAR` controls appear in the
+accessibility tree).
 
-The drawing *area* is still empty, and the console shows the honest reasons:
+**It does not become a usable editor.** The `<canvas>` placeholder is there but
+empty, and a `"Initializing AutoCAD"` document-open progress dialog stays on top
+and never closes — it is gated on a six-stage open sequence (Initializing →
+Retrieving → LoadingFile → LoadingLibraries → OpeningFile → Done) that the WASM
+CAD kernel drives, and the kernel never loads a document offline. Setting
+`canvasLoaded=true` only *tells the UI* the canvas loaded; it does not run the
+kernel. So the honest visible result is: app shell + sidebar, with the loading
+dialog stalled at stage 1.
+
+The console also shows asset gaps:
 
 ```
 ChunkLoadError: Loading chunk 19129 failed     # a lazy chunk never captured
@@ -237,10 +247,13 @@ node scripts/jsmap.cjs drive http://localhost:5292/ \
 Each asset you supply clears its error and reveals the next dependency — a
 *moving* wall. After the chunk and the viewer, the next is
 `Cannot read properties of undefined (reading 'HostAPI')` (an Autodesk-internal
-viewer API), and behind that the drawing canvas itself needs the streamed **WASM
-CAD kernel** and an **actual model/document** translated by the backend. Those
-are native code + server data, not static assets — no fetch completes them. The
-editor *chrome* is fully recoverable; the *drawing surface* is not.
+viewer API), and behind that the document-open sequence itself needs the streamed
+**WASM CAD kernel** and an **actual model/document** translated by the backend.
+Those are native code + server data, not static assets — no fetch completes them,
+and so the `"Initializing AutoCAD"` dialog never advances to *Done*. Some editor
+chrome (the left sidebar) mounts and is visible; the rest of the chrome is in the
+DOM but is not presented as a working editor, and the drawing surface never
+appears.
 
 ## What you can realistically expect
 
@@ -252,23 +265,26 @@ The capture's recovery progresses in clear stages, each removing one wall:
 | 2 | `auth-scan --apply` | login wall gone; shell mounts, throws on `getUserSettings()` |
 | 3 | `offline-mode` recipe | backend path skipped; app boots to "Initializing AutoCAD" |
 | 4 | `action-catalog` + `drive` (`?e2eTests=1`) | store exposed + dumped; boot-gate chain + force-actions mapped |
-| 5 | `drive --dispatch` the gate force-actions | **the real editor chrome renders** (toolbars, drafting status bar) |
-| 6 | `drive --backfill`/`--passthrough` + inject the viewer | missing chunk + fonts + Forge viewer filled in; chrome complete, asset errors cleared |
-| 7 | supply the WASM kernel + a translated model/document | the drawing surface; native code + backend data the capture can't contain |
+| 5 | `drive --dispatch` the gate force-actions | app shell + left sidebar mount; editor components mount in the DOM but the "Initializing AutoCAD" dialog stalls on top |
+| 6 | `drive --backfill`/`--passthrough` + inject the viewer | missing chunk + fonts + Forge viewer filled in; asset-load errors cleared (the dialog still stalls) |
+| 7 | supply the WASM kernel + a translated model/document | the document-open completes and the drawing surface appears; native code + backend data the capture can't contain |
 
 - ✅ The login landing disappears and the **real app** boots.
 - ✅ Init runs past identity/settings via the app's own offline mode.
-- ✅ The store is exposed, dumped, and **driven** — the editor interface chrome
-  renders from a static capture.
+- ✅ The store is exposed, dumped, and **driven** — the app shell and a left
+  navigation sidebar render, and the editor components mount in the DOM.
 - ✅ Missing same-origin chunks are **backfilled** from the origin and external
   public assets (fonts, viewer SDK) are **passed through** live, clearing the
   asset-load errors.
-- ⛔ The drawing surface needs the streamed WASM CAD kernel and a real
-  model/document — native code + server data, not static assets.
+- ⛔ The app **stalls on the "Initializing AutoCAD" document-open dialog** — it
+  never becomes a usable editor, because the document-open sequence needs the
+  streamed WASM CAD kernel and a real model/document (native code + server data,
+  not static assets). Forcing the redux flags only tells the UI the canvas is
+  ready; it does not run the kernel.
 
-The toolkit gets you to a **rendered editor interface** with its assets filled
-in, and an honest map of the one remaining wall (the WASM kernel + a live model).
-That last step is native + backend, not frontend recovery — see `jsmap
+The toolkit boots a static capture **past its login wall into the real
+application shell** and maps exactly what stalls it. The last step — a working
+editor with a drawing — is native + backend, not frontend recovery; see `jsmap
 boot-check` for the missing chunks and `jsmap editable` for scaffolding stubs.
 
 ## Does it generalize? (two builds, same recipe)
@@ -290,9 +306,9 @@ actionable recipe**:
 
 The minified variable names differ (`aZ`→`Im`, `t`→`e`); the *recipe* is
 identical. The same `auth-scan --apply`, `offline-mode` bootstrap, and
-`drive --dispatch app/readyAction …` that took build 1 to a rendered editor work
-unchanged on build 2 — evidence the toolkit recovers a *class* of SPA, not one
-specific bundle.
+`drive --dispatch app/readyAction …` that booted build 1 into its application
+shell work unchanged on build 2 — evidence the toolkit recovers a *class* of SPA,
+not one specific bundle.
 
 ## A note on intended use
 

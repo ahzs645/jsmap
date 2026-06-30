@@ -228,21 +228,23 @@ stream, identity with a profile, analytics swallowed), auto-detects the store,
 dumps its state, dispatches actions, and screenshots. Needs Playwright
 (`npm i -D playwright-core`).
 
-On the AutoCAD capture these take it all the way to a **rendered editor
-interface**: `?e2eTests=1` exposes the store, and dispatching the boot-gate
-force-actions (`app/readyAction`, `fabric/canvasLoadSuccess`,
-`app/setIsModalDialogOpen`) flips `app.ready` and closes the init modal so the
-real editor chrome renders — the UNDO/REDO and ZOOM toolbars and the
-OSNAP/OTRACK/ORTHO/POLAR drafting status bar. When the capture is missing assets,
-`drive --backfill <origin>` re-fetches same-origin lazy chunks on demand (and
-`--save` writes them back to complete the capture), while `--passthrough <regex>`
-loads external public assets (fonts, a CDN viewer SDK) live instead of stubbing
-them — clearing the `ChunkLoadError`/`Autodesk is not defined` errors and filling
-in more UI. The drawing *surface* still needs the WASM kernel + a real model —
-native code + server data, not static assets. See
-[docs/auth-skip.md](docs/auth-skip.md) for the full seven-stage case study (Sign
-In → shell mounts → app boots → walls mapped → **editor chrome renders** → assets
-backfilled → WASM/model wall) and the exact boundary.
+On the AutoCAD capture these boot it **past the login wall into the real
+application shell**: `?e2eTests=1` exposes the store, and dispatching the
+boot-gate force-actions (`app/readyAction`, `fabric/canvasLoadSuccess`) mounts the
+app shell and a left navigation sidebar (the editor's toolbar/status-bar
+components mount into the DOM too). It does **not** become a usable editor: a
+`"Initializing AutoCAD"` document-open dialog stalls on top and never closes,
+because that sequence is driven by the WASM CAD kernel, which never loads a
+document offline — forcing `canvasLoaded=true` only tells the UI the canvas is
+ready. When the capture is missing assets, `drive --backfill <origin>` re-fetches
+same-origin lazy chunks on demand (and `--save` writes them back), while
+`--passthrough <regex>` loads external public assets (fonts, a CDN viewer SDK)
+live — clearing the `ChunkLoadError`/`Autodesk is not defined` errors (the dialog
+still stalls). The drawing surface needs the WASM kernel + a real model — native
+code + server data, not static assets. See
+[docs/auth-skip.md](docs/auth-skip.md) for the full case study (Sign In → shell
+mounts → app boots → walls mapped → **app shell + sidebar render, dialog stalls**
+→ assets backfilled → WASM/model wall) and the exact boundary.
 
 For preserved static runtimes that need to be made operable with fake data,
 use the static harness and shim toolset:
