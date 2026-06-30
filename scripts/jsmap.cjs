@@ -189,6 +189,14 @@ Commands:
       authenticated shell. Neutralizing only removes the client-side login wall;
       the authenticated experience is still backend-driven (see docs/auth-skip.md).
 
+  offline-mode <file-or-dir> [--json] [--out <prefix>]
+      Find a capture's built-in test/dev escape hatches that let it boot without
+      its backend: URL-param test gates (e.g. ?fabricTests), window.__* mode
+      flags (e.g. __e2eTests, which often mints a fake token), the
+      fake-credential paths those flags unlock, and exposed test hooks (e.g.
+      __e2eStore). Prints a concrete boot recipe + a bootstrap <script>. Pair
+      with auth-scan to also remove the login wall. See docs/auth-skip.md.
+
   harness <recovery-dir> [--framework next]
       Create or update a scripts/serve-public.mjs static runtime harness for a
       preserved public/ directory. Includes SPA route fallback, extensionless
@@ -257,6 +265,7 @@ Examples:
   node scripts/jsmap.cjs rename-apply ./recovered-project-linked --dry-run
   node scripts/jsmap.cjs auth-scan ./recovered-project/public --out ./auth-gates
   node scripts/jsmap.cjs auth-scan ./public/app.js --apply
+  node scripts/jsmap.cjs offline-mode ./recovered-project/public --out ./offline-modes
   node scripts/jsmap.cjs harness ./recovered-project --framework next
   node scripts/jsmap.cjs next-doctor ./recovered-project
   node scripts/jsmap.cjs shim-api ./recovered-project --record
@@ -584,6 +593,11 @@ function main() {
     case 'auth-scan':
     case 'auth-skip':
       runScript('scan-auth-gates.cjs', subArgs);
+      break;
+    case 'offline-mode':
+    case 'offline-modes':
+    case 'test-mode':
+      runScript('scan-offline-modes.cjs', subArgs);
       break;
     case 'rename-plan':
       runScript('rename-plan.cjs', subArgs);

@@ -192,8 +192,24 @@ backend-driven — identity, settings, documents, entitlements, and any streamed
 WASM kernel are not in a static capture — so expect the app shell to mount and
 then error on its first backend call. On the AutoCAD capture this flips the Sign
 In landing into a mounting app shell that then throws on
-`session.identity.getUserSettings()`. See [docs/auth-skip.md](docs/auth-skip.md)
-for the full case study and the exact boundary.
+`session.identity.getUserSettings()`.
+
+### Booting past the backend (`offline-mode`)
+
+```bash
+node scripts/jsmap.cjs offline-mode <file-or-dir> --out ./offline-modes
+```
+
+Most non-trivial apps already contain a mode for running without a backend — the
+one their own e2e/storybook tests use. `offline-mode` finds the switches:
+URL-param gates (`?fabricTests`), `window.__*` flags (`__e2eTests`), the
+fake-credential paths a flag unlocks (`__e2eTests → accessToken`), and exposed
+hooks (`__e2eStore`), then prints a boot recipe + bootstrap `<script>`. On the
+AutoCAD capture, applying it routes init past the `getUserSettings()` backend
+call and the app reaches **"Initializing AutoCAD"** — the real app booting,
+not the marketing page. See [docs/auth-skip.md](docs/auth-skip.md) for the full
+four-stage case study (Sign In → shell mounts → app boots → backend territory)
+and the exact boundary.
 
 For preserved static runtimes that need to be made operable with fake data,
 use the static harness and shim toolset:
