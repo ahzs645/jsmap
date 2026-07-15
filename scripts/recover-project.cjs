@@ -2330,7 +2330,14 @@ async function copyProjectFiles(inputDir, outputDir, force) {
     await fsp.rm(outputDir, { recursive: true, force: true });
   }
   await fsp.mkdir(outputDir, { recursive: true });
-  await fsp.cp(inputDir, path.join(outputDir, 'public'), { recursive: true });
+  const mitmMetadata = path.join(inputDir, '.jsmap-mitm');
+  await fsp.cp(inputDir, path.join(outputDir, 'public'), {
+    recursive: true,
+    filter: (source) => path.resolve(source) !== path.resolve(mitmMetadata),
+  });
+  if (await pathExists(mitmMetadata)) {
+    await fsp.cp(mitmMetadata, path.join(outputDir, 'recovery', 'mitm-capture'), { recursive: true });
+  }
 }
 
 // public/ is advertised as the preserved, runnable capture, but a verbatim
@@ -2430,7 +2437,9 @@ async function main() {
   const origin = await inferOriginFromHtml(absoluteInputDir);
   const wasmRepairs = flags.repairWasm ? await repairWasmAssets(publicDir, origin) : [];
 
-  const inputFiles = await walkDirectory(absoluteInputDir);
+  const mitmMetadataDir = path.join(absoluteInputDir, '.jsmap-mitm');
+  const inputFiles = (await walkDirectory(absoluteInputDir))
+    .filter((file) => !path.resolve(file).startsWith(`${path.resolve(mitmMetadataDir)}${path.sep}`));
   const excludedLargeJs = [];
   const excludedLargeJsDetails = [];
   const transformRiskFiles = [];
@@ -2510,7 +2519,10 @@ async function main() {
   }
 
   const deobfuscatedDir = path.join(outputDir, 'recovery/deobfuscated');
-  const deobfuscateArgs = [absoluteInputDir, deobfuscatedDir, '--force', '--verbose'];
+  // MITM metadata contains duplicate response bodies and privacy/provenance
+  // records. Analyze the materialized public capture, never the metadata tree.
+  const deobfuscationInputDir = await pathExists(mitmMetadataDir) ? publicDir : absoluteInputDir;
+  const deobfuscateArgs = [deobfuscationInputDir, deobfuscatedDir, '--force', '--verbose'];
   if (flags.timeoutSeconds !== null) deobfuscateArgs.push('--timeout', String(flags.timeoutSeconds));
   if (flags.concurrency !== null) deobfuscateArgs.push('--concurrency', String(flags.concurrency));
   deobfuscateArgs.push('--engine', flags.engine);

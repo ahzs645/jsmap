@@ -4,9 +4,10 @@ const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const { detectFramework } = require('./recovery-contract.cjs');
 
 function printUsage() {
-  console.error('Usage: jsmap recover-workflow <recovery-dir> [linked-dir] [--force] [--fetch-missing <asset-base-url>] [--limit N] [--write] [--actions a,b,c] [--integrate] [--integrate-write] [--integrate-install] [--integrate-build-check-max-kb N] [--integrate-auto-downgrade]');
+  console.error('Usage: jsmap recover-workflow <recovery-dir> [linked-dir] [--framework auto|vite|next|webpack|unknown] [--force] [--fetch-missing <asset-base-url>] [--limit N] [--write] [--actions a,b,c] [--integrate] [--integrate-write] [--integrate-install] [--integrate-build-check-max-kb N] [--integrate-auto-downgrade]');
 }
 
 function parseArgs(argv) {
@@ -22,6 +23,7 @@ function parseArgs(argv) {
     integrateVendorMode: 'lazy',
     integrateBuildCheckMaxKb: null,
     integrateAutoDowngrade: false,
+    framework: 'auto',
   };
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
@@ -37,6 +39,7 @@ function parseArgs(argv) {
     else if (arg === '--integrate-vendor-mode') flags.integrateVendorMode = argv[++i];
     else if (arg === '--integrate-build-check-max-kb') flags.integrateBuildCheckMaxKb = Number(argv[++i]);
     else if (arg === '--integrate-auto-downgrade') flags.integrateAutoDowngrade = true;
+    else if (arg === '--framework') flags.framework = argv[++i];
     else if (arg === '--help' || arg === '-h') {
       printUsage();
       process.exit(0);
@@ -45,6 +48,7 @@ function parseArgs(argv) {
   }
   if (!Number.isFinite(flags.limit) || flags.limit <= 0) throw new Error('--limit must be a positive number');
   if (!['metadata', 'imports', 'lazy'].includes(flags.integrateVendorMode)) throw new Error('--integrate-vendor-mode must be metadata, lazy, or imports');
+  if (!['auto', 'vite', 'next', 'webpack', 'unknown'].includes(flags.framework)) throw new Error('--framework must be auto, vite, next, webpack, or unknown');
   if (flags.integrateBuildCheckMaxKb != null && (!Number.isFinite(flags.integrateBuildCheckMaxKb) || flags.integrateBuildCheckMaxKb <= 0)) {
     throw new Error('--integrate-build-check-max-kb must be a positive number');
   }
@@ -77,14 +81,64 @@ async function main() {
   const linkedDir = path.resolve(positional[1] || `${recoveryDir.replace(/[\\/]+$/, '')}-linked`);
   const scriptsDir = __dirname;
   const jsmap = path.join(scriptsDir, 'jsmap.cjs');
-  const reportDir = path.join(linkedDir, 'recovery-workflow');
+  const framework = detectFramework(recoveryDir, flags.framework);
+  const usesLinkedWorkspace = ['linked-vite', 'linked-webpack'].includes(framework.strategy);
+  const reportRoot = usesLinkedWorkspace ? linkedDir : recoveryDir;
+  const reportDir = path.join(reportRoot, 'recovery-workflow');
+
+  await fsp.mkdir(reportDir, { recursive: true });
+  await fsp.writeFile(path.join(reportDir, 'framework-route.json'), `${JSON.stringify(framework, null, 2)}\n`, 'utf8');
+  console.log(`\nFramework: ${framework.framework} (${framework.bundler})`);
+  console.log(`Recovery route: ${framework.strategy}`);
+
+  if (framework.strategy === 'preserved-harness-next') {
+    run('generate Next preserved-runtime harness', [jsmap, 'harness', recoveryDir, '--framework', 'next'], process.cwd());
+    run('audit Next route assets', [jsmap, 'next-doctor', recoveryDir], process.cwd());
+    run('stats for preserved Next recovery', [jsmap, 'stats', recoveryDir, '--out', path.join(reportDir, 'stats-after')], process.cwd());
+    run('record recovery level', [jsmap, 'recovery-level', recoveryDir, '--framework', 'next', '--out', path.join(reportDir, 'recovery-level')], process.cwd());
+    const summary = [
+      '# jsmap Recover Workflow Report',
+      '',
+      `Recovery dir: \`${recoveryDir}\``,
+      `Framework: **${framework.framework}**`,
+      `Bundler: **${framework.bundler}**`,
+      `Route: **${framework.strategy}**`,
+      '',
+      'Result: preserved-runtime harness and Next asset audit generated.',
+      '',
+      'A linked Vite rebuild was intentionally not generated for this Next/Turbopack capture.',
+      'Use `source-plan` on the recovered source candidates before exporting a conventional source app.',
+      '',
+    ].join('\n');
+    await fsp.writeFile(path.join(reportDir, 'WORKFLOW_REPORT.md'), summary, 'utf8');
+    console.log(`\nWorkflow complete: ${path.join(reportDir, 'WORKFLOW_REPORT.md')}`);
+    return;
+  }
+
+  if (framework.strategy === 'inspection-first') {
+    run('stats for inspection-first recovery', [jsmap, 'stats', recoveryDir, '--out', path.join(reportDir, 'stats-after')], process.cwd());
+    run('record recovery level', [jsmap, 'recovery-level', recoveryDir, '--framework', 'unknown', '--out', path.join(reportDir, 'recovery-level')], process.cwd());
+    const summary = [
+      '# jsmap Recover Workflow Report',
+      '',
+      `Recovery dir: \`${recoveryDir}\``,
+      'Framework: **unknown**',
+      'Route: **inspection-first**',
+      '',
+      'No linked rebuild was attempted because the framework/bundler evidence is insufficient.',
+      'Review `framework-route.json`, then rerun with an explicit `--framework` override when justified.',
+      '',
+    ].join('\n');
+    await fsp.writeFile(path.join(reportDir, 'WORKFLOW_REPORT.md'), summary, 'utf8');
+    console.log(`\nWorkflow complete: ${path.join(reportDir, 'WORKFLOW_REPORT.md')}`);
+    return;
+  }
 
   const rebuildArgs = [jsmap, 'rebuild', recoveryDir, linkedDir];
   if (flags.force) rebuildArgs.push('--force');
   if (flags.fetchMissing) rebuildArgs.push('--fetch-missing', flags.fetchMissing);
   run('rebuild linked workspace', rebuildArgs, process.cwd());
 
-  await fsp.mkdir(reportDir, { recursive: true });
   run('stats before promotion', [jsmap, 'stats', linkedDir, '--out', path.join(reportDir, 'stats-before')], process.cwd());
   run('promotion plan', [jsmap, 'promote-plan', linkedDir, '--top', String(flags.limit)], process.cwd());
   await fsp.copyFile(path.join(linkedDir, 'recovery-promotion-plan.json'), path.join(reportDir, 'promotion-plan.json'));
@@ -100,8 +154,9 @@ async function main() {
     run('promotion write with build-check', writeArgs, process.cwd());
   }
 
-  runCommand('vite build check', 'npm', ['run', 'build'], linkedDir);
+  runCommand('linked workspace build check', 'npm', ['run', 'build'], linkedDir);
   run('stats after build', [jsmap, 'stats', linkedDir, '--out', path.join(reportDir, 'stats-after')], process.cwd());
+  run('record recovery level', [jsmap, 'recovery-level', linkedDir, '--framework', framework.framework === 'vite-rollup' ? 'vite' : 'webpack', '--out', path.join(reportDir, 'recovery-level')], process.cwd());
 
   if (flags.integrate || flags.integrateWrite) {
     const integrateArgs = [jsmap, 'integrate', linkedDir, flags.integrateWrite ? '--write' : '--dry-run', '--vendor-mode', flags.integrateVendorMode, '--out', path.join(reportDir, 'integration-plan')];
@@ -117,6 +172,9 @@ async function main() {
     '',
     `Recovery dir: \`${recoveryDir}\``,
     `Linked dir: \`${linkedDir}\``,
+    `Framework: **${framework.framework}**`,
+    `Bundler: **${framework.bundler}**`,
+    `Route: **${framework.strategy}**`,
     '',
     'Artifacts:',
     '',
@@ -124,6 +182,7 @@ async function main() {
     '- `recovery-workflow/promotion-plan.md`',
     '- `recovery-workflow/promote-preview/promotion-apply-preview.json`',
     '- `recovery-workflow/stats-after.md`',
+    '- `recovery-workflow/recovery-level.md`',
     flags.integrate || flags.integrateWrite ? '- `recovery-workflow/integration-plan.md`' : '',
     flags.integrateWrite ? '- `RECOVERY_INTEGRATION.md`' : '',
     flags.integrateWrite ? '- `recovery-integration-manifest.json`' : '',
