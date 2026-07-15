@@ -119,6 +119,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
+const captureRoot = path.resolve(root, '..', 'recovery', 'mitm-capture');
 const port = Number(process.env.PORT || process.argv[2] || 4173);
 const defaultEntry = ${JSON.stringify('__JSMAP_DEFAULT_ENTRY__')};
 const shimVersion = ${JSON.stringify(String(Date.now()))};
@@ -145,6 +146,51 @@ function safeJoin(urlPath) {
   const resolved = path.resolve(root, decoded);
   if (!resolved.startsWith(root)) return root;
   return resolved;
+}
+
+let captureRoutesPromise;
+function normalizeCapturedPathQuery(rawUrl) {
+  const url = new URL(rawUrl || '/', 'http://localhost');
+  const sensitive = /(?:^|[_-])(?:access[_-]?token|api[_-]?key|auth|authorization|code|credential|id[_-]?token|jwt|key|password|refresh[_-]?token|secret|session|signature|token)(?:$|[_-])/i;
+  for (const [key] of url.searchParams) {
+    if (sensitive.test(key)) url.searchParams.set(key, '<redacted>');
+  }
+  return url.pathname + url.search;
+}
+
+async function captureRoutes() {
+  if (!captureRoutesPromise) {
+    captureRoutesPromise = readFile(path.join(captureRoot, 'ROUTE_MAP.json'), 'utf8')
+      .then((value) => JSON.parse(value).routes || [])
+      .catch(() => []);
+  }
+  return captureRoutesPromise;
+}
+
+async function maybeServeCapturedExchange(req, res) {
+  const method = req.method || 'GET';
+  const pathQuery = normalizeCapturedPathQuery(req.url || '/');
+  const route = (await captureRoutes()).find((candidate) =>
+    candidate.origin === 'primary' && candidate.method === method && candidate.pathQuery === pathQuery);
+  if (!route) return false;
+  if (method === 'GET' && !pathQuery.includes('?') && String(route.mimeType || '').toLowerCase().startsWith('text/html')) return false;
+  const replayHeaders = new Set(['content-type', 'content-language', 'cache-control', 'etag', 'last-modified', 'location', 'accept-ranges']);
+  for (const [name, value] of Object.entries(route.responseHeaders || {})) {
+    if (!replayHeaders.has(name.toLowerCase()) && !name.toLowerCase().startsWith('access-control-')) continue;
+    res.setHeader(name, value);
+  }
+  res.statusCode = Number(route.status || 200);
+  if (!route.bodyFile) {
+    res.end();
+    return true;
+  }
+  const bodyFile = path.resolve(captureRoot, route.bodyFile);
+  if (!bodyFile.startsWith(captureRoot + path.sep)) return false;
+  const info = await stat(bodyFile);
+  res.setHeader('Content-Type', route.mimeType || 'application/octet-stream');
+  res.setHeader('Content-Length', info.size);
+  createReadStream(bodyFile).pipe(res);
+  return true;
 }
 
 function shimSource() {
@@ -228,6 +274,7 @@ const server = http.createServer(async (req, res) => {
       send(res, 200, shimSource(), 'text/javascript; charset=utf-8');
       return;
     }
+    if (await maybeServeCapturedExchange(req, res)) return;
     if (await maybeServeNextDataFallback(req, res)) return;
 
     let { file, info } = await resolveFile(req.url || '/');
@@ -285,6 +332,7 @@ async function commandHarness(argv) {
       'query/hash cleanup shim',
       'cache-busted injected shim',
       'captured JSON/API replay from preserved files',
+      'sanitized HAR exchange replay when recovery/mitm-capture exists',
       'extensionless route support',
       'static _next/data JSON fallback',
       'CORS-friendly preserved runtime serving',

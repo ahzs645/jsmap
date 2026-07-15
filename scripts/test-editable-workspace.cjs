@@ -2,7 +2,7 @@
 
 'use strict';
 
-// Tests for `jsmap editable`: promoting self-contained functions (incl. their
+// Tests for `jsmap editable-lab`: promoting self-contained functions (incl. their
 // in-module helper closures) into an editable workspace, and scaffolding fake
 // stubs for injected provider/backend dependencies.
 
@@ -53,7 +53,7 @@ fs.writeFileSync(path.join(linkedDir, 'recovery-module-index.json'), JSON.string
   parts: [{ file: 'src/recovered-parts/mod/module-1.js' }],
 }));
 
-execFileSync(process.execPath, [path.join(REPO, 'scripts/jsmap.cjs'), 'editable', linkedDir, outDir, '--force'], { stdio: 'pipe' });
+execFileSync(process.execPath, [path.join(REPO, 'scripts/jsmap.cjs'), 'editable-lab', linkedDir, outDir, '--force'], { stdio: 'pipe' });
 
 const recoveredFile = fs.readFileSync(path.join(outDir, 'src/recovered/mod-module-1.js'), 'utf8');
 assert.match(recoveredFile, /export function pureAdd/, 'recovered module exports pureAdd');
@@ -70,9 +70,10 @@ const stubSource = fs.readFileSync(path.join(outDir, stubFile.file), 'utf8');
 assert.match(stubSource, /fetchItem/, 'stub scaffolds the fetchItem method');
 
 // Project scaffolding present.
-for (const f of ['package.json', 'index.html', 'src/main.js', 'src/registry.js', 'src/stubs/index.js', 'README.md']) {
+for (const f of ['package.json', 'index.html', 'src/main.js', 'src/registry.js', 'src/stubs/index.js', 'README.md', 'RECOVERY_LEVEL.json']) {
   assert.ok(fs.existsSync(path.join(outDir, f)), `${f} should be generated`);
 }
+assert.equal(JSON.parse(fs.readFileSync(path.join(outDir, 'RECOVERY_LEVEL.json'), 'utf8')).status, 'editable-lab');
 // registry imports the stub for the injection function's default args.
 const registry = fs.readFileSync(path.join(outDir, 'src/registry.js'), 'utf8');
 assert.match(registry, /import \* as stubs/, 'registry wires stubs into scope');

@@ -2,6 +2,26 @@
 
 ## jsmap recovery CLI
 
+jsmap reports four deliberately different recovery levels:
+
+| Level | Meaning |
+| --- | --- |
+| `preserved-runtime` | The captured site runs through a local static harness. |
+| `linked-recovery` | Bundles are split, linked, and inspectable. |
+| `editable-lab` | Promoted functions run in a hot-reloading playground. |
+| `source-app` | Conventional modules, package imports, and local assets run without the captured runtime. |
+
+Check the current level and framework route with:
+
+```bash
+node scripts/jsmap.cjs recovery-level ./recovered-project
+```
+
+`recover-workflow` detects Vite/Rollup, Next/Turbopack, webpack, and unknown
+captures before choosing a route. Next captures receive the preserved Next
+harness and route-asset audit; unknown captures remain inspection-first instead
+of being forced through a Vite rebuild.
+
 Generate a source-oriented recovery workspace from a captured static app:
 
 ```bash
@@ -113,6 +133,36 @@ defects instead of silently producing garbage:
   usable maps, nothing transformed); pass `--allow-empty` to treat that as
   success.
 
+### Authorized proxy captures (`mitm-import` and `mitm-recover`)
+
+jsmap can ingest a HAR exported by an HTTP debugging proxy. For mitmproxy, the
+capture side is its `hardump` option; jsmap does not install a CA, configure a
+device, or initiate interception:
+
+```bash
+# Capture only traffic you own or are explicitly authorized to inspect.
+mitmdump --set hardump=authorized-capture.har
+
+node scripts/jsmap.cjs mitm-import authorized-capture.har ./captured-site
+node scripts/jsmap.cjs mitm-recover authorized-capture.har ./recovered-site --allow-empty
+```
+
+`mitm-import` infers one primary origin (or accepts `--origin`), materializes
+successful primary-origin GET responses, decodes HAR/base64 and compressed
+bodies, and records status, safe response headers, timing, redirects, and
+query-shaped variants in `.jsmap-mitm/`. It removes authorization/cookie/token
+headers, redacts URL user-info and sensitive query values, and omits request bodies and their
+hashes. Response bodies are retained and may contain private application data,
+so review the capture before sharing or committing it.
+
+During `recover`, route evidence moves to `recovery/mitm-capture/` rather than
+the served `public/` tree. The generated harness replays matching primary-origin
+exchanges by method and sanitized path/query. This is deterministic HTTP replay,
+not a live backend: request bodies do not distinguish responses, WebSocket frames
+are not available in HAR, server-sent events replay only as a captured snapshot,
+and browser storage/service-worker state is outside the archive. These limits are
+written as warnings instead of being silently presented as runtime parity.
+
 ### Bundle-only captures (no HTML entry)
 
 When a capture is just JavaScript bundles with no `index.html` (for example a
@@ -121,14 +171,14 @@ webpack app split into modules), `rebuild` runs in bundle-only mode: it builds
 manifests and synthesizes a minimal entry page, so the recovered modules still
 flow into `promote-plan`, `structure-plan`, and `roadmap`.
 
-### Editable, hot-reloading workspace (`editable`)
+### Editable recovery playground (`editable-lab`)
 
 ```bash
-node scripts/jsmap.cjs editable ./recovered-project-linked ./recovered-editable --top 25
+node scripts/jsmap.cjs editable-lab ./recovered-project-linked ./recovered-editable --top 25
 cd ./recovered-editable && npm install && npm run dev
 ```
 
-`editable` turns a linked rebuild into a runnable, **hot-reloading** Vite
+`editable-lab` turns a linked rebuild into a runnable, **hot-reloading** Vite
 workspace for human-in-the-loop recovery:
 
 - Promotes self-contained recovered functions — including the in-module helper
@@ -145,6 +195,39 @@ workspace for human-in-the-loop recovery:
 The full captured app does not run standalone (it needs its real backend/auth and
 any WebGL/WASM runtimes); this is the editable **source layer** with a working
 dev/HMR loop that a human grows by promoting more modules.
+
+The legacy `editable` command remains as an alias and prints a warning. It does
+not produce a `source-app`.
+
+### Independent source application (`source-plan` and `source-export`)
+
+Use a reviewed plan when the deliverable must be a conventional source tree:
+
+```bash
+node scripts/jsmap.cjs source-plan ./recovered-project-linked/src/promoted --out ./SOURCE_PLAN.json
+# Review module inclusion, output paths, mutations, package mappings, and entry conversion.
+node scripts/jsmap.cjs source-export ./SOURCE_PLAN.json ./source-app --write --verify-packages
+node scripts/jsmap.cjs asset-audit ./source-app --source-root ./recovered-project/public --mitm-root ./recovered-project/recovery/mitm-capture --write --url http://127.0.0.1:4173
+node scripts/jsmap.cjs source-audit ./source-app --install --url http://127.0.0.1:4173 --interaction '[data-primary-action]'
+```
+
+`source-plan` records top-level binding owners, statement ranges, suggested
+statement-level domain groups, cross-module reads, direct mutations, unresolved
+package globals, inferred domains, and Turbopack/webpack entry-wrapper
+candidates. The JSON plan is intentionally pending review.
+
+`source-export` refuses unreviewed write mode by default. It generates direct
+ESM imports for read-only edges and explicit runtime accessors for bindings that
+another module assigns. Every copied range, original hash, package mapping,
+entry conversion, runtime accessor, and other synthetic change is recorded in
+`SOURCE_PROVENANCE.json`.
+
+`asset-audit` resolves query-bearing CSS/HTML/JS asset URLs without reformatting
+CSS, copies uniquely matched assets locally, records hashes and provenance, and
+can verify every local URL over HTTP. `source-audit` only writes
+`status: complete` after provenance, independence, assets, install/build,
+desktop/mobile runtime, primary interaction, console/request health, and WebGL
+checks pass.
 
 ### Boot readiness (`boot-check`)
 
@@ -384,9 +467,10 @@ Useful generic signals currently include:
   for the human/agent recovery loop
 - source readiness: semantic AST boundary, runnable status, size, exports, and
   runtime blockers
-- linked recovery workflow: `recover-workflow` runs rebuild, stats,
-  promotion planning, dry-run promotion, optional written promotion with a Vite
-  build-check entry, and final stats in one report directory
+- framework-aware recovery workflow: `recover-workflow` records its route first;
+  linked Vite/webpack captures continue through rebuild, promotion, build, and
+  stats, Next captures receive the preserved harness and route audit, and
+  unknown captures stop at inspection-first
 - leaf candidates: rebuild indexes small top-level helper declarations inside
   larger recovered parts so humans/agents can promote app-owned functions
   without manually scanning thousands of lines first

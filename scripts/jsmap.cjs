@@ -20,6 +20,13 @@
  *   roadmap <linked-dir>                               Generate ordered recovery work packets
  *   integrate <linked-dir>                             Wire promoted modules and vendor adapters
  *   runtime-patch <linked-dir>                         Plan runtime replacement adapters
+ *   recovery-level <project-dir>                       Detect framework route and achieved recovery level
+ *   source-plan <input-dir>                            Plan reviewed conventional source modules
+ *   source-export <plan> <output-dir>                  Export reviewed source modules with provenance
+ *   asset-audit <project-dir>                          Localize and verify source-app assets
+ *   source-audit <project-dir>                         Gate source-app completion with build/browser evidence
+ *   mitm-import <capture.har> <capture-dir>            Import an authorized HAR capture safely
+ *   mitm-recover <capture.har> <recovery-dir>          Import HAR and build a preserved recovery
  *   rename-plan <linked-dir>                           Suggest conservative local symbol renames
  *   rename-apply <linked-dir>                          Apply reviewed low-risk rename suggestions
  *   harness <recovery-dir>                             Generate a preserved static runtime harness
@@ -128,11 +135,14 @@ Commands:
       Summarize recovered part counts, package boundaries, readiness, largest
       leftover files, linked entry sizes, promotion output, and quality warnings.
 
-  recover-workflow <recovery-dir> [linked-dir] [--force] [--fetch-missing <asset-base-url>]
+  recover-workflow <recovery-dir> [linked-dir] [--framework auto|vite|next|webpack|unknown]
       Run the practical human/agent recovery loop in one command:
+        framework route -> rebuild/harness/inspection -> stats -> promotion work
+      For linked Vite/webpack routes:
         rebuild -> stats -> promote-plan -> promote-apply dry-run
         -> optional --write build-check -> npm run build -> final stats/report.
-      Options: --limit N, --actions <comma-list>, --write,
+      Options: --force, --fetch-missing <asset-base-url>, --limit N,
+               --actions <comma-list>, --write,
                --integrate, --integrate-write, --integrate-install,
                --integrate-vendor-mode metadata|lazy|imports
 
@@ -159,6 +169,43 @@ Commands:
       and reviewable before/after snippets. Starts with conservative editor
       runtime heuristics such as Monaco type/theme/command setup.
 
+  recovery-level <project-dir> [--framework auto|vite|next|webpack|unknown]
+      Detect the framework-aware recovery route and report the highest achieved
+      artifact level: preserved-runtime, linked-recovery, editable-lab, or
+      independently audited source-app.
+
+  source-plan <input-dir> [--out <plan.json>]
+      Analyze app-owned source candidates, top-level binding ownership,
+      cross-module read/mutation edges, unresolved package globals, statement
+      ranges, and runtime entry wrappers. Writes a review-required source plan.
+
+  source-export <plan.json> <output-dir> --write [--force]
+      Export approved conventional source modules. Generates direct ESM imports,
+      mutable runtime accessors for cross-module writes, approved entry-wrapper
+      conversions, verified package imports, and SOURCE_PROVENANCE.json.
+      Options: --allow-pending (explicit preview), --verify-packages.
+
+  asset-audit <source-app-dir> [--source-root <capture-public>] [--mitm-root <capture-evidence>] [--write]
+      Parse HTML/CSS/JS asset references, strip query/hash lookup noise, localize
+      uniquely matched assets (including captured external responses from a MITM
+      route map), preserve CSS bytes outside exact URL replacements, record
+      hashes/provenance, and optionally verify every asset over --url.
+
+  source-audit <source-app-dir> --install --url <served-url> --interaction <selector>
+      Gate source-app completion: no captured-runtime references, local HTTP-200
+      assets, install/build success, desktop/mobile browser checks, primary
+      interactions, console/request health, and nonblank WebGL output when used.
+
+  mitm-import <capture.har> <capture-dir> [--origin <url>] [--force]
+      Import authorized HTTP exchanges from a HAR archive. Materializes the
+      primary origin, stores replay bodies outside the public tree, redacts
+      credentials and sensitive query values, and omits all request bodies.
+
+  mitm-recover <capture.har> <recovery-dir> [--capture-dir <dir>] [--origin <url>]
+      Chain MITM import, framework-aware recovery, preserved harness generation,
+      and recovery-level reporting. Options: --framework auto|vite|next|webpack|unknown,
+      --repair-wasm, --allow-empty, --force.
+
   rename-plan <linked-rebuild-dir> [--scope promoted|recovered] [--top N]
       Suggest conservative local variable/parameter renames with confidence,
       evidence, risk, and minifiedAlias metadata. Defaults to promoted modules.
@@ -166,12 +213,14 @@ Commands:
   rename-apply <linked-rebuild-dir> [--plan <file>] [--dry-run|--write] [--min-confidence N]
       Apply only reviewed low-risk rename suggestions from recovery-rename-plan.json.
 
-  editable <linked-rebuild-dir> [output-dir] [--top N] [--force]
+  editable-lab <linked-rebuild-dir> [output-dir] [--top N] [--force]
       Generate an editable, hot-reloading Vite workspace from a linked rebuild.
       Promotes self-contained recovered functions (with their in-module helper
       closures) into editable src/recovered/* modules, scaffolds fake stubs for
       injected backend/auth dependencies so they run offline, and writes an
       interactive playground that hot-reloads. A human reviews and grows it.
+      The legacy editable alias remains available but does not produce a
+      standalone source application.
 
   boot-check <dir-or-recovery-or-linked> [--json] [--out <prefix>]
       Diagnose whether a captured bundle set can boot. Finds the deferred
@@ -292,7 +341,11 @@ Examples:
   node scripts/jsmap.cjs integrate ./recovered-project-linked --dry-run
   node scripts/jsmap.cjs runtime-patch ./recovered-project-linked
   node scripts/jsmap.cjs rename-plan ./recovered-project-linked --scope promoted
-  node scripts/jsmap.cjs editable ./recovered-project-linked ./recovered-editable --top 25
+  node scripts/jsmap.cjs editable-lab ./recovered-project-linked ./recovered-editable --top 25
+  node scripts/jsmap.cjs source-plan ./recovered-project-linked/src/promoted --out ./SOURCE_PLAN.json
+  node scripts/jsmap.cjs source-export ./SOURCE_PLAN.json ./source-app --write --verify-packages
+  node scripts/jsmap.cjs asset-audit ./source-app --source-root ./recovered-project/public --write
+  node scripts/jsmap.cjs source-audit ./source-app --install --url http://127.0.0.1:4173 --interaction '[data-primary-action]'
   node scripts/jsmap.cjs rename-apply ./recovered-project-linked --dry-run
   node scripts/jsmap.cjs auth-scan ./recovered-project/public --out ./auth-gates
   node scripts/jsmap.cjs auth-scan ./public/app.js --apply
@@ -613,8 +666,36 @@ function main() {
     case 'adapter-promote':
       runScript('runtime-patch-plan.cjs', subArgs);
       break;
+    case 'recovery-level':
+    case 'recovery-levels':
+      runScript('recovery-levels.cjs', subArgs);
+      break;
+    case 'source-plan':
+      runScript('source-project.cjs', ['plan', ...subArgs]);
+      break;
+    case 'source-export':
+      runScript('source-project.cjs', ['export', ...subArgs]);
+      break;
+    case 'asset-audit':
+    case 'asset-localize':
+      runScript('asset-localization.cjs', subArgs);
+      break;
+    case 'source-audit':
+    case 'source-app-audit':
+      runScript('source-app-audit.cjs', subArgs);
+      break;
+    case 'mitm-import':
+      runScript('import-mitm-capture.cjs', ['import', ...subArgs]);
+      break;
+    case 'mitm-recover':
+      runScript('import-mitm-capture.cjs', ['recover', ...subArgs]);
+      break;
+    case 'editable-lab':
+      runScript('generate-editable-workspace.cjs', subArgs);
+      break;
     case 'editable':
     case 'editable-workspace':
+      console.warn('`editable` is a legacy alias for `editable-lab`; it creates a promotion playground, not a standalone source application.');
       runScript('generate-editable-workspace.cjs', subArgs);
       break;
     case 'boot-check':

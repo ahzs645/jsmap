@@ -34,6 +34,8 @@
     "test:recovery-heuristics": "node scripts/test-recovery-heuristics.cjs",
     "test:runtime-patch": "node scripts/test-runtime-patch-plan.cjs",
     "test:static-runtime-tools": "node scripts/test-static-runtime-tools.cjs",
+    "test:mitm-capture": "node scripts/test-mitm-capture.cjs",
+    "test:source-app-workflow": "node scripts/test-source-app-workflow.cjs",
     "test:deobfuscation-tools": "node scripts/test-deobfuscation-tools.cjs",
     "split:bundle": "node scripts/split-bundle-ast.cjs"
   },
