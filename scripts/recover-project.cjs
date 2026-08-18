@@ -669,6 +669,29 @@ function buildPackageBoundaries(filesByRel, dependencies, splitEntries = []) {
     }));
 }
 
+// Chunk directories are named after the bundle basename. Two captured bundles
+// that share a basename (for example /bower/index.js and /knit/index.js) would
+// otherwise be split into the same directory, and the second split would delete
+// the first bundle's recovered parts while leaving its manifest behind. Qualify
+// the directory with the capture path whenever the basename is not unique, so
+// every split bundle keeps its own evidence.
+function splitDirName(rel, suffix, collidingNames) {
+  const base = `${path.posix.basename(rel, path.posix.extname(rel))}${suffix}`;
+  if (!collidingNames || !collidingNames.has(base)) return base;
+  const dir = path.posix.dirname(rel);
+  if (!dir || dir === '.') return base;
+  return `${dir.replace(/[^A-Za-z0-9._-]+/g, '-')}__${base}`;
+}
+
+function collidingSplitNames(planned) {
+  const counts = new Map();
+  for (const { rel, suffix } of planned) {
+    const base = `${path.posix.basename(rel, path.posix.extname(rel))}${suffix}`;
+    counts.set(base, (counts.get(base) || 0) + 1);
+  }
+  return new Set([...counts].filter(([, count]) => count > 1).map(([name]) => name));
+}
+
 async function readSplitManifests(outputDir, splitOutputs) {
   const manifests = [];
   const entries = [];
@@ -2556,6 +2579,22 @@ async function main() {
   const filesByRel = {};
   const splitOutputs = [];
 
+  // Work out every split that will run before any of them writes, so colliding
+  // chunk-directory names can be qualified instead of overwriting each other.
+  const plannedSplits = [];
+  for (const file of deobfuscatedFiles) {
+    const rel = toPosix(path.relative(deobfuscatedDir, file));
+    if (!isJavaScript(rel) || excludedLargeJsSet.has(rel)) continue;
+    const stat = await fsp.stat(file);
+    if (stat.size >= flags.minSplitBytes && (stat.size <= flags.maxSplitBytes || flags.largeJsMode === 'full')) {
+      plannedSplits.push({ rel, suffix: '' });
+    }
+  }
+  if (flags.largeJsMode === 'split-raw' || flags.recoveryMode === 'inspect-first') {
+    for (const rel of excludedLargeJs) plannedSplits.push({ rel, suffix: '-raw' });
+  }
+  const splitNameCollisions = collidingSplitNames(plannedSplits);
+
   for (const file of deobfuscatedFiles) {
     const rel = toPosix(path.relative(deobfuscatedDir, file));
     if (!isJavaScript(rel) && !/\.css$/i.test(rel) && !/\.html?$/i.test(rel)) continue;
@@ -2568,7 +2607,7 @@ async function main() {
       stat.size >= flags.minSplitBytes &&
       (stat.size <= flags.maxSplitBytes || flags.largeJsMode === 'full');
     if (shouldSplit) {
-      const splitName = path.basename(file, path.extname(file));
+      const splitName = splitDirName(rel, '', splitNameCollisions);
       const out = path.join(outputDir, 'src/recovered-chunks', splitName);
       if (flags.moduleGranularity === 'declarations') {
         const strategy = splitBundleForInspection(file, out, {
@@ -2589,7 +2628,7 @@ async function main() {
       // split real JavaScript rather than an HTML document.
       const inputFile = sanitizedInputByRel.get(rel) || path.join(absoluteInputDir, rel);
       const stat = await fsp.stat(inputFile);
-      const splitName = `${path.basename(rel, path.extname(rel))}-raw`;
+      const splitName = splitDirName(rel, '-raw', splitNameCollisions);
       const out = path.join(outputDir, 'src/recovered-chunks', splitName);
       const code = await fsp.readFile(inputFile, 'utf8').catch(() => '');
       const strategy = splitBundleForInspection(inputFile, out, {

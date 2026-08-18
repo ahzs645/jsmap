@@ -54,8 +54,21 @@ function stripLinkHeader(text) {
   return text.replace(/^\/\* @jsmap-link[\s\S]*?\*\/\s*/, '');
 }
 
-// A webpack module body is an anonymous factory function(module,exports,require){…}.
+// A webpack module body is an *anonymous* factory function(module,exports,require){…}.
 // Return the inner statements + the factory parameter names.
+//
+// Only anonymous single-node bodies are unwrapped. A part whose sole top-level
+// node is a *named* declaration (`function Tm(i){…}`) is that declaration — it is
+// the module, not a wrapper around one. Descending into it discards the very
+// symbol the part exists to hold, which silently empties promotion for
+// declaration-granularity splits of ESM/rollup bundles.
+function isAnonymousFactory(fn) {
+  const name = fn.id?.name;
+  // acorn-loose names an anonymous FunctionDeclaration with its error
+  // placeholder ("✖"), so treat any non-identifier name as anonymous.
+  return !name || !/^[A-Za-z_$][\w$]*$/.test(name);
+}
+
 function unwrapModuleFactory(astBody) {
   const nodes = astBody || [];
   if (nodes.length !== 1) return { nodes, factoryParams: [] };
@@ -64,22 +77,115 @@ function unwrapModuleFactory(astBody) {
     ? only
     : (only.type === 'ExpressionStatement' && /^(?:FunctionExpression|ArrowFunctionExpression)$/.test(only.expression?.type) ? only.expression : null);
   if (!fn || fn.body?.type !== 'BlockStatement') return { nodes, factoryParams: [] };
+  if (!isAnonymousFactory(fn)) return { nodes, factoryParams: [] };
   const factoryParams = (fn.params || []).map((p) => (p.type === 'Identifier' ? p.name : null)).filter(Boolean);
   return { nodes: fn.body.body, factoryParams };
 }
 
-function collectExternalIdentifiers(code, declared) {
-  const declaredSet = new Set(declared);
-  const external = new Set();
-  for (const match of code.matchAll(/\b[A-Za-z_$][\w$]*\b/g)) {
-    const name = match[0];
-    const index = match.index || 0;
-    if (declaredSet.has(name) || RESERVED.has(name)) continue;
-    if (code[index - 1] === '.') continue; // member access
-    if (code[index + name.length] === ':' && code[index - 1] !== '?') continue; // object key
-    external.add(name);
+// Generic AST walk. `visit(node, parent, key)` sees every node once.
+function walkAst(node, visit, parent = null, key = null) {
+  if (!node || typeof node.type !== 'string') return;
+  visit(node, parent, key);
+  for (const childKey of Object.keys(node)) {
+    if (childKey === 'type' || childKey === 'start' || childKey === 'end' ||
+        childKey === 'loc' || childKey === 'range') continue;
+    const value = node[childKey];
+    if (Array.isArray(value)) {
+      for (const child of value) walkAst(child, visit, node, childKey);
+    } else {
+      walkAst(value, visit, node, childKey);
+    }
   }
-  return [...external];
+}
+
+// Every name a binding pattern introduces (destructuring, rest, defaults).
+function collectPatternNames(pattern, out) {
+  if (!pattern || typeof pattern.type !== 'string') return;
+  switch (pattern.type) {
+    case 'Identifier':
+      out.add(pattern.name);
+      break;
+    case 'ObjectPattern':
+      for (const property of pattern.properties || []) {
+        collectPatternNames(property.type === 'RestElement' ? property.argument : property.value, out);
+      }
+      break;
+    case 'ArrayPattern':
+      for (const element of pattern.elements || []) collectPatternNames(element, out);
+      break;
+    case 'AssignmentPattern':
+      collectPatternNames(pattern.left, out);
+      break;
+    case 'RestElement':
+      collectPatternNames(pattern.argument, out);
+      break;
+    default:
+      break;
+  }
+}
+
+const BINDING_NODE_TYPES = new Set([
+  'FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression',
+  'ClassDeclaration', 'ClassExpression',
+]);
+
+// References a slice of code makes to names it does not itself bind.
+//
+// This is an AST pass, not a token scan: words inside string/template literals
+// and comments are not identifiers, and locally declared names (`const t = …`,
+// `for (const a of …)`, inner functions, catch params, destructured bindings)
+// are bindings, not cross-module dependencies. Scanning raw text reported both
+// as unresolved siblings, which made almost every recovered part look
+// closure-coupled when it was self-contained.
+function collectExternalIdentifiers(code, declared) {
+  let ast;
+  try {
+    ast = acornLoose.parse(code, { ecmaVersion: 'latest', sourceType: 'module' });
+  } catch {
+    return [];
+  }
+  const declaredSet = new Set(declared);
+  const referenced = new Set();
+  const labels = new Set();
+
+  walkAst(ast, (node, parent, key) => {
+    if (BINDING_NODE_TYPES.has(node.type)) {
+      if (node.id?.type === 'Identifier') declaredSet.add(node.id.name);
+      for (const param of node.params || []) collectPatternNames(param, declaredSet);
+      return;
+    }
+    if (node.type === 'VariableDeclarator') {
+      collectPatternNames(node.id, declaredSet);
+      return;
+    }
+    if (node.type === 'CatchClause') {
+      collectPatternNames(node.param, declaredSet);
+      return;
+    }
+    if (node.type === 'ImportSpecifier' || node.type === 'ImportDefaultSpecifier' ||
+        node.type === 'ImportNamespaceSpecifier') {
+      if (node.local?.type === 'Identifier') declaredSet.add(node.local.name);
+      return;
+    }
+    if (node.type === 'LabeledStatement' && node.label?.name) {
+      labels.add(node.label.name);
+      return;
+    }
+    if (node.type !== 'Identifier') return;
+    // Non-reference identifier positions: `a.b`, `{ b: … }`, `class { b(){} }`,
+    // `break b`, `import { b as c }`, `export { b as c }`.
+    if (parent?.type === 'MemberExpression' && key === 'property' && !parent.computed) return;
+    if ((parent?.type === 'Property' || parent?.type === 'MethodDefinition' ||
+         parent?.type === 'PropertyDefinition') && key === 'key' && !parent.computed) return;
+    if (parent?.type === 'BreakStatement' || parent?.type === 'ContinueStatement') return;
+    if (parent?.type === 'ExportSpecifier' || parent?.type === 'ImportSpecifier') return;
+    // acorn-loose fills unparseable identifier slots with its error placeholder.
+    if (!/^[A-Za-z_$][\w$]*$/.test(node.name)) return;
+    referenced.add(node.name);
+  });
+
+  return [...referenced].filter((name) =>
+    !declaredSet.has(name) && !labels.has(name) && !RESERVED.has(name));
 }
 
 // Built-in Array/String/Object/Map/Set/Promise/etc. methods. A call to one of
@@ -153,7 +259,11 @@ function analyzeModule(content) {
         params = (decl.init.params || []).map((p) => (p.type === 'Identifier' ? p.name : null)).filter(Boolean);
       }
     }
-    if (!name || !/^[A-Za-z_$][\w$]{2,}$/.test(name)) continue;
+    // Accept any real identifier. acorn-loose's error placeholder ("✖") is not a
+    // valid identifier, so it is still rejected; requiring 3+ characters instead
+    // would disqualify every symbol in a minified rollup/Vite bundle, which is
+    // exactly the input this workspace is documented to promote from.
+    if (!name || !/^[A-Za-z_$][\w$]*$/.test(name)) continue;
     const source = code.slice(node.start, node.end);
     if (source.split('\n').length > 80) continue;
     const refs = new Set(
@@ -431,10 +541,16 @@ async function writeWorkspace(outputDir, linkedDir, selected, skipped, droppedFo
     droppedForCap,
   };
   await fsp.writeFile(path.join(outputDir, 'PROMOTION_MANIFEST.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+  // The level is earned by promoted content, not by the scaffolding around it.
+  // An empty playground is still a linked-recovery artifact.
+  const reachedLab = selected.length > 0;
   await fsp.writeFile(path.join(outputDir, 'RECOVERY_LEVEL.json'), JSON.stringify({
     tool: 'jsmap editable-lab',
-    status: 'editable-lab',
-    description: 'Promoted functions run in a hot-reloading playground; this is not an independent source application.',
+    status: reachedLab ? 'editable-lab' : 'linked-recovery',
+    promotedCount: selected.length,
+    description: reachedLab
+      ? 'Promoted functions run in a hot-reloading playground; this is not an independent source application.'
+      : 'No function met the promotion criteria, so this workspace is empty scaffolding; the capture is still at linked-recovery.',
   }, null, 2) + '\n', 'utf8');
   await fsp.writeFile(path.join(outputDir, 'README.md'), readme(manifest), 'utf8');
 }
