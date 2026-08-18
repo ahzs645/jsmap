@@ -82,6 +82,10 @@ async function main() {
         ),
         entry('GET', 'https://app.test/events', response(200, 'text/event-stream', 'event: ready\ndata: yes\n\n')),
         entry('GET', 'https://app.test/socket', response(101, 'application/octet-stream', ''), { _resourceType: 'websocket' }),
+        // Real HAR exporters record WebSockets with ws://wss:// URLs (and frames
+        // under _webSocketMessages). Before the scheme-aware fix this was bucketed
+        // as "other" and never flagged as an unsupported-protocol gap.
+        entry('GET', 'wss://app.test/live', response(101, 'application/octet-stream', ''), { _webSocketMessages: [{ type: 'send', data: 'hi' }] }),
         entry('GET', 'https://basic_user:TOP_SECRET_BASIC@app.test/basic', response(200, 'application/json', '{"ok":true}')),
         entry('GET', 'https://cdn.test/fonts/local.woff2', response(200, 'font/woff2', 'font-bytes')),
       ],
@@ -107,8 +111,9 @@ async function main() {
   assert.equal(manifest.redactions.responseHeaders, 1);
   assert.equal(manifest.redactions.requestBodiesOmitted, 1);
   assert.equal(manifest.redactions.urlCredentials, 1);
-  assert.equal(manifest.protocols.websocket, 1);
+  assert.equal(manifest.protocols.websocket, 2);
   assert.equal(manifest.protocols.eventStream, 1);
+  assert.equal(manifest.protocols.other, 0, 'ws://wss:// handshakes must count as websocket, not other');
   assert(manifest.warnings.some((warning) => warning.code === 'websocket-frames-not-imported'));
   assert(manifest.warnings.some((warning) => warning.code === 'event-stream-replayed-as-snapshot'));
 

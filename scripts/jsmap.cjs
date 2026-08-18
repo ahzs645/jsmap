@@ -206,6 +206,12 @@ Commands:
       and recovery-level reporting. Options: --framework auto|vite|next|webpack|unknown,
       --repair-wasm, --allow-empty, --force.
 
+  mitm-verify <dir> [--json <out>] [--max-bytes <n>] [--allow-secrets] [--quiet]
+      Safety gate: scan an imported capture (or any recovered dir) for
+      credential-shaped secrets in response bodies/route maps and verify the MITM
+      manifest's privacy invariants. Masks matches and exits non-zero on
+      high-severity findings so it can gate sharing or committing a capture.
+
   rename-plan <linked-rebuild-dir> [--scope promoted|recovered] [--top N]
       Suggest conservative local variable/parameter renames with confidence,
       evidence, risk, and minifiedAlias metadata. Defaults to promoted modules.
@@ -689,6 +695,10 @@ function main() {
       break;
     case 'mitm-recover':
       runScript('import-mitm-capture.cjs', ['recover', ...subArgs]);
+      break;
+    case 'mitm-verify':
+    case 'verify-capture':
+      runScript('verify-mitm-capture.cjs', subArgs);
       break;
     case 'editable-lab':
       runScript('generate-editable-workspace.cjs', subArgs);

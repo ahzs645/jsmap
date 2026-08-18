@@ -34,6 +34,14 @@ Generate a runnable linked rebuild from a recovery workspace:
 node scripts/jsmap.cjs rebuild ./recovered-site ./recovered-site-linked --force
 ```
 
+`rebuild` links the captured SPA entry to recovered chunks. It prefers Vite's
+`/assets/<name>.js` layout but also accepts any same-origin `<script
+type="module">` entry — Astro's `/_astro/<name>.js`, per-route app bundles such
+as `/<app>/index.js`, or webpack `/static/js/<name>.js` — so non-Vite and
+multi-app captures reach `linked-recovery` too. External/CDN scripts (analytics
+beacons, etc.) are ignored. Point `--html <file>` at the page whose entry you
+want to link when a capture ships more than one app.
+
 Rank the linked parts for human/agent module promotion:
 
 ```bash
@@ -162,6 +170,28 @@ not a live backend: request bodies do not distinguish responses, WebSocket frame
 are not available in HAR, server-sent events replay only as a captured snapshot,
 and browser storage/service-worker state is outside the archive. These limits are
 written as warnings instead of being silently presented as runtime parity.
+WebSocket handshakes are detected by `ws://`/`wss://` URL, `_resourceType`,
+`_webSocketMessages`, or a `101` status — real exporters record them with a
+WebSocket URL scheme — so they are always counted and flagged rather than
+mislabeled as an unknown protocol.
+
+Verify a capture before you share or commit it with `mitm-verify`, a
+defense-in-depth safety gate. `mitm-import` already strips request bodies,
+sensitive headers, URL user-info, and sensitive query values, but response bodies
+are retained and may still contain secrets. `mitm-verify` scans the stored route
+map and response bodies for credential-shaped tokens (JWTs, AWS/Google/Stripe/
+GitHub/Slack keys, bearer tokens, `Set-Cookie`, private-key blocks, and
+secret-named key/value pairs) and checks the MITM manifest's privacy invariants.
+Matches are masked (never printed in the clear), and it exits non-zero on
+high-severity findings so it can gate a pre-commit or pre-share step:
+
+```bash
+node scripts/jsmap.cjs mitm-verify ./captured-site
+node scripts/jsmap.cjs mitm-verify ./recovered-site --json ./MITM_VERIFY.json
+```
+
+It also runs on any recovered directory (not just MITM captures), so it doubles
+as a last-mile secret scan before a recovered source app is published.
 
 ### Bundle-only captures (no HTML entry)
 

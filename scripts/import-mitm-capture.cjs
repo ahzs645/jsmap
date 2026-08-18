@@ -164,6 +164,20 @@ function importHar(harFile, outputDir, flags) {
       warnings.push({ entry: index, code: 'invalid-url' });
       return;
     }
+    // Detect WebSocket handshakes before the http(s) scheme guard. Real HAR
+    // exporters (Chrome DevTools, etc.) record WebSockets with ws://wss:// URLs
+    // and/or a `_webSocketMessages` array — those would otherwise be silently
+    // bucketed as "other" and never flagged, hiding a real protocol gap. Frames
+    // are not importable from HAR, so count, warn (below), and skip replay.
+    const isWebSocket =
+      /^wss?:$/i.test(originalUrl.protocol) ||
+      entry._resourceType === 'websocket' ||
+      Array.isArray(entry._webSocketMessages) ||
+      response.status === 101;
+    if (isWebSocket) {
+      protocols.websocket++;
+      return;
+    }
     if (!/^https?:$/.test(originalUrl.protocol)) {
       protocols.other++;
       return;
@@ -171,7 +185,6 @@ function importHar(harFile, outputDir, flags) {
     protocols.http++;
     const mimeType = response.content?.mimeType || headerMap(response.headers).get('content-type') || 'application/octet-stream';
     if (/text\/event-stream/i.test(mimeType)) protocols.eventStream++;
-    if (entry._resourceType === 'websocket' || response.status === 101) protocols.websocket++;
     const requestSensitiveHeaders = (request.headers || []).filter((header) => SENSITIVE_HEADERS.test(header.name));
     const responseSensitiveHeaders = (response.headers || []).filter((header) => SENSITIVE_HEADERS.test(header.name));
     redactions.requestHeaders += requestSensitiveHeaders.length;

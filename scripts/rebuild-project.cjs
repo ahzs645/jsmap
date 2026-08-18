@@ -236,8 +236,30 @@ async function repairInvalidWasmAssets(publicRoot, assetBaseUrl) {
 }
 
 function findMainScript(html) {
-  return /<script\b[^>]*type=["']module["'][^>]*src=["']\/?assets\/([^"']+\.js)["'][^>]*>\s*<\/script>/i.exec(html)?.[1] ||
+  // Vite's conventional /assets/<name>.js entry is preferred and returned exactly
+  // as captured (byte-stable with existing rollup/webpack recovery behavior).
+  const viteEntry =
+    /<script\b[^>]*type=["']module["'][^>]*src=["']\/?assets\/([^"']+\.js)["'][^>]*>\s*<\/script>/i.exec(html)?.[1] ||
     /<script\b[^>]*src=["']\/?assets\/([^"']+\.js)["'][^>]*type=["']module["'][^>]*>\s*<\/script>/i.exec(html)?.[1];
+  if (viteEntry) return viteEntry;
+
+  // Generalized fallback: many real captures do not use Vite's /assets/ layout —
+  // Astro emits /_astro/<name>.js, per-route apps ship /<app>/index.js, webpack
+  // ships /static/js/<name>.js, etc. Accept any same-origin module script and
+  // return its basename so it matches the recovered chunk manifest `source`
+  // (which is also a basename). External/CDN scripts (analytics beacons, etc.)
+  // and inline module scripts are skipped.
+  for (const match of html.matchAll(/<script\b[^>]*>/gi)) {
+    const tag = match[0];
+    if (!/type=["']module["']/i.test(tag)) continue;
+    const src = /\bsrc=["']([^"']+)["']/i.exec(tag)?.[1];
+    if (!src) continue; // inline module script
+    if (/^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(src)) continue; // external/CDN/protocol-relative
+    const clean = src.split(/[?#]/)[0];
+    if (!/\.js$/i.test(clean)) continue;
+    return path.posix.basename(clean);
+  }
+  return null;
 }
 
 // Order preserved bundles the way a webpack app loads them: runtime/bootstrap
@@ -545,9 +567,10 @@ async function main() {
     mainScript = findMainScript(html);
     if (!mainScript) {
       throw new Error(
-        `Could not find a module script under /assets/*.js in ${htmlFile}.\n` +
+        `Could not find a same-origin <script type="module"> entry in ${htmlFile}.\n` +
         `'rebuild' links the captured SPA entry to recovered chunks; the HTML must reference its main bundle as ` +
-        `<script type="module" src="/assets/<name>.js">. Pass a different page with --html <file> if this is not the app entry.`,
+        `a local module script (for example <script type="module" src="/assets/<name>.js">, /_astro/<name>.js, ` +
+        `or /<app>/index.js). Pass a different page with --html <file> if this is not the app entry.`,
       );
     }
   } else {
