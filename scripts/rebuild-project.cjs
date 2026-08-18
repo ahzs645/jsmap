@@ -916,7 +916,11 @@ for (const [entry, config] of Object.entries(plan.entries)) {
 for (const [file, exportName] of Object.entries(plan.routeStubs || {})) {
   const target = path.join(outDir, file);
   const text = await fs.readFile(target, 'utf8').catch(() => '');
-  if (text && !text.trimStart().startsWith('<!DOCTYPE')) continue;
+  // Only repair a route chunk that WAS captured but came back as an HTML error
+  // document. An absent file is an uncaptured route, and writing a placeholder
+  // component for it would fabricate recovered source for a screen this capture
+  // never contained.
+  if (!text || !text.trimStart().startsWith('<!DOCTYPE')) continue;
   await fs.writeFile(target, [
     "import { j as jsxRuntimeExports } from './vendor-react-odnmRmss.js';",
     \`function \${exportName}() {\`,

@@ -253,8 +253,23 @@ function mergeDependencyEvidence(items) {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// jsmap writes its own reports (recovery-workflow/, recovery/, RECOVERY_LEVEL.*,
+// .jsmap-mitm/, …) and those reports name npm packages in prose. When a previous
+// jsmap run wrote them into the capture directory, a later `recover` would scan
+// them back in and "infer" a dependency from its own output — a self-contamination
+// loop that reported react-router-dom for an app containing no React at all.
+// Capture evidence must come only from captured files.
+const JSMAP_GENERATED_EVIDENCE = /(?:^|\/)(?:recovery-workflow|recovery|packages|\.jsmap-mitm|\.jsmap-promote-preview|node_modules)\/|(?:^|\/)(?:RECOVERY_LEVEL|QUALITY_AUDIT|SOURCE_PROVENANCE|ASSET_PROVENANCE|PROMOTION_MANIFEST|WORKFLOW_REPORT|MITM_CAPTURE|ROUTE_MAP|recovery-[\w-]+|extraction-plan|stats-after)\.(?:json|md)$/i;
+
+function isJsmapGeneratedArtifact(rel) {
+  return JSMAP_GENERATED_EVIDENCE.test(toPosix(rel));
+}
+
 function detectDependencies(filesByRel, sourceMapEvidence = []) {
-  const allText = Object.values(filesByRel).join('\n');
+  const capturedOnly = Object.entries(filesByRel)
+    .filter(([rel]) => !isJsmapGeneratedArtifact(rel))
+    .map(([, text]) => text);
+  const allText = capturedOnly.join('\n');
   return mergeDependencyEvidence([
     ...detectDependencyFingerprints(allText),
     ...sourceMapEvidence.flatMap((item) => item.packages),
@@ -262,7 +277,8 @@ function detectDependencies(filesByRel, sourceMapEvidence = []) {
 }
 
 async function collectSourceMapEvidence(rootDir) {
-  const files = (await walkDirectory(rootDir)).filter((file) => /\.map$/i.test(file));
+  const files = (await walkDirectory(rootDir)).filter((file) =>
+    /\.map$/i.test(file) && !isJsmapGeneratedArtifact(toPosix(path.relative(rootDir, file))));
   const evidence = [];
 
   for (const file of files) {
