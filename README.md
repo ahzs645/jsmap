@@ -491,6 +491,11 @@ Useful generic signals currently include:
   inherited bridge hints, content symbols, and filenames
 - declaration modules: one source-like top-level declaration per file where
   possible, with manifest `declarations` and `sourceCandidate` metadata
+- custom elements: declaration parts are named after the tag their class
+  registers, read from both `customElements.define("tag", Klass)` and esbuild's
+  compiled `@customElement` decorator (`Klass = __decorateClass([ce("tag")], Klass)`);
+  the manifest records `customElementTag` plus the `customElementEvidence`
+  (binding, registration shape, and the input line that proved it)
 - quality audit: warnings and suggested actions for risky or incomplete recovery
   areas that need human/AI judgment
 - recovery todo: prioritized patch surfaces, candidate files, and done criteria

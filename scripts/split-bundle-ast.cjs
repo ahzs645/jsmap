@@ -153,6 +153,219 @@ function nodeLineCount(lineIndex, node) {
   return offsetToLine(lineIndex, node.end) - offsetToLine(lineIndex, node.start) + 1;
 }
 
+// ── Custom Element Registrations ──
+//
+// Web-component bundles name every class after its registered tag, which is far
+// more informative than the minified binding the splitter would otherwise use.
+// Two registration shapes occur and both have to be read:
+//
+//   1. `customElements.define("gesso-button", Y)` — the direct call.
+//   2. `rs = Br([se("knit-section")], rs)` — esbuild's compiled form of the
+//      `@customElement("knit-section")` class decorator, where `Br` is the
+//      module-local `__decorateClass` helper and `se` the decorator factory.
+//
+// In decorator-based codebases shape 2 carries the large majority of the
+// registrations, so a scan that only matches `customElements.define` sees a
+// small fraction of the components.
+
+/** Registration shapes, recorded verbatim as the evidence for a tag name. */
+const CUSTOM_ELEMENT_SHAPES = {
+  define: 'customElements.define',
+  decorator: 'decorate-class-decorator',
+  alias: 'class-alias',
+};
+
+/** A custom element name is lowercase and must contain a hyphen. */
+const CUSTOM_ELEMENT_TAG_RE = /^[a-z][a-z0-9._]*-[a-z0-9._-]*$/;
+
+/** Hyphenated names the HTML spec reserves; these are never custom elements. */
+const RESERVED_ELEMENT_TAGS = new Set([
+  'annotation-xml', 'color-profile', 'font-face', 'font-face-src',
+  'font-face-uri', 'font-face-format', 'font-face-name', 'missing-glyph',
+]);
+
+function isCustomElementTag(value) {
+  return typeof value === 'string' &&
+    value.length >= 3 &&
+    CUSTOM_ELEMENT_TAG_RE.test(value) &&
+    !RESERVED_ELEMENT_TAGS.has(value);
+}
+
+/**
+ * Generic AST walk, iterative on purpose: minified chunks nest deeply enough
+ * that a recursive walk can overflow the stack, which this splitter treats as a
+ * fatal parse failure.
+ */
+function walkAst(root, visit) {
+  const stack = [root];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node || typeof node.type !== 'string') continue;
+    visit(node);
+    for (const key of Object.keys(node)) {
+      if (key === 'type' || key === 'start' || key === 'end' || key === 'loc' || key === 'range') continue;
+      const value = node[key];
+      if (Array.isArray(value)) {
+        for (const child of value) if (child && typeof child.type === 'string') stack.push(child);
+      } else if (value && typeof value.type === 'string') {
+        stack.push(value);
+      }
+    }
+  }
+}
+
+/** Shape 1: `customElements.define("tag", Klass)` (also `window.customElements`). */
+function readDefineRegistration(node) {
+  if (node.type !== 'CallExpression') return null;
+  const callee = node.callee;
+  if (!callee || callee.type !== 'MemberExpression' || callee.computed) return null;
+  if (callee.property?.name !== 'define') return null;
+  const object = callee.object;
+  const objectName = object?.type === 'Identifier'
+    ? object.name
+    : (object?.type === 'MemberExpression' && !object.computed ? object.property?.name : null);
+  if (objectName !== 'customElements') return null;
+
+  const [tagArg, classArg] = node.arguments;
+  if (!tagArg || tagArg.type !== 'Literal' || !isCustomElementTag(tagArg.value)) return null;
+  // An inline `class extends …` has no binding to rename; only identifiers help.
+  if (!classArg || classArg.type !== 'Identifier') return null;
+  return { identifier: classArg.name, tag: tagArg.value, shape: CUSTOM_ELEMENT_SHAPES.define };
+}
+
+/** Shape 2: `Klass = __decorateClass([customElement("tag"), …], Klass)`. */
+function readDecoratorRegistration(node) {
+  if (node.type !== 'AssignmentExpression' || node.operator !== '=') return null;
+  if (node.left.type !== 'Identifier') return null;
+  const call = node.right;
+  if (!call || call.type !== 'CallExpression' || call.arguments.length !== 2) return null;
+
+  const [decorators, target] = call.arguments;
+  if (decorators.type !== 'ArrayExpression') return null;
+  // The class decorator form re-assigns the decorated class to its own binding;
+  // the member forms (`__decorateClass([…], X.prototype, "p", 2)`) take 4 args.
+  if (target.type !== 'Identifier' || target.name !== node.left.name) return null;
+
+  for (const element of decorators.elements) {
+    if (!element || element.type !== 'CallExpression' || element.arguments.length !== 1) continue;
+    const [tagArg] = element.arguments;
+    if (!tagArg || tagArg.type !== 'Literal' || !isCustomElementTag(tagArg.value)) continue;
+    return {
+      identifier: node.left.name,
+      tag: tagArg.value,
+      shape: CUSTOM_ELEMENT_SHAPES.decorator,
+      decorator: element.callee?.type === 'Identifier' ? element.callee.name : null,
+    };
+  }
+  return null;
+}
+
+/**
+ * Scan a parsed chunk once for every custom element registration.
+ *
+ * Returns `byIdentifier` (minified binding -> registration evidence) for naming
+ * declaration sections, and `byStatementStart` (top-level statement `start` ->
+ * registrations inside it) for naming the side-effect chunks that hold the
+ * registration statements themselves.
+ *
+ * A binding registered under two different tags is dropped from `byIdentifier`:
+ * minifiers reuse short names across module scopes, and a wrong tag is worse
+ * than a minified one.
+ */
+function collectCustomElementRegistrations(ast) {
+  const byIdentifier = new Map();
+  const byStatementStart = new Map();
+  const conflicting = new Set();
+  let total = 0;
+
+  for (const statement of ast.body) {
+    const found = [];
+    walkAst(statement, (node) => {
+      const registration = readDefineRegistration(node) || readDecoratorRegistration(node);
+      if (registration) found.push({ ...registration, start: node.start });
+    });
+    if (found.length === 0) continue;
+    found.sort((a, b) => a.start - b.start);
+    byStatementStart.set(statement.start, found);
+    total += found.length;
+    for (const registration of found) {
+      const existing = byIdentifier.get(registration.identifier);
+      if (!existing) byIdentifier.set(registration.identifier, registration);
+      else if (existing.tag !== registration.tag) conflicting.add(registration.identifier);
+    }
+  }
+  for (const identifier of conflicting) byIdentifier.delete(identifier);
+
+  // esbuild sometimes registers through an alias (`let Vo = M;` followed by
+  // `customElements.define("gesso-select", Vo)`). Carry the tag back to the
+  // class binding when that binding has no registration of its own.
+  for (const statement of ast.body) {
+    if (statement.type !== 'VariableDeclaration') continue;
+    for (const declarator of statement.declarations) {
+      if (declarator.id?.type !== 'Identifier' || declarator.init?.type !== 'Identifier') continue;
+      const aliased = byIdentifier.get(declarator.id.name);
+      const targetName = declarator.init.name;
+      if (!aliased || byIdentifier.has(targetName) || conflicting.has(targetName)) continue;
+      byIdentifier.set(targetName, {
+        identifier: targetName,
+        tag: aliased.tag,
+        shape: CUSTOM_ELEMENT_SHAPES.alias,
+        aliasOf: declarator.id.name,
+        // `start` always points at the registration that names the tag; the
+        // alias hop that carried it here is recorded separately.
+        start: aliased.start,
+        aliasStart: declarator.start,
+      });
+    }
+  }
+
+  return { byIdentifier, byStatementStart, total };
+}
+
+/** Registration evidence for a declaration section, keyed by its bound names. */
+function matchDeclarationRegistration(names, registry) {
+  if (!registry || registry.byIdentifier.size === 0) return null;
+  for (const name of names) {
+    const registration = registry.byIdentifier.get(name);
+    if (registration) return registration;
+  }
+  return null;
+}
+
+/**
+ * Registration evidence for a run of side-effect statements. Only attribute the
+ * chunk when every registration it contains names the same element, so a chunk
+ * that batches several `customElements.define` calls keeps its generic name.
+ */
+function matchStatementRegistration(nodes, registry) {
+  if (!registry || registry.byStatementStart.size === 0) return null;
+  let match = null;
+  for (const node of nodes) {
+    for (const registration of registry.byStatementStart.get(node.start) || []) {
+      if (!match) match = registration;
+      else if (match.tag !== registration.tag) return null;
+    }
+  }
+  return match;
+}
+
+/** Serializable provenance for a tag-derived section name. */
+function customElementEvidence(registration, lineIndex) {
+  const evidence = { identifier: registration.identifier, shape: registration.shape };
+  if (registration.decorator) evidence.decorator = registration.decorator;
+  if (registration.aliasOf) evidence.aliasOf = registration.aliasOf;
+  // The registration often sits far from the class it names (bootstrap calls at
+  // the end of a chunk, batched `define` helpers), so the lines are recorded
+  // against the input bundle, not against the part that carries the name.
+  if (lineIndex && registration.start != null) {
+    evidence.registrationLine = offsetToLine(lineIndex, registration.start);
+  }
+  if (lineIndex && registration.aliasStart != null) {
+    evidence.aliasLine = offsetToLine(lineIndex, registration.aliasStart);
+  }
+  return evidence;
+}
+
 // ── Node Classification ──
 
 function getVarName(node) {
@@ -454,8 +667,13 @@ function getDeclarationNames(node) {
   return [];
 }
 
-function inferDeclarationSectionName(node, source) {
+function inferDeclarationSectionName(node, source, registry) {
   const names = getDeclarationNames(node);
+  // A proven custom element tag outranks the minified binding and the keyword
+  // table: it is the component's real name, taken from its own registration.
+  const registration = matchDeclarationRegistration(names, registry);
+  const tagName = registration ? slugName(registration.tag) : null;
+  if (tagName) return tagName;
   const stableName = names.find((name) => !/^[a-zA-Z_$][a-zA-Z0-9_$]?$/.test(name)) || names[0];
   if (stableName) return slugName(stableName);
   const text = source.slice(node.start, node.end);
@@ -562,6 +780,11 @@ function processDeclarationModules(source, options = {}) {
   const ast = parseSource(source);
   console.log(`  ${ast.body.length} top-level statements`);
 
+  const elementRegistry = collectCustomElementRegistrations(ast);
+  if (elementRegistry.total > 0) {
+    console.log(`  ${elementRegistry.total} custom element registration(s), ${elementRegistry.byIdentifier.size} named binding(s)`);
+  }
+
   const lineIndex = buildLineIndex(source);
   const sections = [];
   const sideEffectNodes = [];
@@ -572,11 +795,18 @@ function processDeclarationModules(source, options = {}) {
     for (let i = 0; i < chunks.length; i++) {
       const nodes = chunks[i];
       const text = nodes.map((node) => source.slice(node.start, node.end)).join('\n');
+      // Registration statements (`X = __decorateClass([customElement("t")], X)`,
+      // static styles, property decorators) land here, so name the chunk for the
+      // element it registers instead of guessing from the keyword table.
+      const registration = matchStatementRegistration(nodes, elementRegistry);
       sections.push({
-        name: inferDomainName(text) || (chunks.length === 1 ? 'side-effects' : `side-effects-${i + 1}`),
+        name: (registration && slugName(registration.tag)) ||
+          inferDomainName(text) ||
+          (chunks.length === 1 ? 'side-effects' : `side-effects-${i + 1}`),
         nodes,
         runnable: false,
         sourceCandidate: true,
+        customElement: registration,
       });
     }
     sideEffectNodes.length = 0;
@@ -603,7 +833,8 @@ function processDeclarationModules(source, options = {}) {
       }
     }
 
-    const declarationName = inferDeclarationSectionName(node, source);
+    const declarationName = inferDeclarationSectionName(node, source, elementRegistry);
+    const registration = matchDeclarationRegistration(getDeclarationNames(node), elementRegistry);
     const nodeLines = nodeLineCount(lineIndex, node);
     const isNamedDeclaration = getDeclarationNames(node).length > 0 ||
       node.type === 'FunctionDeclaration' ||
@@ -623,6 +854,7 @@ function processDeclarationModules(source, options = {}) {
             runnable: false,
             sourceCandidate: true,
             largeDeclaration: true,
+            customElement: registration,
           });
         }
       } else {
@@ -631,6 +863,7 @@ function processDeclarationModules(source, options = {}) {
           nodes: [node],
           runnable: false,
           sourceCandidate: true,
+          customElement: registration,
         });
       }
       continue;
@@ -674,6 +907,10 @@ function processDeclarationModules(source, options = {}) {
       runnable: section.runnable,
       sourceCandidate: section.sourceCandidate,
       largeDeclaration: section.largeDeclaration,
+      customElementTag: section.customElement?.tag,
+      customElementEvidence: section.customElement
+        ? customElementEvidence(section.customElement, lineIndex)
+        : undefined,
       runtimeSignals: runtime ? [runtime] : [],
       semanticBoundary: section.semanticBoundary ?? true,
     };
@@ -976,6 +1213,8 @@ async function main() {
     if (file.parseFallbackReason) info.parseFallbackReason = file.parseFallbackReason;
     if (file.sourceCandidate) info.sourceCandidate = true;
     if (file.largeDeclaration) info.largeDeclaration = true;
+    if (file.customElementTag) info.customElementTag = file.customElementTag;
+    if (file.customElementEvidence) info.customElementEvidence = file.customElementEvidence;
     if (file.declarations?.length) info.declarations = file.declarations;
     if (file.runtimeSignals?.length) info.runtimeSignals = file.runtimeSignals;
     manifest.push(info);

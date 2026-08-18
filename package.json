@@ -39,6 +39,7 @@
     "test:evidence-isolation": "node scripts/test-evidence-isolation.cjs",
     "test:source-app-workflow": "node scripts/test-source-app-workflow.cjs",
     "test:deobfuscation-tools": "node scripts/test-deobfuscation-tools.cjs",
+    "test:custom-element-naming": "node scripts/test-custom-element-naming.cjs",
     "split:bundle": "node scripts/split-bundle-ast.cjs"
   },
   "dependencies": {
