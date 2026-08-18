@@ -196,6 +196,35 @@ function isStrictlyParseable(code) {
   return false;
 }
 
+// Stage output gate. Every transform in this pipeline is heuristic, and a
+// transform that turns parseable JavaScript into unparseable text is strictly
+// worse than no transform at all — the tool would report success while emitting
+// code nothing can load. Observed on a real capture: wakaru's `un-jsx` rule
+// rewrote ordinary Lit code into JSX (`this.el = <D_1 {...i} />`) inside a plain
+// `.js` file, and the scope-blind renamer collapsed distinct bindings onto one
+// name. Both were reported as successful stages.
+//
+// Only reject when the PREVIOUS text parsed and the CANDIDATE does not; a file
+// that never parsed (already-corrupt capture, genuine .jsx source) is left to the
+// other repair paths rather than being blocked here.
+function acceptStageOutput(previous, candidate, stage, warnings) {
+  if (!candidate || candidate === previous) return previous;
+  if (!isJavaScriptLikeStage(stage)) return candidate;
+  if (isStrictlyParseable(previous) && !isStrictlyParseable(candidate)) {
+    warnings?.push({
+      stage,
+      message: `${stage} output stopped parsing as JavaScript; keeping the previous text instead.`,
+      code: 'stage-output-rejected-unparseable',
+    });
+    return previous;
+  }
+  return candidate;
+}
+
+function isJavaScriptLikeStage(stage) {
+  return stage !== 'prettier-css' && stage !== 'prettier-html';
+}
+
 // Repair beautifier damage only when the input does not parse but the repaired
 // version does. This is conservative: valid code is never touched, and a partial
 // repair that still does not parse is discarded. Returns { code, repairs, total }
@@ -277,6 +306,20 @@ async function formatJSWithPrettier(content) {
 
 function inferVariableRenames(code) {
   const renames = new Map();
+  // A target name may be claimed by at most one source identifier. The previous
+  // `!renames.has(varName)` guard only checked the KEY, so a bundle where both
+  // `i.preventDefault()` and `t.target` appear mapped BOTH `i` and `t` to
+  // `event`. When those bindings shared a scope the result was
+  // `function q(event, e) { const event = {}; for (const event of ...) }` —
+  // "Identifier 'event' has already been declared". That corrupted 221 of 3459
+  // recovered parts on a real capture while every stage still reported success.
+  const claimedTargets = new Set();
+  const claim = (varName, target) => {
+    if (!varName || varName.length !== 1) return;
+    if (renames.has(varName) || claimedTargets.has(target)) return;
+    renames.set(varName, target);
+    claimedTargets.add(target);
+  };
 
   // Event handler parameters: (e) => { e.preventDefault(); e.target ... }
   const eventPatterns = [
@@ -287,10 +330,7 @@ function inferVariableRenames(code) {
   for (const pattern of eventPatterns) {
     let match;
     while ((match = pattern.exec(code)) !== null) {
-      const varName = match[1];
-      if (varName && varName.length === 1 && !renames.has(varName)) {
-        renames.set(varName, 'event');
-      }
+      claim(match[1], 'event');
     }
   }
 
@@ -300,10 +340,7 @@ function inferVariableRenames(code) {
   {
     let match;
     while ((match = domPatterns.exec(code)) !== null) {
-      const varName = match[1];
-      if (varName && varName.length === 1 && !renames.has(varName)) {
-        renames.set(varName, 'element');
-      }
+      claim(match[1], 'element');
     }
   }
 
@@ -313,10 +350,7 @@ function inferVariableRenames(code) {
   {
     let match;
     while ((match = docPatterns.exec(code)) !== null) {
-      const varName = match[1];
-      if (varName && varName.length === 1 && !renames.has(varName)) {
-        renames.set(varName, 'document');
-      }
+      claim(match[1], 'document');
     }
   }
 
@@ -326,10 +360,7 @@ function inferVariableRenames(code) {
   {
     let match;
     while ((match = fetchPatterns.exec(code)) !== null) {
-      const varName = match[1];
-      if (varName && varName.length === 1 && !renames.has(varName)) {
-        renames.set(varName, 'response');
-      }
+      claim(match[1], 'response');
     }
   }
 
@@ -338,10 +369,7 @@ function inferVariableRenames(code) {
   {
     let match;
     while ((match = errorCatchPattern.exec(code)) !== null) {
-      const varName = match[1];
-      if (varName && varName.length === 1) {
-        renames.set(varName, 'error');
-      }
+      claim(match[1], 'error');
     }
   }
 
@@ -424,6 +452,15 @@ function applyVariableRenames(code, renames) {
   for (const edit of edits) {
     result = result.slice(0, edit.start) + edit.text + result.slice(edit.end);
   }
+
+  // Parse gate. The renamer is heuristic and scope-blind: it rewrites a name in
+  // every scope at once, so a target can still land next to an existing binding
+  // of that name. Never hand back code that stopped parsing — a recovery tool
+  // emitting invalid JavaScript while reporting success is worse than one that
+  // leaves identifiers minified. Note the guard above uses acorn-loose, which is
+  // error-tolerant and never throws, so it cannot detect this; only a strict
+  // parse can.
+  if (isStrictlyParseable(code) && !isStrictlyParseable(result)) return code;
   return result;
 }
 
@@ -583,8 +620,9 @@ async function transformJavaScript(relativePath, content, options = {}) {
         `webcrack(${relativePath})`,
       ));
       const normalized = normalizeCode(result.code);
-      if (normalized && normalized !== normalizeCode(output)) {
-        output = normalized;
+      const accepted = acceptStageOutput(output, normalized, 'webcrack', warnings);
+      if (accepted && accepted !== normalizeCode(output)) {
+        output = accepted;
         steps.push('webcrack');
         changed = true;
       }
@@ -609,8 +647,9 @@ async function transformJavaScript(relativePath, content, options = {}) {
         `wakaru(${relativePath})`,
       ));
       const normalized = normalizeCode(result.code);
-      if (normalized && normalized !== normalizeCode(output)) {
-        output = normalized;
+      const accepted = acceptStageOutput(output, normalized, 'wakaru', warnings);
+      if (accepted && accepted !== normalizeCode(output)) {
+        output = accepted;
         steps.push('wakaru');
         changed = true;
       }
