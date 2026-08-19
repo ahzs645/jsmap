@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
+const crypto = require('node:crypto');
 const http = require('node:http');
 const https = require('node:https');
 const path = require('node:path');
@@ -12,7 +13,7 @@ const args = process.argv.slice(3);
 
 function usage() {
   console.log(`Usage:
-  jsmap harness <recovery-dir> [--framework next]
+  jsmap harness <recovery-dir> [--framework next] [--replay-policy <reviewed.json>]
   jsmap next-doctor <recovery-dir>
   jsmap shim-api <recovery-dir> [--record] [--from-browser-log <file>]
   jsmap shim-ui <recovery-dir>
@@ -29,6 +30,7 @@ function parseFlags(argv) {
       const key = arg.slice(2);
       if (key === 'record') flags.record = true;
       else if (key === 'framework') flags.framework = argv[++i];
+      else if (key === 'replay-policy') flags.replayPolicy = argv[++i];
       else if (key === 'from-browser-log') flags.fromBrowserLog = argv[++i];
       else if (key === 'expect-text') {
         flags.expectText ||= [];
@@ -104,10 +106,68 @@ function mime(filePath) {
     '.js': 'text/javascript; charset=utf-8',
     '.json': 'application/json; charset=utf-8',
     '.mjs': 'text/javascript; charset=utf-8',
+    '.mp4': 'video/mp4',
     '.svg': 'image/svg+xml',
     '.wasm': 'application/wasm',
+    '.webm': 'video/webm',
     '.woff2': 'font/woff2',
   }[ext] || 'application/octet-stream';
+}
+
+const REPLAY_KINDS = new Set([
+  'captured-evidence',
+  'captured-media',
+  'captured-third-party',
+  'offline-noop',
+  'synthetic-local-entitlement',
+  'synthetic-local-identity',
+  'synthetic-local-mutation',
+  'synthetic-local-state',
+  'synthetic-route-adapter',
+]);
+
+function validateReplayPolicy(policy, recoveryRoot) {
+  if (!policy || policy.version !== 1) throw new Error('Replay policy must have version: 1.');
+  if (policy.review?.status !== 'approved' || !policy.review?.reviewer || !policy.review?.reviewedAt) {
+    throw new Error('Replay policy requires an approved review with reviewer and reviewedAt.');
+  }
+  const opaqueSecret = /(?:^|[.])eyJ[A-Za-z0-9_-]{20,}[.][A-Za-z0-9_-]{20,}|\b[A-Za-z0-9_-]{96,}\b/;
+  for (const response of policy.responses || []) {
+    if (!response.method || !response.origin || !response.path || !REPLAY_KINDS.has(response.kind)) {
+      throw new Error('Every replay response requires method, origin, path, and an approved kind.');
+    }
+    if (response.containsPrivateData !== false) {
+      throw new Error(`Replay response ${response.method} ${response.path} is not marked containsPrivateData:false.`);
+    }
+    const serialized = JSON.stringify(response.body ?? '');
+    if (opaqueSecret.test(serialized)) throw new Error(`Replay response ${response.method} ${response.path} contains an opaque secret-shaped value.`);
+    for (const key of ['access_token', 'game_pass']) {
+      const value = response.body && response.body[key];
+      if (value != null && !String(value).startsWith('jsmap-local-')) {
+        throw new Error(`Replay response ${response.method} ${response.path} must use an inert jsmap-local-* ${key}.`);
+      }
+    }
+  }
+  for (const media of policy.youtube || []) {
+    if (!media.videoId || !media.videoFile || !media.audioFile || media.kind !== 'captured-media') {
+      throw new Error('Every YouTube replay requires videoId, videoFile, audioFile, and kind: captured-media.');
+    }
+    for (const field of ['videoFile', 'audioFile']) {
+      const rel = String(media[field]);
+      if (path.isAbsolute(rel) || rel.split(/[\\/]+/).includes('..')) throw new Error(`Unsafe replay media path: ${rel}`);
+      const absolute = path.resolve(recoveryRoot, rel);
+      if (!absolute.startsWith(recoveryRoot + path.sep) || !fs.existsSync(absolute)) {
+        throw new Error(`Replay media file not found: ${absolute}`);
+      }
+      const hashField = field === 'videoFile' ? 'videoSha256' : 'audioSha256';
+      if (!/^[a-f0-9]{64}$/.test(String(media[hashField] || ''))) {
+        throw new Error(`Replay media ${media.videoId} requires ${hashField}.`);
+      }
+      const actual = crypto.createHash('sha256').update(fs.readFileSync(absolute)).digest('hex');
+      if (actual !== media[hashField]) throw new Error(`Replay media hash mismatch: ${absolute}`);
+    }
+  }
+  return policy;
 }
 
 function harnessServerSource() {
@@ -120,7 +180,11 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const captureRoot = path.resolve(root, '..', 'recovery', 'mitm-capture');
-const port = Number(process.env.PORT || process.argv[2] || 4173);
+const recoveryRoot = path.resolve(root, '..', 'recovery');
+const replayPolicyPath = path.join(recoveryRoot, 'replay-policy.json');
+const portFlagIndex = process.argv.indexOf('--port');
+const portArg = portFlagIndex >= 0 ? process.argv[portFlagIndex + 1] : process.argv[2];
+const port = Number(process.env.PORT || portArg || 4173);
 const defaultEntry = ${JSON.stringify('__JSMAP_DEFAULT_ENTRY__')};
 const shimVersion = ${JSON.stringify(String(Date.now()))};
 const types = new Map(${JSON.stringify([...new Map([
@@ -129,8 +193,10 @@ const types = new Map(${JSON.stringify([...new Map([
     ['.js', 'text/javascript; charset=utf-8'],
     ['.json', 'application/json; charset=utf-8'],
     ['.mjs', 'text/javascript; charset=utf-8'],
+    ['.mp4', 'video/mp4'],
     ['.svg', 'image/svg+xml'],
     ['.wasm', 'application/wasm'],
+    ['.webm', 'video/webm'],
     ['.woff2', 'font/woff2'],
   ])])});
 
@@ -146,6 +212,99 @@ function safeJoin(urlPath) {
   const resolved = path.resolve(root, decoded);
   if (!resolved.startsWith(root)) return root;
   return resolved;
+}
+
+let replayPolicyPromise;
+async function replayPolicy() {
+  if (!replayPolicyPromise) {
+    replayPolicyPromise = readFile(replayPolicyPath, 'utf8')
+      .then((value) => JSON.parse(value))
+      .catch(() => null);
+  }
+  return replayPolicyPromise;
+}
+
+function replayPathMatches(rulePath, pathQuery) {
+  if (String(rulePath).includes('?')) return rulePath === pathQuery;
+  return rulePath === pathQuery.split('?')[0];
+}
+
+async function maybeServeReplayOverride(req, res, origin, pathQuery) {
+  const policy = await replayPolicy();
+  if (!policy || policy.review?.status !== 'approved') return false;
+  const method = req.method || 'GET';
+  const rule = (policy.responses || []).find((candidate) =>
+    candidate.method === method && candidate.origin === origin && replayPathMatches(candidate.path, pathQuery));
+  if (rule) {
+    res.statusCode = Number(rule.status || 200);
+    res.setHeader('X-Jsmap-Replay-Kind', rule.kind);
+    if (rule.sourceSha256) res.setHeader('X-Jsmap-Source-Sha256', rule.sourceSha256);
+    res.setHeader('Cache-Control', 'no-store');
+    for (const [name, value] of Object.entries(rule.headers || {})) res.setHeader(name, value);
+    if (res.statusCode === 204 || rule.body == null) {
+      res.end();
+      return true;
+    }
+    const body = typeof rule.body === 'string' ? rule.body : JSON.stringify(rule.body);
+    if (!res.hasHeader('Content-Type')) {
+      res.setHeader('Content-Type', typeof rule.body === 'string' ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8');
+    }
+    res.setHeader('Content-Length', Buffer.byteLength(body));
+    res.end(body);
+    return true;
+  }
+  const blocked = (policy.blockedCapturedRoutes || []).some((candidate) =>
+    candidate.origin === origin && replayPathMatches(candidate.path, pathQuery));
+  if (blocked) {
+    res.statusCode = 410;
+    res.setHeader('X-Jsmap-Replay-Kind', 'blocked-private-capture');
+    res.setHeader('Cache-Control', 'no-store');
+    res.end('Captured private response blocked by reviewed replay policy.');
+    return true;
+  }
+  return false;
+}
+
+async function maybeServeReplayMedia(req, res) {
+  const requestUrl = new URL(req.url || '/', 'http://localhost');
+  const match = requestUrl.pathname.match(/^\\/__jsmap_replay_media\\/(video|audio)\\/([^/]+)$/);
+  if (!match || !['GET', 'HEAD'].includes(req.method || 'GET')) return false;
+  const policy = await replayPolicy();
+  const item = (policy?.youtube || []).find((candidate) => candidate.videoId === decodeURIComponent(match[2]));
+  if (!item) return false;
+  const field = match[1] === 'video' ? 'videoFile' : 'audioFile';
+  const typeField = match[1] === 'video' ? 'videoMime' : 'audioMime';
+  const file = path.resolve(recoveryRoot, item[field]);
+  if (!file.startsWith(recoveryRoot + path.sep)) return false;
+  const info = await stat(file);
+  const type = item[typeField] || (match[1] === 'video' ? 'video/mp4' : 'audio/webm');
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Content-Type', type);
+  res.setHeader('X-Jsmap-Replay-Kind', 'captured-media');
+  res.setHeader('Cache-Control', 'no-store');
+  let start = 0;
+  let end = info.size - 1;
+  const range = String(req.headers.range || '').match(/^bytes=(\\d*)-(\\d*)$/);
+  if (range) {
+    if (range[1]) start = Number(range[1]);
+    if (range[2]) end = Number(range[2]);
+    if (!range[1] && range[2]) start = Math.max(0, info.size - Number(range[2]));
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || start >= info.size) {
+      res.statusCode = 416;
+      res.setHeader('Content-Range', 'bytes */' + info.size);
+      res.end();
+      return true;
+    }
+    end = Math.min(end, info.size - 1);
+    res.statusCode = 206;
+    res.setHeader('Content-Range', 'bytes ' + start + '-' + end + '/' + info.size);
+  } else {
+    res.statusCode = 200;
+  }
+  res.setHeader('Content-Length', end - start + 1);
+  if (req.method === 'HEAD') res.end();
+  else createReadStream(file, { start, end }).pipe(res);
+  return true;
 }
 
 let captureRoutesPromise;
@@ -261,11 +420,17 @@ async function serveRouteBody(req, res, route) {
 async function maybeServeCapturedExchange(req, res) {
   const method = req.method || 'GET';
   const routes = await captureRoutes();
+  const policy = await replayPolicy();
+  const strict = Boolean(policy?.strictOffline);
   const requestUrl = new URL(req.url || '/', 'http://localhost');
   const externalMatch = requestUrl.pathname.match(/^\\/__jsmap_external\\/([^/]+)(\\/.*)?$/);  if (externalMatch) {
     const host = externalMatch[1];
     const rest = (externalMatch[2] || '/') + requestUrl.search;
     const pathQuery = normalizeCapturedPathQuery(rest);
+    const matchingOrigin = routes.find((candidate) =>
+      candidate.origin !== 'primary' && candidate.origin.replace(/^https?:\\/\\//, '') === host)?.origin
+      || 'https://' + host;
+    if (await maybeServeReplayOverride(req, res, matchingOrigin, pathQuery)) return true;
     const sameHost = (candidate) =>
       candidate.origin !== 'primary'
       && candidate.origin.replace(/^https?:\\/\\//, '') === host;
@@ -276,13 +441,13 @@ async function maybeServeCapturedExchange(req, res) {
       // GET-only captures (e.g. directory-tree imports) never recorded request
       // bodies, so a runtime POST/PUT to a captured GET endpoint replays the
       // captured GET response — the human-in-the-middle approximation.
-      || routes.find((candidate) => sameHost(candidate) && candidate.decodedPathQuery === pathQuery)
-      || routes.find((candidate) => sameHost(candidate) && candidate.decodedPathQuery === pathQuery.split('?')[0]);
+      || (!strict && routes.find((candidate) => sameHost(candidate) && candidate.decodedPathQuery === pathQuery))
+      || (!strict && routes.find((candidate) => sameHost(candidate) && candidate.decodedPathQuery === pathQuery.split('?')[0]));
     if (!route) {
       // Uncaptured vector tiles / map imagery: answer with empty 204 so map
       // renderers treat the tile as empty and finish loading instead of
       // stalling the boot on a failed request.
-      if (/\\.(?:pbf|mvt|png|jpe?g|webp)(?:\\?|$)/i.test(pathQuery)) {
+      if (!strict && /\\.(?:pbf|mvt|png|jpe?g|webp)(?:\\?|$)/i.test(pathQuery)) {
         res.statusCode = 204;
         res.end();
         return true;
@@ -302,11 +467,16 @@ async function maybeServeCapturedExchange(req, res) {
   return serveRouteBody(req, res, route);
 }
 
-function shimSource(externalHosts) {
+function shimSource(externalHosts, replay = null) {
   return \`
 (() => {
-  window.__JSMAP_STATIC_REQUESTS__ = window.__JSMAP_STATIC_REQUESTS__ || [];
+  const requestLog = window.__JSMAP_STATIC_REQUESTS__ || [];
+  Object.defineProperty(window, '__JSMAP_STATIC_REQUESTS__', { value: requestLog, configurable: false, writable: false });
+  const mediaPlayers = window.__JSMAP_MEDIA_PLAYERS__ || [];
+  Object.defineProperty(window, '__JSMAP_MEDIA_PLAYERS__', { value: mediaPlayers, configurable: false, writable: false });
   const EXTERNAL_HOSTS = new Set(\${JSON.stringify(externalHosts || [])});
+  const REPLAY_POLICY = \${JSON.stringify(replay || null)};
+  const STRICT_OFFLINE = Boolean(REPLAY_POLICY && REPLAY_POLICY.strictOffline);
   const toCapturedAlias = (rawUrl) => {
     try {
       const parsed = new URL(String(rawUrl), location.href);
@@ -315,9 +485,124 @@ function shimSource(externalHosts) {
     } catch { return null; }
   };
   const remember = (kind, url, status) => {
-    window.__JSMAP_STATIC_REQUESTS__.push({ at: new Date().toISOString(), kind, url: String(url), status });
-    if (window.__JSMAP_STATIC_REQUESTS__.length > 500) window.__JSMAP_STATIC_REQUESTS__.shift();
+    requestLog.push({ at: new Date().toISOString(), kind, url: String(url), status });
+    if (requestLog.length > 500) requestLog.shift();
   };
+  const isExternal = (rawUrl) => {
+    try {
+      const parsed = new URL(String(rawUrl), location.href);
+      return /^https?:$/.test(parsed.protocol) && parsed.origin !== location.origin;
+    } catch { return false; }
+  };
+  const mediaById = new Map((REPLAY_POLICY && REPLAY_POLICY.youtube || []).map((item) => [item.videoId, item]));
+  if (mediaById.size) {
+    const states = { UNSTARTED: -1, ENDED: 0, PLAYING: 1, PAUSED: 2, BUFFERING: 3, CUED: 5 };
+    class JsmapYouTubePlayer {
+      constructor(frame, options = {}) {
+        this.frame = frame;
+        this.events = options.events || {};
+        const match = String(frame.src || '').match(/\\\\/embed\\\\/([^/?#]+)/);
+        this.videoId = match ? decodeURIComponent(match[1]) : '';
+        this.config = mediaById.get(this.videoId);
+        this.volume = 100;
+        this.destroyed = false;
+        this.ready = false;
+        this.video = document.createElement('video');
+        this.audio = document.createElement('audio');
+        this.video.className = 'jsmap-youtube-replay';
+        Object.assign(this.video.style, { position: 'absolute', inset: '0', width: '100%', height: '100%', objectFit: 'contain', background: '#000', zIndex: '1' });
+        this.video.playsInline = true;
+        this.video.muted = true;
+        this.audio.preload = this.video.preload = 'auto';
+        const parent = frame.parentElement;
+        if (parent && getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
+        frame.style.visibility = 'hidden';
+        frame.src = 'about:blank';
+        if (parent) parent.insertBefore(this.video, frame.nextSibling);
+        this.audio.hidden = true;
+        if (parent) parent.appendChild(this.audio);
+        mediaPlayers.push(this);
+        if (!this.config) {
+          queueMicrotask(() => this.events.onError && this.events.onError({ data: 100 }));
+          return;
+        }
+        this.video.src = '/__jsmap_replay_media/video/' + encodeURIComponent(this.videoId);
+        this.audio.src = '/__jsmap_replay_media/audio/' + encodeURIComponent(this.videoId);
+        const ready = () => {
+          if (this.ready || this.destroyed || this.audio.readyState < 1 || this.video.readyState < 1) return;
+          this.ready = true;
+          this.events.onReady && this.events.onReady({ target: this });
+        };
+        this.audio.addEventListener('loadedmetadata', ready);
+        this.video.addEventListener('loadedmetadata', ready);
+        this.audio.addEventListener('playing', () => this.emitState(states.PLAYING));
+        this.audio.addEventListener('pause', () => !this.audio.ended && this.emitState(states.PAUSED));
+        this.audio.addEventListener('waiting', () => this.emitState(states.BUFFERING));
+        this.audio.addEventListener('ended', () => this.emitState(states.ENDED));
+        this.timer = setInterval(() => {
+          if (!this.audio.paused && Math.abs(this.video.currentTime - this.audio.currentTime) > 0.2) this.video.currentTime = this.audio.currentTime;
+        }, 250);
+      }
+      emitState(data) {
+        if (!this.destroyed && this.events.onStateChange) this.events.onStateChange({ data, target: this });
+      }
+      async playVideo() {
+        if (!this.config) return;
+        this.video.currentTime = this.audio.currentTime;
+        try {
+          await Promise.all([this.video.play(), this.audio.play()]);
+        } catch (error) {
+          this.video.pause();
+          this.audio.pause();
+          remember('youtube-autoplay-blocked', this.videoId, error && error.message || 'blocked');
+          if (this.events.onAutoplayBlocked) this.events.onAutoplayBlocked({ target: this });
+        }
+      }
+      pauseVideo() { this.video.pause(); this.audio.pause(); }
+      seekTo(time) {
+        const next = Math.max(0, Number(time) || 0);
+        this.video.currentTime = next;
+        this.audio.currentTime = next;
+      }
+      getCurrentTime() { return Number(this.audio.currentTime || 0); }
+      getDuration() {
+        const observed = Math.max(Number(this.audio.duration || 0), Number(this.video.duration || 0));
+        return Number.isFinite(observed) && observed > 0 ? observed : Number(this.config.durationMs || 0) / 1000;
+      }
+      setVolume(value) {
+        this.volume = Math.max(0, Math.min(100, Number(value) || 0));
+        this.audio.volume = this.volume / 100;
+      }
+      getOptions() { return []; }
+      setOption() {}
+      destroy() {
+        this.destroyed = true;
+        clearInterval(this.timer);
+        this.video.pause();
+        this.audio.pause();
+        this.video.remove();
+        this.audio.remove();
+        const index = mediaPlayers.indexOf(this);
+        if (index >= 0) mediaPlayers.splice(index, 1);
+      }
+    }
+    Object.defineProperty(window, 'YT', {
+      value: { Player: JsmapYouTubePlayer, PlayerState: states },
+      configurable: false,
+      writable: false,
+    });
+    const originalInsertBefore = Node.prototype.insertBefore;
+    Node.prototype.insertBefore = function(node, reference) {
+      if (node && node.tagName === 'SCRIPT' && /youtube\\\\.com(?:\\\\/|.*\\\\/)iframe_api(?:[?#]|$)/.test(String(node.src || ''))) {
+        remember('youtube-api-adapter', node.src, 'synthetic-route-adapter');
+        queueMicrotask(() => {
+          if (typeof window.onYouTubeIframeAPIReady === 'function') window.onYouTubeIframeAPIReady();
+        });
+        return node;
+      }
+      return originalInsertBefore.call(this, node, reference);
+    };
+  }
   const clean = () => {
     if (location.hash === '#reviewMember=undefined') history.replaceState(history.state, document.title, location.pathname + location.search);
   };
@@ -328,6 +613,10 @@ function shimSource(externalHosts) {
     let request = input;
     const url = input instanceof Request ? input.url : input;
     const alias = toCapturedAlias(url);
+    if (STRICT_OFFLINE && isExternal(url) && !alias) {
+      remember('blocked-external-fetch', url, 'blocked');
+      throw new TypeError('Blocked by jsmap strict offline replay: ' + url);
+    }
     if (alias && alias !== url) {
       remember('fetch-alias', url, 'rewritten');
       try {
@@ -348,6 +637,10 @@ function shimSource(externalHosts) {
   if (navigator.sendBeacon) {
     const original = navigator.sendBeacon.bind(navigator);
     navigator.sendBeacon = (url, data) => {
+      if (STRICT_OFFLINE && isExternal(url) && !toCapturedAlias(url)) {
+        remember('blocked-external-beacon', url, 'blocked');
+        return false;
+      }
       remember('beacon', url, 'sent');
       return original(toCapturedAlias(url) || url, data);
     };
@@ -356,6 +649,10 @@ function shimSource(externalHosts) {
   XMLHttpRequest.prototype.open = function(method, url, ...rest) {
     const alias = toCapturedAlias(url);
     this.__jsmapStaticUrl = url;
+    if (STRICT_OFFLINE && isExternal(url) && !alias) {
+      remember('blocked-external-xhr', url, 'blocked');
+      throw new DOMException('Blocked by jsmap strict offline replay', 'NetworkError');
+    }
     return originalOpen.call(this, method, alias || url, ...rest);
   };
   const originalSend = XMLHttpRequest.prototype.send;
@@ -424,13 +721,18 @@ const server = http.createServer(async (req, res) => {
       res.end();
       return;
     }
+    const policy = await replayPolicy();
+    if (policy?.strictOffline) {
+      res.setHeader('Content-Security-Policy', \"default-src 'self' data: blob:; connect-src 'self'; media-src 'self' blob:; img-src 'self' data: blob:; frame-src 'self' about:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'\");
+    }
     const pathname = new URL(req.url || '/', 'http://localhost').pathname;
     if (pathname === '/__jsmap_static_shim.js') {
       res.setHeader('Cache-Control', 'no-store, max-age=0');
       const hosts = (await externalOrigins()).map((origin) => origin.replace(/^https?:\\/\\//, ''));
-      send(res, 200, shimSource(hosts), 'text/javascript; charset=utf-8');
+      send(res, 200, shimSource(hosts, policy), 'text/javascript; charset=utf-8');
       return;
     }
+    if (await maybeServeReplayMedia(req, res)) return;
     if (await maybeServeCapturedExchange(req, res)) return;
     if (await maybeServeNextDataFallback(req, res)) return;
 
@@ -473,6 +775,15 @@ server.listen(port, '127.0.0.1', () => {
 async function commandHarness(argv) {
   const { flags, positional } = parseFlags(argv);
   const { root, publicDir } = assertRecoveryDir(positional[0]);
+  let replay = null;
+  if (flags.replayPolicy) {
+    const source = path.resolve(flags.replayPolicy);
+    replay = validateReplayPolicy(JSON.parse(fs.readFileSync(source, 'utf8')), path.join(root, 'recovery'));
+    await writeJson(path.join(root, 'recovery/replay-policy.json'), replay);
+  } else {
+    const existing = path.join(root, 'recovery/replay-policy.json');
+    if (fs.existsSync(existing)) replay = validateReplayPolicy(JSON.parse(fs.readFileSync(existing, 'utf8')), path.join(root, 'recovery'));
+  }
   const entry = findHtmlEntry(publicDir);
   if (!entry) throw new Error(`No HTML entry found under ${publicDir}`);
   const relativeEntry = slash(path.relative(publicDir, entry));
@@ -498,10 +809,17 @@ async function commandHarness(argv) {
       'captured JSON/API replay from preserved files',
       'sanitized HAR exchange replay when recovery/mitm-capture exists',
       'captured third-party origin replay under /__jsmap_external/<host>/ with URL rewriting in served text bodies',
+      ...(replay ? [
+        'reviewed synthetic/captured replay policy with diagnostic provenance headers',
+        'strict method matching and captured-private-route blocking when strictOffline is enabled',
+        'byte-range replay for extracted captured media',
+        'local YouTube Player adapter for separately captured audio/video tracks',
+      ] : []),
       'extensionless route support',
       'static _next/data JSON fallback',
       'CORS-friendly preserved runtime serving',
     ],
+    replayPolicy: replay ? 'recovery/replay-policy.json' : null,
   };
   await writeJson(path.join(root, 'recovery/static-harness.json'), report);
   console.log(`Wrote ${path.join(root, 'scripts/serve-public.mjs')}`);

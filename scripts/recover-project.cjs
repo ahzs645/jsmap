@@ -32,6 +32,7 @@ const {
   classifySourceMapContent,
   repairBeautifierDamageIfBroken,
 } = require('./lib/deobfuscation-pipeline.cjs');
+const { hasWasmMagic, looksLikeWat, assembleWat } = require('./lib/wat-repair.cjs');
 
 const SCRIPTS_DIR = __dirname;
 const DEFAULT_MAX_TRANSFORM_BYTES = 5 * 1024 * 1024;
@@ -155,14 +156,6 @@ function isWasm(filePath) {
   return /\.wasm$/i.test(filePath);
 }
 
-function hasWasmMagic(buffer) {
-  return buffer.length >= 4 &&
-    buffer[0] === 0x00 &&
-    buffer[1] === 0x61 &&
-    buffer[2] === 0x73 &&
-    buffer[3] === 0x6d;
-}
-
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -185,8 +178,7 @@ async function inferOriginFromHtml(inputDir) {
   return null;
 }
 
-async function repairWasmAssets(publicDir, origin) {
-  if (!origin || typeof fetch !== 'function') return [];
+async function repairWasmAssets(publicDir, origin, { allowNetwork = true } = {}) {
   const repaired = [];
   const files = (await walkDirectory(publicDir)).filter(isWasm);
 
@@ -195,21 +187,50 @@ async function repairWasmAssets(publicDir, origin) {
     if (hasWasmMagic(bytes)) continue;
 
     const rel = toPosix(path.relative(publicDir, file));
+
+    // Local assembly first. It needs no network, works when the origin is gone,
+    // and keeps the repaired binary derived from the captured bytes.
+    if (looksLikeWat(bytes)) {
+      const assembled = await assembleWat(bytes.toString('utf8'), rel);
+      if (assembled.ok) {
+        await fsp.writeFile(file, assembled.bytes);
+        repaired.push({
+          file: rel,
+          status: 'repaired',
+          method: 'wat-assembly',
+          source: 'captured WAT text',
+          normalizations: assembled.normalizations,
+          bytes: assembled.bytes.length,
+        });
+        continue;
+      }
+      repaired.push({ file: rel, status: 'wat-assembly-failed', reason: assembled.reason });
+    }
+
+    if (!allowNetwork || !origin || typeof fetch !== 'function') {
+      repaired.push({
+        file: rel,
+        status: 'failed',
+        reason: 'not a wasm binary, no local WAT repair available, and no origin to refetch from',
+      });
+      continue;
+    }
+
     const url = `${origin}/${rel}`;
     const response = await fetch(url);
     if (!response.ok) {
-      repaired.push({ file: rel, status: 'failed', reason: `${response.status} ${response.statusText}` });
+      repaired.push({ file: rel, status: 'failed', method: 'refetch', reason: `${response.status} ${response.statusText}` });
       continue;
     }
 
     const nextBytes = Buffer.from(await response.arrayBuffer());
     if (!hasWasmMagic(nextBytes)) {
-      repaired.push({ file: rel, status: 'failed', reason: 'remote response was not wasm binary' });
+      repaired.push({ file: rel, status: 'failed', method: 'refetch', reason: 'remote response was not wasm binary' });
       continue;
     }
 
     await fsp.writeFile(file, nextBytes);
-    repaired.push({ file: rel, status: 'repaired', source: url });
+    repaired.push({ file: rel, status: 'repaired', method: 'refetch', source: url });
   }
 
   return repaired;
@@ -2084,7 +2105,9 @@ async function writeWorkspace(outputDir, boundaries, dependencies, options, extr
       "const repoRoot = path.resolve(root, '..');",
       "const recoveryRoot = path.join(repoRoot, 'recovery', 'deobfuscated');",
       'const captureBases = discoverCaptureBases();',
-      "const port = Number(process.env.PORT || process.argv[2] || 4173);",
+      "const portFlagIndex = process.argv.indexOf('--port');",
+      "const portArg = portFlagIndex >= 0 ? process.argv[portFlagIndex + 1] : process.argv[2];",
+      "const port = Number(process.env.PORT || portArg || 4173);",
       "const types = new Map([",
       "  ['.css', 'text/css; charset=utf-8'],",
       "  ['.html', 'text/html; charset=utf-8'],",

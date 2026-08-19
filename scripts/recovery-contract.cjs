@@ -20,7 +20,19 @@ const RECOVERY_LEVELS = Object.freeze({
   },
 });
 
-const SKIP_DIRECTORIES = new Set(['.git', 'node_modules', 'dist', 'coverage']);
+// Generated capture evidence is not application source. In particular,
+// `.jsmap-mitm/external` may contain unrelated third-party webpack/Next/Vite
+// bundles; letting those participate in framework detection can route a plain
+// first-party app onto the wrong recovery workflow.
+const SKIP_DIRECTORIES = new Set([
+  '.git',
+  '.jsmap-mitm',
+  '__jsmap_external',
+  'mitm-capture',
+  'node_modules',
+  'dist',
+  'coverage',
+]);
 
 function walkFiles(root, options = {}) {
   const maxFiles = options.maxFiles || 12000;
@@ -56,6 +68,90 @@ function readSample(file, maxBytes = 512 * 1024) {
   } catch {
     return '';
   }
+}
+
+// Framework markers cluster at the two ends of a production chunk: the
+// bundler/preload prelude is emitted at the top, and chunk registrations plus
+// the sourceMappingURL comment are appended at the bottom. A single leading
+// window therefore misses the tail of every bundle larger than the window while
+// paying for a large middle section that carries no routing evidence. Sampling
+// head+tail reads fewer total bytes per file than the old 512 KiB head
+// (320 KiB) while covering both marker regions.
+const SAMPLE_HEAD_BYTES = 256 * 1024;
+const SAMPLE_TAIL_BYTES = 64 * 1024;
+// Non-empty seam so a marker cannot be forged across the head/tail splice.
+const SAMPLE_SEAM = '\n\u0000\n';
+
+function readHeadTailSample(file, headBytes = SAMPLE_HEAD_BYTES, tailBytes = SAMPLE_TAIL_BYTES) {
+  let handle = null;
+  try {
+    const size = fs.statSync(file).size;
+    handle = fs.openSync(file, 'r');
+    if (size <= headBytes + tailBytes) {
+      const buffer = Buffer.alloc(size);
+      fs.readSync(handle, buffer, 0, size, 0);
+      return buffer.toString('utf8');
+    }
+    const head = Buffer.alloc(headBytes);
+    fs.readSync(handle, head, 0, headBytes, 0);
+    const tail = Buffer.alloc(tailBytes);
+    fs.readSync(handle, tail, 0, tailBytes, size - tailBytes);
+    return `${head.toString('utf8')}${SAMPLE_SEAM}${tail.toString('utf8')}`;
+  } catch {
+    return '';
+  } finally {
+    if (handle !== null) {
+      try {
+        fs.closeSync(handle);
+      } catch {}
+    }
+  }
+}
+
+// Vite emits its modulepreload polyfill at the top of the entry chunk. Every
+// identifier in it (`relList`, the polyfill function, the link parameter) is
+// renamed by a minifier, but three pieces survive verbatim because they are
+// property names and string literals:
+//   document.createElement("link").relList
+//   relList.supports("modulepreload")
+//   if (link.ep) return; link.ep = true;   // minified: if(r.ep)return;r.ep=!0
+// Requiring all three together keeps this Vite-specific; no one of them alone
+// is a safe signal.
+const VITE_POLYFILL_RELLIST = /\.relList\b/;
+const VITE_POLYFILL_SUPPORTS = /\.supports\(\s*(["'`])modulepreload\1\s*\)/;
+const VITE_POLYFILL_EP_MARKER = /\.ep\s*=\s*(?:!0|true)\b/;
+
+const TURBOPACK_MARKER = /TURBOPACK|__turbopack|turbopack/i;
+const NEXT_MARKER = /__NEXT_DATA__|webpackChunk_N_E|\/_next\/static\//;
+const WEBPACK_MARKER = /webpackChunk|__webpack_require__/;
+const VITE_NAMED_HELPER = /__vitePreload|__vite__mapDeps/;
+const VITE_ASSET_URL = /\/assets\/[A-Za-z0-9_.-]+\.js/;
+
+// Returns the name of the strongest Vite marker in `text`, or null.
+function viteMarker(text) {
+  if (VITE_NAMED_HELPER.test(text)) return 'named-preload-helper';
+  if (
+    VITE_POLYFILL_RELLIST.test(text)
+    && VITE_POLYFILL_SUPPORTS.test(text)
+    && VITE_POLYFILL_EP_MARKER.test(text)
+  ) {
+    return 'modulepreload-polyfill';
+  }
+  if (VITE_ASSET_URL.test(text)) return 'assets-url';
+  return null;
+}
+
+// Pure content classifier shared by detectFramework and its regression tests.
+function matchFrameworkMarkers(content) {
+  const text = typeof content === 'string' ? content : '';
+  const next = NEXT_MARKER.test(text);
+  const turbopack = TURBOPACK_MARKER.test(text);
+  // A chunk that identifies itself as Next/Turbopack never contributes Vite
+  // score: Next ships Rollup-ish hashed chunks and `/assets/*.js` URLs of its
+  // own, and letting those raise viteScore is how a Next capture could be
+  // pulled off `preserved-harness-next`.
+  const vite = next || turbopack ? null : viteMarker(text);
+  return { turbopack, next, vite, webpack: WEBPACK_MARKER.test(text) };
 }
 
 function detectFramework(root, override = 'auto') {
@@ -101,23 +197,24 @@ function detectFramework(root, override = 'auto') {
     if (/(?:^|\/)assets\/[^/]+-[A-Za-z0-9_-]+\.(?:js|css)$/.test(rel)) viteScore += 2;
   }
   for (const file of candidates.slice(0, 240)) {
-    const content = readSample(file);
-    if (/TURBOPACK|__turbopack|turbopack/i.test(content)) {
+    const rel = path.relative(absoluteRoot, file).replace(/\\/g, '/');
+    const markers = matchFrameworkMarkers(readHeadTailSample(file));
+    if (markers.turbopack) {
       turbopackScore += 8;
       nextScore += 3;
-      if (evidence.length < 20) evidence.push(`turbopack:${path.relative(absoluteRoot, file).replace(/\\/g, '/')}`);
+      if (evidence.length < 20) evidence.push(`turbopack:${rel}`);
     }
-    if (/__NEXT_DATA__|webpackChunk_N_E|\/_next\/static\//.test(content)) {
+    if (markers.next) {
       nextScore += 5;
-      if (evidence.length < 20) evidence.push(`next:${path.relative(absoluteRoot, file).replace(/\\/g, '/')}`);
+      if (evidence.length < 20) evidence.push(`next:${rel}`);
     }
-    if (/__vitePreload|__vite__mapDeps|\/assets\/[A-Za-z0-9_.-]+\.js/.test(content)) {
+    if (markers.vite) {
       viteScore += 5;
-      if (evidence.length < 20) evidence.push(`vite:${path.relative(absoluteRoot, file).replace(/\\/g, '/')}`);
+      if (evidence.length < 20) evidence.push(`vite:${markers.vite}:${rel}`);
     }
-    if (/webpackChunk|__webpack_require__/.test(content)) {
+    if (markers.webpack) {
       webpackScore += 4;
-      if (evidence.length < 20) evidence.push(`webpack:${path.relative(absoluteRoot, file).replace(/\\/g, '/')}`);
+      if (evidence.length < 20) evidence.push(`webpack:${rel}`);
     }
   }
 
@@ -214,12 +311,22 @@ function detectRecoveryLevels(root) {
   return { highest, achieved, evidence, definitions: RECOVERY_LEVELS };
 }
 
-function writeJsonAndMarkdown(prefix, data, title) {
+// `sections` lets a report lead with its own tables instead of the generic
+// checks/evidence dump. Each entry is `{ heading, body: string[] }` and is
+// rendered immediately after the status line, before Framework/Checks/Evidence.
+// A reviewer has to see the report's own headline numbers first; burying them
+// under a generic checklist is how over-merging goes unnoticed.
+function writeJsonAndMarkdown(prefix, data, title, sections = []) {
   const jsonFile = `${prefix}.json`;
   const markdownFile = `${prefix}.md`;
   fs.mkdirSync(path.dirname(jsonFile), { recursive: true });
   fs.writeFileSync(jsonFile, `${JSON.stringify(data, null, 2)}\n`);
   const lines = [`# ${title}`, '', `Status: **${data.status || data.highest || 'unknown'}**`, ''];
+  for (const section of sections) {
+    if (!section || !Array.isArray(section.body)) continue;
+    if (section.heading) lines.push(`## ${section.heading}`, '');
+    lines.push(...section.body, '');
+  }
   if (data.framework) {
     lines.push(`Framework: **${data.framework.framework}**`, `Bundler: **${data.framework.bundler}**`, `Strategy: **${data.framework.strategy}**`, '');
   }
@@ -239,7 +346,10 @@ module.exports = {
   RECOVERY_LEVELS,
   detectFramework,
   detectRecoveryLevels,
+  matchFrameworkMarkers,
+  readHeadTailSample,
   readSample,
+  viteMarker,
   walkFiles,
   writeJsonAndMarkdown,
 };

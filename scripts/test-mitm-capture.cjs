@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 const assert = require('node:assert/strict');
-const { execFileSync, spawn } = require('node:child_process');
+const { execFileSync, spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const net = require('node:net');
@@ -92,6 +92,20 @@ async function main() {
     },
   };
   await fsp.writeFile(harFile, `${JSON.stringify(har)}\n`);
+
+  const protectedCapture = path.join(tempRoot, 'saved-resource-input');
+  const protectedFile = path.join(protectedCapture, 'app.test', 'index.html');
+  await fsp.mkdir(path.dirname(protectedFile), { recursive: true });
+  await fsp.writeFile(protectedFile, 'pristine source evidence\n');
+  const unsafeImport = spawnSync(
+    process.execPath,
+    [path.join(ROOT, 'scripts/jsmap.cjs'), 'mitm-import', harFile, protectedCapture, '--force'],
+    { cwd: ROOT, encoding: 'utf8' },
+  );
+  assert.notEqual(unsafeImport.status, 0, 'force alone must not replace a non-jsmap directory');
+  assert.match(`${unsafeImport.stdout}\n${unsafeImport.stderr}`, /Refusing to replace non-jsmap directory/);
+  assert.equal(await fsp.readFile(protectedFile, 'utf8'), 'pristine source evidence\n');
+  assert.equal(fs.existsSync(path.join(protectedCapture, '.jsmap-mitm')), false);
 
   execFileSync(
     process.execPath,

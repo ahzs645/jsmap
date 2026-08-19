@@ -107,6 +107,12 @@ const SKIP_NAMES = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini']);
 // filename parts (Vite hashes like hooks-E0cyEUsA.js, names like
 // is-browser.js) and must never be folded.
 const QUERY_VARIANT = /^(.+)-([0-9a-f]{10,})(\.[^.]+)$/;
+// Chrome/Safari resource-saving extensions commonly disambiguate repeated
+// request filenames with ` (N)`. These suffixes are local filesystem artifacts,
+// not URL path components. Only fold them when the unsuffixed sibling exists or
+// multiple numbered siblings prove this is a collision series, preserving a
+// legitimate lone filename such as `Chapter (1).html`.
+const NUMBERED_VARIANT = /^(.+) \((\d+)\)(\.[^.]+)$/;
 
 async function walk(dir) {
   const out = [];
@@ -124,6 +130,8 @@ async function walk(dir) {
 // names (e.g. `app-48e875f011904f53cda1.js`) keep their exact URL.
 function foldQueryVariants(relPaths) {
   const groups = new Map();
+  const numberedGroups = new Map();
+  const relPathSet = new Set(relPaths);
   for (const relPath of relPaths) {
     const dir = path.posix.dirname(relPath);
     const base = path.posix.basename(relPath);
@@ -133,10 +141,27 @@ function foldQueryVariants(relPaths) {
     const key = dir === '.' ? foldedName : `${dir}/${foldedName}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(relPath);
+
+    continue;
+  }
+  for (const relPath of relPaths) {
+    const dir = path.posix.dirname(relPath);
+    const base = path.posix.basename(relPath);
+    const match = base.match(NUMBERED_VARIANT);
+    if (!match) continue;
+    const foldedName = `${match[1]}${match[3]}`;
+    const key = dir === '.' ? foldedName : `${dir}/${foldedName}`;
+    if (!numberedGroups.has(key)) numberedGroups.set(key, []);
+    numberedGroups.get(key).push(relPath);
   }
   const folded = new Map();
   for (const [key, members] of groups) {
     if (members.length < 2) continue;
+    members.sort();
+    for (const member of members) folded.set(member, key);
+  }
+  for (const [key, members] of numberedGroups) {
+    if (!relPathSet.has(key) && members.length < 2) continue;
     members.sort();
     for (const member of members) folded.set(member, key);
   }
@@ -222,6 +247,7 @@ async function convert(savedDir, outHar, flags = {}) {
       version: '1.2',
       creator: { name: 'jsmap capture-dir-to-har', version: '1.0' },
       comment: 'Synthetic GET-only HAR rebuilt from a directory-tree capture. Query variants folded; request bodies never existed.',
+      ...(flags.origin ? { _jsmapPrimaryOrigin: new URL(flags.origin).origin } : {}),
       entries,
     },
   };

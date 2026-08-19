@@ -23,8 +23,11 @@ npm run serve
 ```
 
 Pass `--origin https://app.example` when origin inference picks a CDN or API.
-Pass `--capture-dir <dir>` to control the intermediate materialized capture.
-Existing output is never replaced unless `--force` is explicit.
+Pass `--capture-dir <capture-output-dir>` to control the disposable intermediate
+materialized capture. This is an output, never the saved-resource input.
+Existing jsmap output is never replaced unless `--force` is explicit. A
+non-empty directory that is not already a jsmap capture additionally requires
+`--replace-non-jsmap-output`, providing a separate review gate.
 
 ## Directory-tree captures
 
@@ -33,13 +36,15 @@ GET-only HAR and recovered through the same pipeline:
 
 ```bash
 node scripts/jsmap.cjs capture-dir <saved-dir> <out.har> --origin https://app.example
-node scripts/jsmap.cjs mitm-recover <out.har> ./recovered --origin https://app.example --force
+node scripts/jsmap.cjs mitm-recover <out.har> ./recovered \
+  --capture-dir ./materialized --origin https://app.example --force
 ```
 
 The converter (`scripts/capture-dir-to-har.mjs`) maps `<host>/<url-path>/<file>`
 back to URLs, re-detects MIME by content, strips `.html` from extensionless
-JSON API responses, folds `base-<longhex>.ext` query-variant siblings into one
-route, and skips `_DataURI/` and `.DS_Store`.
+JSON API responses, folds `base-<longhex>.ext` and proven `base (N).ext`
+query-variant siblings into one route, records the approved primary origin in
+the synthetic HAR, and skips `_DataURI/` and `.DS_Store`.
 
 During replay the harness serves captured third-party origins under
 `/__jsmap_external/<host>/...` and rewrites captured origins in served text
@@ -106,3 +111,7 @@ Review them before sharing or committing the workspace.
 A successful preserved replay is still `preserved-runtime`, not `source-app`.
 Use `source-plan`, `source-export`, `asset-audit`, and `source-audit` for the
 independent editable application path.
+
+See the [LingoClip offline song and game replay case study](case-studies/lingoclip-offline-replay.md)
+for an example that combines reviewed API fixtures, blocked private responses,
+reassembled UMP media, byte-range serving, and human-in-the-loop browser checks.

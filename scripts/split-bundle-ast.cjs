@@ -3,11 +3,29 @@
 /**
  * AST-aware splitter for large deobfuscated Vite/Rollup bundles.
  *
- * Uses Acorn (loose mode) to parse the file into an AST, then groups top-level
- * statements into logical modules based on CJS shim patterns, vendor signatures,
- * and size-based chunking at natural AST boundaries.
+ * Parses the file into an AST, then groups top-level statements into logical
+ * modules based on CJS shim patterns, vendor signatures, and size-based chunking
+ * at natural AST boundaries.
  *
  * Produces a directory of named .js files, a _manifest.json, and a _index.js barrel.
+ *
+ * Every emitted part is a byte range of the input. Two invariants keep those
+ * ranges honest, because a part whose range ends mid-token is not the code that
+ * was captured:
+ *
+ *   1. Ranges come from a strict parse whenever the input accepts one. The loose
+ *      parser is error-tolerant by design and reports node ranges that do not
+ *      cover the source even for input that is perfectly valid -- on a real
+ *      Lit/esbuild chunk it ended a class declaration inside the following
+ *      `__decorateClass(…, "loading", 2)` call and inside `html` templates that
+ *      nest tagged templates in `${…}`. Slicing by those ranges dropped the
+ *      token sitting on the seam.
+ *   2. Parts tile the input. Each part starts where the previous one ended, so
+ *      inter-statement trivia is preserved and no byte can fall between two
+ *      parts even if a fallback parse does report a short range.
+ *
+ * The parts are then parse-checked before the split is reported as successful
+ * (see `findUnparseableParts`).
  *
  * Usage:
  *   node scripts/split-bundle-ast.cjs <input-file> [output-dir] [--force] [--deep-huge-nodes] [--module-granularity grouped|declarations]
@@ -15,6 +33,7 @@
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const acorn = require('acorn');
 const acornLoose = require('acorn-loose');
 const {
   classifyRequireName,
@@ -102,16 +121,47 @@ function inferDomainName(sourceText) {
 
 // ── AST Helpers ──
 
+const PARSE_OPTIONS = { ecmaVersion: 'latest', sourceType: 'module' };
+
 /**
- * Parse source with Acorn's loose (tolerant) parser. Deobfuscated bundles
- * often have artifacts (duplicate const declarations, etc.) that the strict
- * parser rejects.
+ * Strict parser minus one check that cannot hold for a fragment: `export { X }`
+ * in a split part legitimately names a binding declared in a sibling part, and
+ * resolving exported names says nothing about whether the part is real
+ * JavaScript. Every syntactic rule stays on.
  */
+const FragmentParser = acorn.Parser.extend((Parser) => class extends Parser {
+  checkLocalExport() {}
+});
+
+function parseStrict(text) {
+  return FragmentParser.parse(text, PARSE_OPTIONS);
+}
+
+/**
+ * Parse a bundle, strict first.
+ *
+ * The strict parser is the only one whose node ranges can be trusted to cover
+ * the source: `acorn-loose` recovers from anything, and its recovery silently
+ * reports ranges that skip real tokens. It stays as the fallback because
+ * deobfuscated bundles do carry artifacts (duplicate `const` declarations,
+ * concatenated chunks) that no strict parser accepts, and an approximate AST is
+ * still better than no split at all -- but the emitted parts are tiled and
+ * parse-checked so a bad range cannot leave unparseable output behind.
+ *
+ * Returns the AST plus which parser produced it, so callers can tell a genuine
+ * splitter defect (strict input, unparseable part) from inherited corruption.
+ */
+function parseBundle(source) {
+  try {
+    return { ast: parseStrict(source), mode: 'strict', strictError: null };
+  } catch (error) {
+    const strictError = error instanceof Error ? error.message : String(error);
+    return { ast: acornLoose.parse(source, PARSE_OPTIONS), mode: 'loose', strictError };
+  }
+}
+
 function parseSource(source) {
-  return acornLoose.parse(source, {
-    ecmaVersion: 'latest',
-    sourceType: 'module',
-  });
+  return parseBundle(source).ast;
 }
 
 function lineCount(str) {
@@ -627,13 +677,98 @@ function subSplitBySize(nodes, lineIndex, targetLines) {
 
 // ── File Content ──
 
-function buildFileContent(nodes, source) {
-  if (nodes.length === 0) return '';
-  // Use the full range from first node start to last node end, preserving
-  // all whitespace and comments between nodes.
-  let text = source.slice(nodes[0].start, nodes[nodes.length - 1].end);
+function sliceContent(source, start, end) {
+  if (end <= start) return '';
+  // Preserves all whitespace and comments inside the range verbatim.
+  let text = source.slice(start, end);
   if (!text.endsWith('\n')) text += '\n';
   return text;
+}
+
+/**
+ * Advance a seam past the rest of its line when only whitespace remains, so a
+ * part ends with its own trailing newline instead of handing it to the next
+ * part. Stops at the first non-whitespace byte, which is what keeps the seam
+ * from swallowing a statement that shares the line.
+ */
+function seamAfter(source, end) {
+  for (let i = end; i < source.length; i++) {
+    const ch = source[i];
+    if (ch === '\n') return i + 1;
+    if (ch !== ' ' && ch !== '\t' && ch !== '\r') break;
+  }
+  return end;
+}
+
+/**
+ * Give every section an explicit `[startOffset, endOffset)` byte range and make
+ * those ranges tile the input.
+ *
+ * Sections arrive in document order carrying either AST nodes or an explicit
+ * range (huge-node fragments). A section's own range starts at its first node
+ * and ends at its last, which leaves the trivia between two sections -- and,
+ * when a fallback parse reports a short node, real code -- belonging to
+ * neither. Each section is therefore extended back to where the previous one
+ * ended, and the final section to the end of the file, so the concatenation of
+ * the parts is the input, byte for byte.
+ *
+ * This does not license a wrong range: a token stranded on a seam still lands
+ * in the wrong part, which is what `findUnparseableParts` exists to catch. It
+ * guarantees only that no captured byte is dropped on the floor.
+ */
+function sealSectionRanges(sections, source) {
+  let cursor = 0;
+  for (const section of sections) {
+    const nodeStart = section.startOffset ?? section.nodes?.[0]?.start ?? cursor;
+    const nodeEnd = section.endOffset ?? section.nodes?.[section.nodes.length - 1]?.end ?? cursor;
+    section.startOffset = Math.min(cursor, nodeStart);
+    section.endOffset = seamAfter(source, Math.max(nodeEnd, section.startOffset));
+    cursor = section.endOffset;
+  }
+  const last = sections[sections.length - 1];
+  if (last && last.endOffset < source.length) last.endOffset = source.length;
+  return sections;
+}
+
+/**
+ * Turn ordered sections into emitted parts: seal the ranges, slice the content,
+ * and record the metadata each part carries into the manifest.
+ */
+function materializeSections(sections, source, lineIndex) {
+  sealSectionRanges(sections, source);
+
+  return sections.map((section) => {
+    const content = sliceContent(source, section.startOffset, section.endOffset);
+    const startLine = offsetToLine(lineIndex, section.startOffset);
+    const endLine = offsetToLine(lineIndex, Math.max(section.startOffset, section.endOffset - 1));
+    // Runtime fingerprinting is a whole-part signal; a line-sliced inspection
+    // fragment is not a part in that sense and never carried one.
+    const runtime = section.inspectionFragment ? null : primaryRuntimeSignal(content);
+
+    const part = {
+      name: section.name,
+      content,
+      lineCount: lineCount(content),
+      startLine,
+      endLine,
+      sourceRange: [section.startOffset, section.endOffset],
+      runnable: section.runnable,
+      semanticBoundary: section.semanticBoundary ?? true,
+    };
+    if (section.fragmentOf) part.fragmentOf = section.fragmentOf;
+    if (section.embeddedRuntime) part.embeddedRuntime = section.embeddedRuntime;
+    if (section.embeddedRuntimeCategory) part.embeddedRuntimeCategory = section.embeddedRuntimeCategory;
+    if (section.inspectionFragment) part.inspectionFragment = true;
+    if (section.sourceCandidate) part.sourceCandidate = true;
+    if (section.largeDeclaration) part.largeDeclaration = true;
+    if (section.declarationNames) part.declarations = section.declarationNames;
+    if (section.customElement) {
+      part.customElementTag = section.customElement.tag;
+      part.customElementEvidence = customElementEvidence(section.customElement, lineIndex);
+    }
+    if (runtime) part.runtimeSignals = [runtime];
+    return part;
+  });
 }
 
 function getNodeIdentifier(node) {
@@ -711,14 +846,11 @@ function splitHugeNode(node, source, lineIndex, targetLines) {
     const endOffset = nextLine > endLine
       ? node.end
       : lineToOffset(lineIndex, nextLine, source.length);
-    let content = source.slice(startOffset, endOffset);
-    if (content && !content.endsWith('\n')) content += '\n';
 
     sections.push({
       name: `${runtime.filePrefix}-${String(part).padStart(3, '0')}`,
-      content,
-      startLine: cursorLine,
-      endLine: nextLine > endLine ? endLine : nextLine - 1,
+      startOffset,
+      endOffset,
       fragmentOf: runtime.identifier,
       embeddedRuntime: runtime.id,
       embeddedRuntimeCategory: runtime.category,
@@ -776,13 +908,13 @@ function createParseFallbackSections(source, reason, targetLines = PARSE_FALLBAC
 }
 
 function processDeclarationModules(source, options = {}) {
-  console.log('Parsing AST...');
-  const ast = parseSource(source);
-  console.log(`  ${ast.body.length} top-level statements`);
+  const log = options.quiet ? () => {} : console.log;
+  const ast = options.ast || parseSource(source);
+  log(`  ${ast.body.length} top-level statements`);
 
   const elementRegistry = collectCustomElementRegistrations(ast);
   if (elementRegistry.total > 0) {
-    console.log(`  ${elementRegistry.total} custom element registration(s), ${elementRegistry.byIdentifier.size} named binding(s)`);
+    log(`  ${elementRegistry.total} custom element registration(s), ${elementRegistry.byIdentifier.size} named binding(s)`);
   }
 
   const lineIndex = buildLineIndex(source);
@@ -873,48 +1005,11 @@ function processDeclarationModules(source, options = {}) {
   }
   flushSideEffects();
 
-  console.log(`  ${sections.length} declaration sections`);
-  return sections.map((section) => {
-    if (section.content != null) {
-      return {
-        name: section.name,
-        content: section.content,
-        lineCount: lineCount(section.content),
-        startLine: section.startLine,
-        endLine: section.endLine,
-        fragmentOf: section.fragmentOf,
-        embeddedRuntime: section.embeddedRuntime,
-        embeddedRuntimeCategory: section.embeddedRuntimeCategory,
-        runnable: section.runnable,
-        inspectionFragment: section.inspectionFragment,
-        semanticBoundary: section.semanticBoundary,
-      };
-    }
-
-    const content = buildFileContent(section.nodes, source);
-    const startLine = offsetToLine(lineIndex, section.nodes[0].start);
-    const endLine = offsetToLine(lineIndex, section.nodes[section.nodes.length - 1].end);
-    const runtime = primaryRuntimeSignal(content);
-    const declarations = section.nodes.flatMap(getDeclarationNames);
-
-    return {
-      name: section.name,
-      content,
-      lineCount: lineCount(content),
-      startLine,
-      endLine,
-      declarations,
-      runnable: section.runnable,
-      sourceCandidate: section.sourceCandidate,
-      largeDeclaration: section.largeDeclaration,
-      customElementTag: section.customElement?.tag,
-      customElementEvidence: section.customElement
-        ? customElementEvidence(section.customElement, lineIndex)
-        : undefined,
-      runtimeSignals: runtime ? [runtime] : [],
-      semanticBoundary: section.semanticBoundary ?? true,
-    };
-  });
+  log(`  ${sections.length} declaration sections`);
+  for (const section of sections) {
+    if (section.nodes) section.declarationNames = section.nodes.flatMap(getDeclarationNames);
+  }
+  return materializeSections(sections, source, lineIndex);
 }
 
 function assignFileNames(sections) {
@@ -942,16 +1037,16 @@ function processBundle(source, options = {}) {
     return processDeclarationModules(source, options);
   }
 
-  console.log('Parsing AST...');
-  const ast = parseSource(source);
-  console.log(`  ${ast.body.length} top-level statements`);
+  const log = options.quiet ? () => {} : console.log;
+  const ast = options.ast || parseSource(source);
+  log(`  ${ast.body.length} top-level statements`);
 
   const lineIndex = buildLineIndex(source);
 
   // Phase 1: Build raw groups
-  console.log('Building groups...');
+  log('Building groups...');
   const rawGroups = buildGroups(ast, source);
-  console.log(`  ${rawGroups.length} raw groups`);
+  log(`  ${rawGroups.length} raw groups`);
 
   // Phase 2: Expand CJS blocks into sub-groups
   const flatGroups = [];
@@ -962,7 +1057,7 @@ function processBundle(source, options = {}) {
       flatGroups.push(group);
     }
   }
-  console.log(`  ${flatGroups.length} groups after CJS expansion`);
+  log(`  ${flatGroups.length} groups after CJS expansion`);
 
   // Phase 2b: Merge tiny groups into their neighbors.
   // Groups smaller than MIN_MERGE_LINES get absorbed into the previous group
@@ -985,10 +1080,10 @@ function processBundle(source, options = {}) {
     }
     mergedGroups.push({ ...group, nodes: [...group.nodes] });
   }
-  console.log(`  ${mergedGroups.length} groups after merging tiny sections`);
+  log(`  ${mergedGroups.length} groups after merging tiny sections`);
 
   // Phase 3: Name and sub-split all groups
-  console.log('Naming and sub-splitting...');
+  log('Naming and sub-splitting...');
   const sections = [];
 
   for (const group of mergedGroups) {
@@ -1061,43 +1156,59 @@ function processBundle(source, options = {}) {
     }
   }
 
-  console.log(`  ${sections.length} final sections`);
+  log(`  ${sections.length} final sections`);
 
-  // Phase 4: Compute metadata
-  const result = sections.map((section) => {
-    if (section.content != null) {
-      return {
-        name: section.name,
-        content: section.content,
-        lineCount: lineCount(section.content),
-        startLine: section.startLine,
-        endLine: section.endLine,
-        fragmentOf: section.fragmentOf,
-        embeddedRuntime: section.embeddedRuntime,
-        embeddedRuntimeCategory: section.embeddedRuntimeCategory,
-        runnable: section.runnable,
-        inspectionFragment: section.inspectionFragment,
-        semanticBoundary: section.semanticBoundary,
-      };
+  // Phase 4: Seal the seams, slice the content, compute metadata
+  return materializeSections(sections, source, lineIndex);
+}
+
+/**
+ * Parse-check the emitted parts.
+ *
+ * A splitter that cuts between statements has no way to make a part
+ * unparseable, so a failure here is a defect in the ranges, not in the input --
+ * unless the input itself never parsed, in which case the parts inherit the
+ * corruption and the check only reports it. Inspection fragments are excluded:
+ * they are line slices of one oversized node and are documented as unrunnable.
+ */
+function findUnparseableParts(files) {
+  const failures = [];
+  for (const file of files) {
+    if (file.inspectionFragment || file.parseFallback) continue;
+    if (!file.content.trim()) continue;
+    try {
+      parseStrict(file.content);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const partLine = error?.loc?.line ?? null;
+      failures.push({
+        file: file.fileName || file.name,
+        message,
+        partLine,
+        partColumn: error?.loc?.column ?? null,
+        // The line in the input bundle, so the seam can be inspected there.
+        sourceLine: partLine != null && file.startLine != null ? file.startLine + partLine - 1 : null,
+        sourceRange: file.sourceRange,
+      });
     }
+  }
+  return failures;
+}
 
-    const content = buildFileContent(section.nodes, source);
-    const startLine = offsetToLine(lineIndex, section.nodes[0].start);
-    const endLine = offsetToLine(lineIndex, section.nodes[section.nodes.length - 1].end);
-
-    const runtime = primaryRuntimeSignal(content);
-    return {
-      name: section.name,
-      content,
-      lineCount: lineCount(content),
-      startLine,
-      endLine,
-      runtimeSignals: runtime ? [runtime] : [],
-      semanticBoundary: true,
-    };
-  });
-
-  return result;
+/**
+ * Split `source` into named parts without touching the filesystem. Shared by
+ * the CLI and the regression tests.
+ */
+function splitSource(source, options = {}) {
+  const parsed = parseBundle(source);
+  const sections = processBundle(source, { ...options, ast: parsed.ast });
+  const files = assignFileNames(sections);
+  return {
+    files,
+    parseMode: parsed.mode,
+    strictError: parsed.strictError,
+    unparseableParts: findUnparseableParts(files),
+  };
 }
 
 // ── CLI ──
@@ -1172,19 +1283,30 @@ async function main() {
   const totalLines = lineCount(source);
   console.log(`${totalLines} lines, ${formatBytes(Buffer.byteLength(source))}`);
 
-  let sections;
+  let files;
+  let parseMode = null;
+  let strictError = null;
+  let unparseableParts = [];
   let parseFallbackReason = null;
   try {
-    sections = processBundle(source, { deepHugeNodes, moduleGranularity });
+    console.log('Parsing AST...');
+    const split = splitSource(source, { deepHugeNodes, moduleGranularity });
+    files = split.files;
+    parseMode = split.parseMode;
+    strictError = split.strictError;
+    unparseableParts = split.unparseableParts;
+    if (parseMode === 'loose') {
+      console.warn(`  strict parse failed (${strictError}); ranges come from the tolerant parser.`);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const stack = error instanceof Error ? error.stack || message : message;
     if (!/Maximum call stack size exceeded|call stack/i.test(stack)) throw error;
     parseFallbackReason = message;
     console.warn(`AST parse/split failed (${message}); writing inspection-only parse fallback fragments.`);
-    sections = createParseFallbackSections(source, message);
+    files = assignFileNames(createParseFallbackSections(source, message));
   }
-  const files = assignFileNames(sections);
+  const failureByFile = new Map(unparseableParts.map((failure) => [failure.file, failure]));
 
   // Write files
   console.log(`\nSplitting into ${files.length} files${summary ? ' (summary mode)' : ''}:\n`);
@@ -1217,6 +1339,16 @@ async function main() {
     if (file.customElementEvidence) info.customElementEvidence = file.customElementEvidence;
     if (file.declarations?.length) info.declarations = file.declarations;
     if (file.runtimeSignals?.length) info.runtimeSignals = file.runtimeSignals;
+    if (file.sourceRange) info.sourceRange = file.sourceRange;
+    const failure = failureByFile.get(file.fileName);
+    if (failure) {
+      info.parseError = {
+        message: failure.message,
+        partLine: failure.partLine,
+        partColumn: failure.partColumn,
+        sourceLine: failure.sourceLine,
+      };
+    }
     manifest.push(info);
 
     if (!summary) {
@@ -1249,6 +1381,8 @@ async function main() {
     generatedAt: new Date().toISOString(),
     totalLines,
     totalFiles: files.length,
+    parseMode,
+    unparseableParts: unparseableParts.length,
     parseFallback: Boolean(parseFallbackReason),
     parseFallbackReason,
     files: manifest,
@@ -1274,9 +1408,41 @@ async function main() {
   await fs.writeFile(path.join(outputDir, '_index.js'), indexLines.join('\n'), 'utf8');
 
   console.log(`\nWrote ${files.length} files + manifest to ${outputDir}`);
+
+  // The split is only reported as successful when its parts are real JavaScript.
+  if (unparseableParts.length > 0) {
+    console.error(`\n${unparseableParts.length} of ${files.length} emitted part(s) do not parse:`);
+    for (const failure of unparseableParts.slice(0, 20)) {
+      const where = failure.sourceLine != null ? ` (input line ~${failure.sourceLine})` : '';
+      console.error(`  ${failure.file}: ${failure.message}${where}`);
+    }
+    if (unparseableParts.length > 20) {
+      console.error(`  ... ${unparseableParts.length - 20} more, see parseError in _manifest.json`);
+    }
+    if (parseMode === 'strict') {
+      // The input is valid JavaScript, so every part cut at a statement
+      // boundary must be too: the ranges are wrong. Fail rather than hand a
+      // downstream stage source that no parser accepts.
+      console.error('The input parsed cleanly, so these are splitter defects, not inherited corruption.');
+      process.exitCode = 1;
+    } else {
+      console.error(`The input itself does not parse (${strictError}); the parts inherit that corruption.`);
+    }
+  }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack ?? error.message : error);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack ?? error.message : error);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  parseBundle,
+  sealSectionRanges,
+  findUnparseableParts,
+  splitSource,
+  processBundle,
+  assignFileNames,
+};

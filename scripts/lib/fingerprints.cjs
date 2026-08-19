@@ -1,3 +1,16 @@
+// A dependency fingerprint entry:
+//   name             npm package name.
+//   version          curated "last known" version hint. Never a pin: it is only
+//                    reported as `lastKnownVersion` unless `versionPattern`
+//                    recovers a real version from the bundle itself.
+//   evidence         short description of what proves the package is present.
+//   patterns         any one match identifies the package. Each pattern must be
+//                    package-specific; bare English words and generic language
+//                    constructs belong nowhere in this list.
+//   versionPattern   optional. Capture group 1 must be a version the *bundle*
+//                    states about itself (a runtime version stamp), never a
+//                    version inferred from a feature. When it matches, the
+//                    detected version is authoritative and reaches package.json.
 const DEPENDENCY_FINGERPRINTS = [
   {
     name: 'react-router-dom',
@@ -64,6 +77,109 @@ const DEPENDENCY_FINGERPRINTS = [
     // integration. Require SDK-specific evidence.
     patterns: [/@stripe\/stripe-js|js\.stripe\.com|\bloadStripe\b|\bpk_(?:live|test)_[0-9A-Za-z]/],
   },
+
+  // ── Lit ────────────────────────────────────────────────────────────────────
+  // Every Lit package pushes its own version onto a globalThis array at module
+  // evaluation time, so a Lit bundle states its exact version even when fully
+  // minified. This is the strongest dependency evidence jsmap can get from
+  // content alone, and it was previously ignored entirely: a real 4-chunk
+  // capture of a Lit app reported zero dependencies.
+  {
+    name: 'lit-html',
+    version: '^3.3.1',
+    evidence: 'lit-html runtime version stamp',
+    patterns: [/litHtmlVersions\s*(?:\?\?|\|\|)=\s*\[\]\s*\)\s*\.push\(/, /\blitHtmlPolyfillSupport\b/],
+    versionPattern: /litHtmlVersions\s*(?:\?\?|\|\|)=\s*\[\]\s*\)\s*\.push\(\s*["'`]([^"'`]+)["'`]/,
+  },
+  {
+    name: 'lit-element',
+    version: '^4.2.1',
+    evidence: 'lit-element runtime version stamp',
+    patterns: [/litElementVersions\s*(?:\?\?|\|\|)=\s*\[\]\s*\)\s*\.push\(/, /\blitElementPolyfillSupport\b/],
+    versionPattern: /litElementVersions\s*(?:\?\?|\|\|)=\s*\[\]\s*\)\s*\.push\(\s*["'`]([^"'`]+)["'`]/,
+  },
+  {
+    name: '@lit/reactive-element',
+    version: '^2.1.1',
+    evidence: '@lit/reactive-element version stamp and CSSResult guard message',
+    patterns: [
+      /reactiveElementVersions\s*(?:\?\?|\|\|)=\s*\[\]\s*\)\s*\.push\(/,
+      /CSSResult is not constructable\./,
+    ],
+    versionPattern: /reactiveElementVersions\s*(?:\?\?|\|\|)=\s*\[\]\s*\)\s*\.push\(\s*["'`]([^"'`]+)["'`]/,
+  },
+  {
+    name: '@lit/context',
+    version: '^1.1.6',
+    evidence: '@lit/context ContextRequestEvent/ContextProviderEvent constructors',
+    // The bare strings "context-request"/"context-provider" would be weak, so
+    // require the Event subclass constructor shape @lit/context actually emits
+    // (`super('context-request', { bubbles: true, composed: true })`, minified
+    // to `super("context-request",{bubbles:!0,composed:!0})`).
+    patterns: [/["'`]context-(?:request|provider)["'`]\s*,\s*\{\s*bubbles\s*:\s*(?:!0|true)\s*,\s*composed\s*:\s*(?:!0|true)/],
+  },
+
+  // ── Compression / binary ───────────────────────────────────────────────────
+  {
+    name: 'pako',
+    version: '^2.1.0',
+    evidence: 'pako Nodeca banner string (zlib port)',
+    // pako stamps its own provenance string into deflate.js/inflate.js. Nothing
+    // else in the ecosystem carries it, so one pattern is enough. pako ships no
+    // version stamp; the curated hint is a floor, not a reading: this bundle
+    // uses the sym_next/sym_buf symbol buffer (zlib 1.2.12 layout, pako >= 2.1)
+    // and none of the pako 1.x markers setTyped/Buf8/shrinkBuf/arraySet.
+    patterns: [/pako (?:deflate|inflate) \(from Nodeca project\)/],
+  },
+  {
+    name: 'fflate',
+    version: '^0.8.2',
+    evidence: 'fflate strToU8 surrogate mask and bit-reversal table',
+    // fflate carries no error string in a tree-shaken build (this capture has
+    // none of its FlateErrorCode messages) and its exported names are minified
+    // away, so identify it by two numeric code shapes that are literally its
+    // source: `65536 + (c & 1023 << 10)` in strToU8 — the shift folds to
+    // 1047552 — and the 0xAAAA/0x5555 nibble swap that builds its 32768-entry
+    // `rev` table.
+    patterns: [
+      /65536\s*\+\s*\(?\s*\w+\s*&\s*1047552\s*\)?/,
+      /&\s*43690\s*\)\s*>>\s*1\s*\|\s*\(\s*\w+\s*&\s*21845\s*\)\s*<<\s*1/,
+    ],
+  },
+  {
+    name: 'tiny-inflate',
+    version: '^1.0.3',
+    evidence: 'tiny-inflate Tree constructor (table/trans Uint16Array pair)',
+    // `table`/`trans` are object properties, so they survive minification. The
+    // 16/288 pair in one constructor is tiny-inflate's Tree() verbatim.
+    patterns: [/this\.table\s*=\s*new Uint16Array\(16\)\s*[,;]\s*this\.trans\s*=\s*new Uint16Array\(288\)/],
+  },
+
+  // ── Fonts / ids ────────────────────────────────────────────────────────────
+  {
+    name: 'opentype.js',
+    version: '^1.3.4',
+    evidence: 'opentype.js font parser error strings',
+    patterns: [
+      /Font\.toBuffer is deprecated\. Use Font\.toArrayBuffer instead\./,
+      /No valid cmap sub-tables found\./,
+      /Font doesn't contain TrueType or CFF outlines\./,
+      /When creating a new Font object, familyName is required\./,
+    ],
+  },
+  {
+    name: 'uuid',
+    version: '^9.0.0',
+    evidence: 'uuidjs rng guard strings',
+    // The first string embeds the uuidjs repository URL, so it cannot be
+    // confused with a hand-rolled getRandomValues check. The curated hint is a
+    // floor: the `Random bytes length must be >= 16` guard exists only in
+    // uuid >= 9.
+    patterns: [
+      /github\.com\/uuidjs\/uuid#getrandomvalues-not-supported/,
+      /Random bytes length must be >= 16/,
+    ],
+  },
 ];
 
 const VENDOR_REQUIRE_MAP = [
@@ -103,7 +219,11 @@ const RUNTIME_FINGERPRINTS = [
     category: 'compiler-runtime',
     filePrefix: 'vendor-typescript-compiler',
     role: 'embedded-compiler',
-    patterns: [/typescript_exports/, /ts_server_protocol_exports/, /createProgram/, /transpileModule/, /ts\.ScriptTarget/, /diagnosticMessages\.generated/, /typescriptServices/],
+    // A bare `createProgram` is a WebGL call, not a TypeScript one. In a real
+    // capture it matched `gl.createProgram()` in a yarn/knit viewer and filed
+    // the renderer into an "embedded compiler" package at 0.61 confidence.
+    // Require a TypeScript-qualified form.
+    patterns: [/typescript_exports/, /ts_server_protocol_exports/, /\b(?:ts|typescript)\.createProgram\b/, /transpileModule/, /ts\.ScriptTarget/, /diagnosticMessages\.generated/, /typescriptServices/],
     identifiers: [/^requireTypescript$/],
   },
   {
@@ -138,11 +258,36 @@ const RUNTIME_FINGERPRINTS = [
     patterns: [/reconcilerVersion/, /rendererPackageName/, /injectIntoDevTools/, /supportsMutation/, /getPublicInstance/, /createInstance/, /appendChildToContainer/],
   },
   {
+    id: 'lit-runtime',
+    category: 'framework-runtime',
+    filePrefix: 'vendor-lit-runtime',
+    role: 'web-component-runtime',
+    // Grounded on the same self-reported version stamps and polyfill-support
+    // hooks the dependency fingerprints use, plus ReactiveElement's own guard
+    // message. Lit was entirely absent from this roster, so Lit vendor chunks
+    // scored as unclassified support.
+    patterns: [
+      /litHtmlVersions\s*(?:\?\?|\|\|)=\s*\[\]/,
+      /litElementVersions\s*(?:\?\?|\|\|)=\s*\[\]/,
+      /reactiveElementVersions\s*(?:\?\?|\|\|)=\s*\[\]/,
+      /\blitHtmlPolyfillSupport\b/,
+      /\blitElementPolyfillSupport\b/,
+      /\breactiveElementPolyfillSupport\b/,
+      /CSSResult is not constructable\./,
+    ],
+    // Deliberately no bare `lit`: a one-word identifier is not evidence.
+    identifiers: [/^(?:require)?[Ll]it(?:Html|Element)$/],
+  },
+  {
     id: 'vite-rollup-runtime',
     category: 'bundler-runtime',
     filePrefix: 'runtime-vite-rollup',
     role: 'bundler-runtime',
-    patterns: [/__vitePreload/, /__vite__mapDeps/, /\\0vite\/preload-helper\.js/, /import\.meta\.url/, /__commonJS/, /__toESM/, /__defProp/],
+    // `import.meta.url` was dropped: it is a language feature, present in any ES
+    // module that resolves an asset URL, and says nothing about the bundler. In
+    // a real capture it matched 9 assets without distinguishing one of them.
+    // The remaining patterns are Vite/esbuild-emitted identifiers.
+    patterns: [/__vitePreload/, /__vite__mapDeps/, /\\0vite\/preload-helper\.js/, /__commonJS/, /__toESM/, /__defProp/],
   },
   {
     id: 'webpack-runtime',
@@ -184,7 +329,11 @@ const RUNTIME_FINGERPRINTS = [
     category: 'wasm-runtime',
     filePrefix: 'runtime-inline-wasm-worker',
     role: 'wasm-worker',
-    patterns: [/WebAssembly\.validate/, /new Uint8Array/, /wasmpack/, /workerProcess/, /new Worker\(/],
+    // `new Uint8Array` was dropped: it appears in every bundle that touches a
+    // typed array. In a real capture it fired alone on 30 assets and pushed
+    // ordinary DEFLATE constant tables into the wasm-runtime package, because
+    // wasm-runtime is a dominating category in package scoring.
+    patterns: [/WebAssembly\.validate/, /wasmpack/, /workerProcess/, /new Worker\(/],
   },
   {
     id: 'worker-runtime',
@@ -217,20 +366,35 @@ function classifyRequireName(name) {
   return null;
 }
 
+// Pull a version the bundle states about itself. Returns null unless the
+// fingerprint declares a `versionPattern` and that pattern captures something
+// that looks like a semver-ish version — a guess must never be promoted here.
+function extractFingerprintVersion(fingerprint, text) {
+  if (!fingerprint.versionPattern) return null;
+  const match = fingerprint.versionPattern.exec(text);
+  const captured = match?.[1]?.trim();
+  if (!captured || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(captured)) return null;
+  return captured;
+}
+
 function detectDependencyFingerprints(text) {
   const deps = [];
   for (const fingerprint of DEPENDENCY_FINGERPRINTS) {
-    if (fingerprint.patterns.some((pattern) => pattern.test(text))) {
-      deps.push({
-        name: fingerprint.name,
-        // A content fingerprint proves the package is present, not which version.
-        // The curated version is kept as a non-authoritative hint, not a pin.
-        version: null,
-        lastKnownVersion: fingerprint.version,
-        resolution: 'content-fingerprint',
-        evidence: fingerprint.evidence,
-      });
-    }
+    if (!fingerprint.patterns.some((pattern) => pattern.test(text))) continue;
+    // A content fingerprint normally proves the package is present, not which
+    // version, so the curated version stays a non-authoritative hint. The
+    // exception is a runtime version stamp the bundle prints about itself
+    // (Lit's `(globalThis.litHtmlVersions ??= []).push('3.3.1')`): that is
+    // captured evidence of the exact shipped version, so it is reported as the
+    // real version and reaches package.json instead of `*`.
+    const version = extractFingerprintVersion(fingerprint, text);
+    deps.push({
+      name: fingerprint.name,
+      version,
+      lastKnownVersion: fingerprint.version,
+      resolution: version ? 'content-fingerprint-version-stamp' : 'content-fingerprint',
+      evidence: version ? `${fingerprint.evidence} (${version})` : fingerprint.evidence,
+    });
   }
   return deps.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -350,6 +514,7 @@ module.exports = {
   classifyRequireName,
   detectDependencyFingerprints,
   detectRuntimeFingerprints,
+  extractFingerprintVersion,
   extractPackageCoordinateFromReference,
   normalizePackageName,
   primaryRuntimeSignal,

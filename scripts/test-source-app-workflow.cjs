@@ -104,7 +104,13 @@ try {
   fs.writeFileSync(path.join(unknownRoot, 'readme.txt'), 'no framework evidence');
   assert.equal(detectFramework(unknownRoot).strategy, 'inspection-first');
 
-  run(['recovery-level', nextRoot, '--json']);
+  const noWriteRoot = path.join(tempRoot, 'recovery-level-no-write');
+  fs.mkdirSync(noWriteRoot, { recursive: true });
+  fs.writeFileSync(path.join(noWriteRoot, 'index.html'), '<!doctype html><title>diagnostic only</title>');
+  run(['recovery-level', noWriteRoot]);
+  assert.equal(fs.existsSync(path.join(noWriteRoot, 'RECOVERY_LEVEL.json')), false, 'diagnostic recovery-level must not modify its input');
+
+  run(['recovery-level', nextRoot, '--json', '--out', path.join(nextRoot, 'RECOVERY_LEVEL')]);
   const level = JSON.parse(fs.readFileSync(path.join(nextRoot, 'RECOVERY_LEVEL.json'), 'utf8'));
   assert.equal(level.status, 'preserved-runtime');
 

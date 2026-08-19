@@ -13,7 +13,7 @@ const SENSITIVE_QUERY_KEYS = /(?:^|[_-])(?:access[_-]?token|api[_-]?key|auth|aut
 const REPLAY_RESPONSE_HEADERS = /^(?:content-type|content-language|cache-control|etag|last-modified|location|access-control-[\w-]+|accept-ranges)$/i;
 
 function parseArgs(argv) {
-  const flags = { origin: null, force: false, captureDir: null, framework: 'auto', repairWasm: false, allowEmpty: false };
+  const flags = { origin: null, force: false, replaceNonJsmapOutput: false, captureDir: null, framework: 'auto', repairWasm: false, allowEmpty: false };
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -22,6 +22,7 @@ function parseArgs(argv) {
     else if (arg === '--framework') flags.framework = argv[++i];
     else if (arg === '--repair-wasm') flags.repairWasm = true;
     else if (arg === '--allow-empty') flags.allowEmpty = true;
+    else if (arg === '--replace-non-jsmap-output') flags.replaceNonJsmapOutput = true;
     else if (arg === '--force') flags.force = true;
     else if (!arg.startsWith('-')) positional.push(arg);
     else throw new Error(`Unknown flag: ${arg}`);
@@ -184,12 +185,21 @@ function importHar(harFile, outputDir, flags) {
   if (!Array.isArray(entries)) throw new Error('Input is not a HAR 1.2 archive with log.entries.');
   if (fs.existsSync(outputDir)) {
     if (!flags.force) throw new Error(`Output exists: ${outputDir}. Pass --force to replace it.`);
+    const existingEntries = fs.readdirSync(outputDir);
+    const isJsmapCapture = fs.existsSync(path.join(outputDir, '.jsmap-mitm', 'MITM_CAPTURE.json'));
+    if (existingEntries.length && !isJsmapCapture && !flags.replaceNonJsmapOutput) {
+      throw new Error(
+        `Refusing to replace non-jsmap directory: ${outputDir}. `
+        + 'Choose a distinct empty capture destination, or pass '
+        + '--replace-non-jsmap-output only after reviewing that directory.',
+      );
+    }
     fs.rmSync(outputDir, { recursive: true, force: true });
   }
   fs.mkdirSync(outputDir, { recursive: true });
   const metadataRoot = path.join(outputDir, '.jsmap-mitm');
   const externalRoot = path.join(metadataRoot, 'external');
-  const primaryOrigin = selectPrimaryOrigin(entries, flags.origin);
+  const primaryOrigin = selectPrimaryOrigin(entries, flags.origin || har.log._jsmapPrimaryOrigin);
   if (!primaryOrigin) throw new Error('Could not infer a primary origin. Pass --origin <url>.');
 
   const routes = [];
@@ -375,12 +385,12 @@ function main() {
   const action = process.argv[2];
   const { flags, positional } = parseArgs(process.argv.slice(3));
   if (action === 'import') {
-    if (!positional[0] || !positional[1]) throw new Error('Usage: jsmap mitm-import <capture.har> <capture-dir> [--origin <url>] [--force]');
+    if (!positional[0] || !positional[1]) throw new Error('Usage: jsmap mitm-import <capture.har> <capture-output-dir> [--origin <url>] [--force] [--replace-non-jsmap-output]');
     importHar(path.resolve(positional[0]), path.resolve(positional[1]), flags);
     return;
   }
   if (action === 'recover') {
-    if (!positional[0] || !positional[1]) throw new Error('Usage: jsmap mitm-recover <capture.har> <recovery-dir> [--capture-dir <dir>] [--origin <url>] [--framework auto|vite|next|webpack|unknown] [--force]');
+    if (!positional[0] || !positional[1]) throw new Error('Usage: jsmap mitm-recover <capture.har> <recovery-dir> [--capture-dir <capture-output-dir>] [--origin <url>] [--framework auto|vite|next|webpack|unknown] [--force] [--replace-non-jsmap-output]');
     const harFile = path.resolve(positional[0]);
     const recoveryDir = path.resolve(positional[1]);
     const captureDir = path.resolve(flags.captureDir || `${recoveryDir}-mitm-capture`);
@@ -395,7 +405,11 @@ function main() {
     if (detectedFramework === 'next') harnessArgs.push('--framework', 'next');
     runJsmap(harnessArgs, process.cwd());
     const levelFramework = detectedFramework === 'vite-rollup' ? 'vite' : detectedFramework;
-    runJsmap(['recovery-level', recoveryDir, '--framework', levelFramework], process.cwd());
+    runJsmap([
+      'recovery-level', recoveryDir,
+      '--framework', levelFramework,
+      '--out', path.join(recoveryDir, 'RECOVERY_LEVEL'),
+    ], process.cwd());
     console.log(`MITM recovery ready at ${recoveryDir}`);
     return;
   }

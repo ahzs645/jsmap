@@ -35,14 +35,17 @@ function main() {
     ...levels,
     framework: detectFramework(root, flags.framework),
   };
-  const prefix = path.resolve(flags.out || path.join(root, 'RECOVERY_LEVEL'));
-  const files = writeJsonAndMarkdown(prefix, report, 'jsmap Recovery Level');
+  const files = flags.out
+    ? writeJsonAndMarkdown(path.resolve(flags.out), report, 'jsmap Recovery Level')
+    : null;
   if (flags.json) console.log(JSON.stringify(report, null, 2));
   else {
     console.log(`Recovery level: ${report.status}`);
     console.log(`Framework route: ${report.framework.strategy}`);
-    console.log(`Wrote ${files.jsonFile}`);
-    console.log(`Wrote ${files.markdownFile}`);
+    if (files) {
+      console.log(`Wrote ${files.jsonFile}`);
+      console.log(`Wrote ${files.markdownFile}`);
+    }
   }
 }
 

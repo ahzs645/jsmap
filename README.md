@@ -103,6 +103,17 @@ promotion planner reads that index and writes `recovery-promotion-plan.json` and
 `wrap-runtime-boundary`, or `inspect-only`. If the original capture missed lazy
 dynamic chunks, pass `--fetch-missing <asset-base-url>` to `rebuild` so the
 generated linker can fetch those files before build validation.
+
+When a dynamic import cannot be fetched at all — the origin is gone, or the
+capture never exercised the feature that loads it — `rebuild --stub-missing-imports`
+lets the rest of the app build anyway. Each uncaptured import is replaced by a
+stub that carries no behaviour and throws when used, which is what the missing
+import already does at runtime when it 404s. Nothing is fabricated: every stub
+opens with a `NOT RECOVERED SOURCE` header naming its importer, and all of them
+are listed in `MISSING_DYNAMIC_IMPORTS.json`. Without the flag, `rebuild` still
+refuses to build rather than invent a module. Use it when the missing import is
+off the boot path and you want a runnable workspace with a documented hole,
+not when it is the thing you are trying to recover.
 `promote-apply --dry-run` turns the highest-ranked actions into preview scaffold
 files under `.jsmap-promote-preview` without changing the runnable rebuild; use
 `--write` only after reviewing the preview.
@@ -211,6 +222,12 @@ headers, redacts URL user-info and sensitive query values, and omits request bod
 hashes. Response bodies are retained and may contain private application data,
 so review the capture before sharing or committing it.
 
+`mitm-recover --capture-dir <capture-output-dir>` selects a disposable
+intermediate destination; it is never the saved-resource input. `--force`
+replaces an existing jsmap capture, but refuses to replace any other non-empty
+directory unless the separate `--replace-non-jsmap-output` review flag is also
+present.
+
 ### Directory-tree captures (`capture-dir`)
 
 "Save All Resources"-style captures (per-host folders, URL path mapped to
@@ -218,13 +235,15 @@ folders, `_DataURI/` data-URL dumps) are not HAR files. Convert them first:
 
 ```bash
 node scripts/jsmap.cjs capture-dir <saved-dir> <out.har> [--origin <url>]
-node scripts/jsmap.cjs mitm-recover <out.har> <recovery-dir> --origin <url> --force
+node scripts/jsmap.cjs mitm-recover <out.har> <recovery-dir> \
+  --capture-dir <capture-output-dir> --origin <url> --force
 ```
 
 The converter maps `<host>/<url-path>/<file>` back to URLs, re-detects MIME
 types by content, strips the `.html` suffix the capture tool appends to
 extensionless JSON API responses, folds query-variant filenames
-(`base-<longhex>.ext` siblings) into single routes, and skips `_DataURI/` and
+(`base-<longhex>.ext` and proven `base (N).ext` siblings) into single routes,
+preserves the approved primary origin in the HAR, and skips `_DataURI/` and
 `.DS_Store`. The synthetic HAR is GET-only; request bodies never existed.
 
 During replay the harness also serves captured third-party origins under
@@ -472,6 +491,13 @@ static controls, and active row state. `verify-static` smoke-checks a local
 preserved URL and uses Playwright when it is installed, falling back to HTTP
 checks otherwise.
 
+The [LingoClip offline replay case study](docs/case-studies/lingoclip-offline-replay.md)
+documents a reviewed preserved-runtime that combines captured timed-lyrics API
+evidence, synthetic anonymous/game-state fixtures, blocked private sign-in data,
+and exact UMP audio/video reassembly. It also records how Type and Choice games
+pause and resume the captured song, and why adding another video requires both
+its LingoClip lyric model and its complete captured media.
+
 The recovery heuristics are generic. jsmap now scores shared fingerprints for
 frameworks, bundlers, workers, WASM loaders, editor/compiler payloads, and
 domain bridges before assigning package boundaries. The extraction plan includes
@@ -624,14 +650,36 @@ Useful generic signals currently include:
   confidence, evidence, risk, and minified alias metadata; `rename-apply` can
   apply reviewed low-risk suggestions
 
-Use `--repair-wasm` when a website mirror saved `.wasm` files as text/WAT or placeholder
-responses; jsmap will infer the site origin from HTML metadata and fetch valid binary WASM
-assets when possible.
+Use `--repair-wasm` when a website mirror saved `.wasm` files as WAT text or as
+placeholder responses. jsmap tries local assembly first: a `.wasm` whose bytes are
+really WAT text is a complete module in the textual encoding, so it is assembled
+back to a binary offline, with no network and no dependence on the origin still
+being live. Only if local assembly is impossible does jsmap infer the site origin
+from HTML metadata and re-fetch.
+
+Local assembly needs the optional `wabt` dependency. Each repair is recorded with
+its `method` (`wat-assembly` or `refetch`) and, for local assembly, any dialect
+normalizations that were required — these are applied only after an unmodified
+parse has already failed, so the record shows exactly what was changed:
+
+```json
+{ "file": "bower/solver_bg.wasm", "status": "repaired", "method": "wat-assembly",
+  "source": "captured WAT text", "normalizations": ["elem-reftype-to-funcref"],
+  "bytes": 190573 }
+```
+
+`repair-stubs` makes the same distinction: a WAT-encoded `.wasm` is reported as
+`wasm-as-wat-text` with `repair: local-wat-assembly` and is never handed to the
+backfill fetcher, because its bytes are present and re-fetching would overwrite
+captured evidence with whatever the origin serves today. A genuine placeholder is
+still reported as `no-content-placeholder` or `wrong-magic-bytes` and still routes
+to re-fetch.
 
 Run the focused heuristic regression fixture with:
 
 ```bash
 npm run test:recovery-heuristics
+npm run test:wasm-wat-repair
 ```
 
 For a practical lost-project recovery loop after `recover`, run:

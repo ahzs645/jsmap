@@ -32,6 +32,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { looksLikeWat } = require('./lib/wat-repair.cjs');
 
 // magic bytes for binary types whose extension we can validate
 const MAGIC = {
@@ -71,6 +72,12 @@ function detectStub(relPath, buf) {
   if (MAGIC[ext]) {
     const magic = MAGIC[ext];
     const ok = size >= magic.length && magic.every((b, i) => buf[i] === b);
+    // A .wasm stored as WAT text fails the magic check but is not a stub — the
+    // module is complete, just in the textual encoding. It is repairable
+    // locally, so it must not be sent down the re-download path.
+    if (!ok && ext === '.wasm' && looksLikeWat(buf)) {
+      return { isStub: true, reason: 'wasm-as-wat-text', repair: 'local-wat-assembly', size };
+    }
     if (!ok) return { isStub: true, reason: 'wrong-magic-bytes', size };
   } else if (BINARY_EXT.has(ext) && size < 64) {
     // a binary type we can't magic-check, but implausibly small
@@ -101,6 +108,9 @@ function scanDir(root) {
 }
 
 function urlForStub(stub, backfillBase) {
+  // Locally repairable content is not missing; re-fetching it would be wasted
+  // network and would overwrite captured bytes with whatever the origin serves now.
+  if (stub.repair === 'local-wat-assembly') return null;
   if (stub.url) return stub.url;                       // embedded in the placeholder
   if (backfillBase === 'dir-tree') {
     // "Save All Resources"-style directory-tree capture: the first path

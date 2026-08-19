@@ -14,6 +14,7 @@
  *   rebuild     <recovery-dir> [output-dir] [--force] Generate a linked runnable rebuild from recovered chunks
  *   promote-plan <linked-dir> [--top N]                Rank recovered parts for module promotion
  *   promote-apply <linked-dir> [--dry-run|--write]     Generate promotion scaffold files
+ *   modularize  <linked-dir> [--dry-run|--write]      Promote shared-scope parts into real modules
  *   stats      <recovery-or-linked-dir> [--json]       Summarize recovery size, packages, and leftovers
  *   recover-workflow <recovery-dir> [linked-dir]       Rebuild, plan, preview, build, and report
  *   structure-plan <linked-dir>                        Generate RECOVERY_STRUCTURE guide
@@ -24,6 +25,7 @@
  *   source-plan <input-dir>                            Plan reviewed conventional source modules
  *   source-export <plan> <output-dir>                  Export reviewed source modules with provenance
  *   assets <capture-dir>                               Extract assets inlined in bundles as data URIs
+ *   replay-ump <capture-dir> <output-dir>              Reassemble captured googlevideo UMP media
  *   coverage <capture-dir>                             Report chunks the capture is missing, and capture health
  *   asset-audit <project-dir>                          Localize and verify source-app assets
  *   source-audit <project-dir>                         Gate source-app completion with build/browser evidence
@@ -118,8 +120,13 @@ Commands:
         src/recovered-parts/*       separate split files with @jsmap-link headers
         recovery-link-plan.json     ordered linkage metadata
         src/recovered-entry/*       generated runnable entry modules
-      Options: --html <public-html>, --fetch-missing <asset-base-url>
+      Options: --html <public-html>, --fetch-missing <asset-base-url>,
+               --stub-missing-imports
       Use --fetch-missing when dynamic chunks were not captured locally.
+      Use --stub-missing-imports when they cannot be fetched at all: each
+      uncaptured dynamic import is replaced by a labelled stub that throws on
+      use, so the rest of the app still builds and boots. Stubs are not
+      recovered source and are listed in MISSING_DYNAMIC_IMPORTS.json.
 
   promote-plan <linked-rebuild-dir> [--top N] [--out <file-prefix>]
       Read recovery-module-index.json from a linked rebuild and generate a
@@ -132,6 +139,21 @@ Commands:
       Defaults to a dry-run preview under .jsmap-promote-preview. Use --write
       to write suggested src/promoted/* files.
       Options: --actions <comma-list>, --out <preview-dir>
+
+  modularize <linked-rebuild-dir> [--chunk <name>] [--dry-run|--write]
+      Promote a chunk's shared-scope parts into real ES modules: each part
+      becomes its own module, the bindings the shared scope provided implicitly
+      become imports/exports, and parts that cannot be separated are merged
+      back together over their whole index span so nothing is reordered.
+      Refuses with a reason code instead of guessing. Dry run by default;
+      writes src/recovered-modules/<chunk>/* plus
+      MODULARIZATION_PROVENANCE.json under --write.
+      Verification: partition integrity -> evaluation-order replay ->
+      link check -> optional bundle comparison.
+      Options: --accessor-span N (allow exported accessors instead of merging
+               a long-range cross-part write), --allow-var-merge,
+               --verify-build, --fail-on-refusal, --out <file-prefix>,
+               --modules-dir <rel-dir>
 
   stats <recovery-or-linked-dir> [--json] [--out <file-prefix>]
       Summarize recovered part counts, package boundaries, readiness, largest
@@ -174,7 +196,8 @@ Commands:
   recovery-level <project-dir> [--framework auto|vite|next|webpack|unknown]
       Detect the framework-aware recovery route and report the highest achieved
       artifact level: preserved-runtime, linked-recovery, editable-lab, or
-      independently audited source-app.
+      independently audited source-app. Inspection is stdout-only by default;
+      pass --out <prefix> to write JSON and Markdown reports.
 
   source-plan <input-dir> [--out <plan.json>]
       Analyze app-owned source candidates, top-level binding ownership,
@@ -195,6 +218,13 @@ Commands:
       share of bundle size. --sheet renders every image into one contact sheet,
       which is how you work out which glyph is which.
 
+  replay-ump <capture-dir> <output-dir> [--force]
+      Reassemble complete media files from captured googlevideo videoplayback UMP
+      bodies. Validates every MEDIA_HEADER contentLength and requires ranges to be
+      contiguous from byte zero per videoId/itag. Writes exact MP4/WebM bytes plus
+      UMP_MEDIA_PROVENANCE.json. Output must be explicit and outside the capture;
+      nonempty output is refused unless --force is supplied.
+
   coverage <capture-dir> [--list-missing] [--base-url <url>]
       Report what the capture is missing. Webpack fetches chunks on demand, so a
       saved page only holds the code it actually ran: grepping and finding nothing
@@ -214,10 +244,12 @@ Commands:
       assets, install/build success, desktop/mobile browser checks, primary
       interactions, console/request health, and nonblank WebGL output when used.
 
-  mitm-import <capture.har> <capture-dir> [--origin <url>] [--force]
+  mitm-import <capture.har> <capture-output-dir> [--origin <url>] [--force]
       Import authorized HTTP exchanges from a HAR archive. Materializes the
       primary origin, stores replay bodies outside the public tree, redacts
       credentials and sensitive query values, and omits all request bodies.
+      A non-jsmap output directory is never replaced by --force alone; the
+      additional --replace-non-jsmap-output review flag is required.
 
   capture-dir <saved-dir> <out.har> [--origin <url>]
       Convert a "Save All Resources"-style directory-tree capture (per-host
@@ -225,10 +257,11 @@ Commands:
       mitm-recover. Re-detects MIME by content, strips .html from JSON API
       responses, and folds query-variant filenames.
 
-  mitm-recover <capture.har> <recovery-dir> [--capture-dir <dir>] [--origin <url>]
+  mitm-recover <capture.har> <recovery-dir> [--capture-dir <capture-output-dir>] [--origin <url>]
       Chain MITM import, framework-aware recovery, preserved harness generation,
       and recovery-level reporting. Options: --framework auto|vite|next|webpack|unknown,
-      --repair-wasm, --allow-empty, --force.
+      --repair-wasm, --allow-empty, --force, --replace-non-jsmap-output.
+      --capture-dir is a disposable destination, never the saved-resource input.
 
   mitm-verify <dir> [--json <out>] [--max-bytes <n>] [--allow-secrets] [--quiet]
       Safety gate: scan an imported capture (or any recovered dir) for
@@ -307,11 +340,13 @@ Commands:
       'harness', apply auth-scan/offline-mode, use action-catalog for the store
       key + action types, then drive it.
 
-  harness <recovery-dir> [--framework next]
+  harness <recovery-dir> [--framework next] [--replay-policy <reviewed.json>]
       Create or update a scripts/serve-public.mjs static runtime harness for a
       preserved public/ directory. Includes SPA route fallback, extensionless
       route support, cache-busted shim injection, query/hash cleanup, CORS, and
-      generic _next/data JSON fallbacks.
+      generic _next/data JSON fallbacks. A reviewed replay policy can add
+      labeled local API fixtures, private-route blocking, byte-range media, and
+      an offline player adapter.
 
   next-doctor <recovery-dir>
       Inspect captured Next.js _buildManifest.js files, detect missing page
@@ -364,6 +399,7 @@ Examples:
   node scripts/jsmap.cjs rebuild ./recovered-project ./recovered-project-linked --force
   node scripts/jsmap.cjs promote-plan ./recovered-project-linked --top 25
   node scripts/jsmap.cjs promote-apply ./recovered-project-linked --dry-run --limit 5
+  node scripts/jsmap.cjs modularize ./recovered-project-linked --chunk vendor-lit --dry-run
   node scripts/jsmap.cjs stats ./recovered-project-linked
   node scripts/jsmap.cjs recover-workflow ./recovered-project ./recovered-project-linked --force --fetch-missing https://example.com/assets/ --write
   node scripts/jsmap.cjs structure-plan ./recovered-project-linked
@@ -376,6 +412,7 @@ Examples:
   node scripts/jsmap.cjs source-export ./SOURCE_PLAN.json ./source-app --write --verify-packages
   node scripts/jsmap.cjs coverage ./captured-site --list-missing
   node scripts/jsmap.cjs assets ./captured-site --dump-dir ./assets --sheet ./assets/sheet.svg
+  node scripts/jsmap.cjs replay-ump ./captured-site ./replayed-media
   node scripts/jsmap.cjs asset-audit ./source-app --source-root ./recovered-project/public --write
   node scripts/jsmap.cjs source-audit ./source-app --install --url http://127.0.0.1:4173 --interaction '[data-primary-action]'
   node scripts/jsmap.cjs rename-apply ./recovered-project-linked --dry-run
@@ -672,6 +709,10 @@ function main() {
     case 'promotion-apply':
       runScript('apply-module-promotion.cjs', subArgs);
       break;
+    case 'modularize':
+    case 'modularize-chunks':
+      runScript('modularize-chunks.cjs', subArgs);
+      break;
     case 'stats':
     case 'recovery-stats':
       runScript('recovery-stats.cjs', subArgs);
@@ -711,6 +752,9 @@ function main() {
     case 'assets':
     case 'embedded-assets':
       runScript('extract-embedded-assets.cjs', subArgs);
+      break;
+    case 'replay-ump':
+      runScript('extract-ump-media.mjs', subArgs);
       break;
     case 'coverage':
     case 'capture-coverage':

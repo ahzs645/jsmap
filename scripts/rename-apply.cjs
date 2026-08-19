@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const { applyVariableRenames } = require('./lib/deobfuscation-pipeline.cjs');
 
 function printUsage() {
   console.error('Usage: jsmap rename-apply <linked-dir> [--plan <file>] [--dry-run|--write] [--min-confidence N] [--limit N] [--allow-recovered]');
@@ -32,53 +33,24 @@ function toPosix(value) {
   return value.replace(/\\/g, '/');
 }
 
-function replaceIdentifierOutsideStrings(source, from, to) {
-  let output = '';
-  let replacements = 0;
-  const isIdent = (ch) => /[A-Za-z0-9_$]/.test(ch || '');
-  for (let i = 0; i < source.length;) {
-    const ch = source[i];
-    if (ch === '"' || ch === "'" || ch === '`') {
-      const quote = ch;
-      const start = i++;
-      while (i < source.length) {
-        if (source[i] === '\\') {
-          i += 2;
-          continue;
-        }
-        if (source[i] === quote) {
-          i++;
-          break;
-        }
-        i++;
-      }
-      output += source.slice(start, i);
-      continue;
-    }
-    if (ch === '/' && source[i + 1] === '/') {
-      const end = source.indexOf('\n', i + 2);
-      const next = end === -1 ? source.length : end;
-      output += source.slice(i, next);
-      i = next;
-      continue;
-    }
-    if (ch === '/' && source[i + 1] === '*') {
-      const end = source.indexOf('*/', i + 2);
-      const next = end === -1 ? source.length : end + 2;
-      output += source.slice(i, next);
-      i = next;
-      continue;
-    }
-    if (source.startsWith(from, i) && !isIdent(source[i - 1]) && !isIdent(source[i + from.length])) {
-      output += to;
-      i += from.length;
-      replacements++;
-      continue;
-    }
-    output += ch;
-    i++;
-  }
-  return { output, replacements };
+// Renaming used to be a character scan. It skipped strings and comments, but it
+// still rewrote every other word-bounded occurrence — including object keys and
+// member accesses — so `{e:1}` became `{event:1}` and `o.e` became `o.event`,
+// silently changing what the recovered program does.
+//
+// The repo already had the safe version: applyVariableRenames() walks the AST,
+// skips non-renamable identifier positions, guards against colliding with an
+// existing name, and refuses to hand back code that stopped parsing.
+// scripts/test-rename-safety.cjs was written to pin exactly that behaviour after
+// the same bug was fixed in the deobfuscation pipeline; this script kept a stale
+// second copy of the unsafe implementation.
+function renameIdentifier(source, from, to) {
+  const output = applyVariableRenames(source, new Map([[from, to]]));
+  // applyVariableRenames returns the input unchanged when it declines the rename
+  // (collision with an existing name, unparseable input, or a parse-gate reject).
+  if (output === source) return { output, replacements: 0, applied: false };
+  const occurrences = output.match(new RegExp(`\\b${to.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'));
+  return { output, replacements: occurrences ? occurrences.length : 0, applied: true };
 }
 
 async function main() {
@@ -118,10 +90,11 @@ async function main() {
         const before = source.slice(0, start);
         const scoped = source.slice(start, end);
         const after = source.slice(end);
-        replaced = replaceIdentifierOutsideStrings(scoped, candidate.symbol, candidate.suggestedName);
+        replaced = renameIdentifier(scoped, candidate.symbol, candidate.suggestedName);
         source = `${before}${replaced.output}${after}`;
       } else {
-        replaced = replaceIdentifierOutsideStrings(source, candidate.symbol, candidate.suggestedName);
+        replaced = renameIdentifier(source, candidate.symbol, candidate.suggestedName);
+        source = replaced.output;
       }
       fileReplacements += replaced.replacements;
       outputs.push({
@@ -130,6 +103,7 @@ async function main() {
         suggestedName: candidate.suggestedName,
         confidence: candidate.confidence,
         replacements: replaced.replacements,
+        applied: replaced.applied !== false,
         dryRun: flags.dryRun,
       });
     }
@@ -148,7 +122,11 @@ async function main() {
   console.log(`Manifest: ${manifestPath}`);
 }
 
-main().catch((error) => {
+if (require.main === module) {
+  main().catch((error) => {
   console.error(error instanceof Error ? error.stack || error.message : error);
-  process.exitCode = 1;
-});
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { renameIdentifier };

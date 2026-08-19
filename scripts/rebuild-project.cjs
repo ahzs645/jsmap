@@ -12,10 +12,11 @@
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const { analyzePart } = require('./lib/binding-graph.cjs');
 const acornLoose = require('acorn-loose');
 
 function printUsage() {
-  console.error('Usage: jsmap rebuild <recovery-dir> [output-dir] [--force] [--html <public-html>] [--fetch-missing <asset-base-url>]');
+  console.error('Usage: jsmap rebuild <recovery-dir> [output-dir] [--force] [--html <public-html>] [--fetch-missing <asset-base-url>] [--stub-missing-imports]');
 }
 
 function parseArgs(argv) {
@@ -23,6 +24,7 @@ function parseArgs(argv) {
     force: false,
     html: null,
     fetchMissing: null,
+    stubMissingImports: false,
   };
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
@@ -30,6 +32,7 @@ function parseArgs(argv) {
     if (arg === '--force') flags.force = true;
     else if (arg === '--html') flags.html = argv[++i];
     else if (arg === '--fetch-missing') flags.fetchMissing = argv[++i];
+    else if (arg === '--stub-missing-imports') flags.stubMissingImports = true;
     else if (arg === '--help' || arg === '-h') {
       printUsage();
       process.exit(0);
@@ -537,21 +540,26 @@ function collectLeafCandidates(content, item) {
 
 function analyzeRecoveredPart(content, item) {
   const code = stripNonCode(content);
+  // Real scope analysis, not regexes over stripped text. The regex version
+  // counted every declaration in the file, so a Lit component part reported its
+  // function locals as top-level bindings and its method names as free
+  // identifiers, which made every part look hopelessly coupled.
+  const facts = analyzePart(content);
   const declarations = unique([
-    ...firstMatches(/(?:^|\n)\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\b/g, code),
-    ...firstMatches(/(?:^|\n)\s*(?:export\s+)?class\s+([A-Za-z_$][\w$]*)\b/g, code),
-    ...firstMatches(/(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\b/g, code),
+    ...(facts.parsed ? facts.declarations : []),
     ...((item.declarations || []).map((decl) => decl.name)),
   ]).slice(0, 80);
   const exportNames = unique([
+    ...(facts.parsed ? facts.exports : []),
     ...firstMatches(/export\s*\{([^}]+)\}/g, content, 20)
       .flatMap((group) => group.split(',').map((name) => name.trim().split(/\s+as\s+/i).pop()?.trim())),
-    ...firstMatches(/export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\b/g, code),
-    ...firstMatches(/export\s+class\s+([A-Za-z_$][\w$]*)\b/g, code),
-    ...firstMatches(/export\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)\b/g, code),
-  ]).slice(0, 80);
-  const staticImports = firstMatches(/(?:^|\n)\s*import\s+(?:[^'"]+\s+from\s+)?["']([^"']+)["']/g, content, 80);
-  const dynamicImports = firstMatches(/import\(\s*(?:\/\*\s*@vite-ignore\s*\*\/\s*)?["']([^"']+)["']\s*\)/g, content, 80);
+  ]).filter(Boolean).slice(0, 80);
+  const staticImports = facts.parsed
+    ? facts.imports
+    : firstMatches(/(?:^|\n)\s*import\s+(?:[^'"]+\s+from\s+)?["']([^"']+)["']/g, content, 80);
+  const dynamicImports = facts.parsed
+    ? facts.dynamicImports
+    : firstMatches(/import\(\s*(?:\/\*\s*@vite-ignore\s*\*\/\s*)?["']([^"']+)["']\s*\)/g, content, 80);
   const knownBundleGlobals = [
     '__defProp', '__export', '__copyProps', '__toESM', '__commonJS', '__publicField',
     '__vitePreload', '__vite__mapDeps', 'reactExports', 'jsxRuntimeExports', 'require$$',
@@ -559,12 +567,25 @@ function analyzeRecoveredPart(content, item) {
   const runtimeSignals = item.runtimeSignals || [];
   const runtimeCategories = unique(runtimeSignals.map((signal) => signal.category));
   const runtimeRoles = unique(runtimeSignals.map((signal) => signal.role));
-  const externalIdentifiers = collectExternalIdentifiers(content, declarations)
+  // Names owned by a sibling part. Globals are reported separately by the
+  // analyzer, so they no longer inflate the coupling count.
+  const externalIdentifiers = (facts.parsed
+    ? facts.externalIdentifiers
+    : collectExternalIdentifiers(content, declarations))
     .filter((name) => !exportNames.includes(name))
     .slice(0, 80);
   const leafCandidates = collectLeafCandidates(content, item);
+
+  // Readiness must describe whether a part can become a module, not whether it
+  // runs standalone inside the concatenation. `runnable: false` is stamped on
+  // every declaration section by the splitter, so deriving the verdict from it
+  // graded 2946 of 2955 parts `inspection-only` on the asunder/knit capture
+  // regardless of what the code actually looked like.
   let extractionReadiness = 'bundle-scope';
-  if (item.inspectionFragment === true || item.runnable === false) extractionReadiness = 'inspection-only';
+  const blockingHazards = facts.parsed ? (facts.hazards || []) : [];
+  if (item.inspectionFragment === true) extractionReadiness = 'inspection-only';
+  else if (!facts.parsed) extractionReadiness = 'unparseable';
+  else if (blockingHazards.length > 0) extractionReadiness = 'hazard-blocked';
   else if (runtimeCategories.some((category) => /runtime|vendor|compiler/i.test(category))) extractionReadiness = 'runtime-wrapper';
   else if ((knownBundleGlobals.length > 0 || externalIdentifiers.length > 12) && (exportNames.length > 0 || declarations.length > 0)) extractionReadiness = 'wrapper-candidate';
   else if (exportNames.length > 0 || declarations.length > 0) extractionReadiness = 'source-candidate';
@@ -575,6 +596,9 @@ function analyzeRecoveredPart(content, item) {
     dynamicImports,
     bundleGlobals: knownBundleGlobals,
     externalIdentifiers,
+    globals: facts.parsed ? facts.globals : [],
+    hazards: blockingHazards,
+    hasTopLevelEffect: facts.parsed ? facts.hasTopLevelEffect : null,
     runtimeSignals,
     runtimeCategories,
     runtimeRoles,
@@ -669,6 +693,7 @@ async function main() {
     copiedModules: [],
     routeStubs: routeStubMap(),
     fetchMissing: flags.fetchMissing,
+    stubMissingImports: flags.stubMissingImports,
     repairedWasmAssets,
   };
   const moduleIndex = {
@@ -895,13 +920,45 @@ function stripLinkHeader(text) {
   return text.replace(/^\\/\\* @jsmap-link[\\s\\S]*?\\*\\/\\s*/, '');
 }
 
+async function readJsonIfPresent(file) {
+  try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return null; }
+}
+
 function normalizeLinkedContent(text) {
   return stripLinkHeader(text)
     .replace(/import\\(\\s*(?:\\/\\*\\s*@vite-ignore\\s*\\*\\/\\s*)?(["']\\.\\/[^"']+\\.js["'])\\s*\\)/g, 'import(/* @vite-ignore */ __jsmapDynamicImport($1))')
     .replace(/\\b__vitePreload\\b/g, '__jsmapVitePreload');
 }
 
+// A promoted chunk has a real module graph under src/recovered-modules/. Point
+// the entry at its barrel instead of re-concatenating the parts, so the app
+// loads the modules rather than a rebuilt blob. Anything not marked promotable
+// (refused, or never modularized) keeps the ordered-concat path untouched.
+const modularization = await readJsonIfPresent(path.join(root, 'recovery-modularization.json'));
+const promotedChunks = new Map(
+  (modularization?.chunks || [])
+    .filter((chunk) => chunk.verdict === 'promotable')
+    .map((chunk) => [chunk.entry, chunk]),
+);
+
 for (const [entry, config] of Object.entries(plan.entries)) {
+  const promoted = promotedChunks.get(entry);
+  if (promoted) {
+    const barrel = path.join(root, 'src', 'recovered-modules', promoted.chunk, 'index.js');
+    if (await exists(barrel)) {
+      const specifier = path.posix.join('..', 'recovered-modules', promoted.chunk, 'index.js');
+      const reexport = promoted.exports?.length
+        ? \`export { \${promoted.exports.join(', ')} } from './\${specifier}';\\n\`
+        : '';
+      await fs.writeFile(path.join(outDir, entry), [
+        \`/* Promoted by jsmap modularize: \${promoted.modules} modules from \${promoted.parts} parts. */\`,
+        \`import './\${specifier}';\`,
+        reexport,
+      ].join('\\n'), 'utf8');
+      console.log(\`[jsmap] \${entry} -> \${promoted.modules} promoted modules\`);
+      continue;
+    }
+  }
   const parts = [];
   parts.push(\`/* Rebuilt by jsmap from recovery-link-plan.json entry \${entry}. */\`);
   parts.push('const __jsmapDynamicImport = (specifier) => specifier;');
@@ -963,13 +1020,53 @@ while (changed) {
   }
 }
 
+if (missingDynamicImports.size > 0 && plan.stubMissingImports) {
+  // These modules were never captured, so there is nothing to recover. A stub
+  // makes the module graph resolvable so the rest of the app can build and
+  // boot; it deliberately carries no behaviour, and throws when used, which is
+  // exactly what the uncaptured import does today when it 404s. It is NOT
+  // recovered source and is labelled as such in the file itself.
+  const stubbed = [];
+  for (const [importFile, fromFile] of missingDynamicImports) {
+    const detail = \`\${importFile} was never captured. jsmap generated this stub so the surrounding app could build; it has no recovered implementation.\`;
+    await fs.writeFile(path.join(outDir, importFile), [
+      '/*',
+      \` * NOT RECOVERED SOURCE — generated stub for \${importFile}.\`,
+      ' *',
+      \` * This module is dynamically imported by \${fromFile} but was never present\`,
+      ' * in the capture, so no implementation could be recovered. The stub exists',
+      ' * only so the module graph resolves and the rest of the app can build and',
+      ' * boot. Every export throws on use, matching the runtime behaviour of the',
+      ' * uncaptured import it replaces.',
+      ' *',
+      ' * Recover it by re-capturing the site while exercising the feature that',
+      ' * loads this module, then rerun jsmap rebuild without --stub-missing-imports.',
+      ' */',
+      \`const DETAIL = \${JSON.stringify(detail)};\`,
+      'function __jsmapMissingModule() { throw new Error(DETAIL); }',
+      'export default __jsmapMissingModule;',
+      'export const __jsmapStub = true;',
+      '',
+    ].join('\\n'), 'utf8');
+    stubbed.push({ file: importFile, importedBy: fromFile });
+  }
+  await fs.writeFile(path.join(outDir, '..', '..', 'MISSING_DYNAMIC_IMPORTS.json'), JSON.stringify({
+    generatedBy: 'jsmap rebuild --stub-missing-imports',
+    note: 'These modules were never captured. Each was replaced by a stub that throws on use. They are not recovered source.',
+    stubbed,
+  }, null, 2) + '\\n', 'utf8');
+  console.warn(\`[jsmap] stubbed \${stubbed.length} uncaptured dynamic import(s); see MISSING_DYNAMIC_IMPORTS.json\`);
+  for (const item of stubbed) console.warn(\`  - \${item.file} <- \${item.importedBy}\`);
+  missingDynamicImports.clear();
+}
+
 if (missingDynamicImports.size > 0) {
   const details = [...missingDynamicImports.entries()]
     .map(([importFile, fromFile]) => \`  - \${importFile} <- \${fromFile}\`)
     .join('\\n');
   const fetchHint = plan.fetchMissing
     ? \`Fetch base was \${plan.fetchMissing}, but these files were not found there.\`
-    : 'Rerun jsmap rebuild with --fetch-missing <asset-base-url> if the missing files can be fetched from the original site assets.';
+    : 'Rerun jsmap rebuild with --fetch-missing <asset-base-url> if the missing files can be fetched from the original site assets, or --stub-missing-imports to build with labelled stubs.';
   throw new Error(\`Missing dynamic imports:\\n\${details}\\n\${fetchHint}\`);
 }
 

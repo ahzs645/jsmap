@@ -42,7 +42,18 @@
     "test:custom-element-naming": "node scripts/test-custom-element-naming.cjs",
     "test:embedded-assets": "node scripts/test-embedded-assets.cjs",
     "test:capture-coverage": "node scripts/test-capture-coverage.cjs",
-    "split:bundle": "node scripts/split-bundle-ast.cjs"
+    "split:bundle": "node scripts/split-bundle-ast.cjs",
+    "test:wasm-wat-repair": "node scripts/test-wasm-wat-repair.cjs",
+    "test:framework-detection": "node scripts/test-framework-detection.cjs",
+    "test:stub-missing-imports": "node scripts/test-stub-missing-imports.cjs",
+    "test:split-seam-safety": "node scripts/test-split-seam-safety.cjs",
+    "test:rename-apply-safety": "node scripts/test-rename-apply-safety.cjs",
+    "test:capture-dir": "node scripts/test-capture-dir.cjs",
+    "test:ump-media": "node scripts/test-ump-media.cjs",
+    "test:dependency-fingerprints": "node scripts/test-dependency-fingerprints.cjs",
+    "test:binding-graph": "node scripts/test-binding-graph.cjs",
+    "test:module-partition": "node scripts/test-module-partition.cjs",
+    "test:promotion-roundtrip": "node scripts/test-promotion-roundtrip.cjs"
   },
   "dependencies": {
     "@wakaru/unminify": "^0.2.2",
@@ -50,7 +61,9 @@
     "acorn": "^8.16.0",
     "acorn-jsx": "^5.3.2",
     "acorn-loose": "^8.5.2",
+    "eslint-scope": "^8.4.0",
     "file-saver": "^2.0.5",
+    "googlevideo": "^4.1.1",
     "jszip": "^3.10.1",
     "prettier": "^3.8.1",
     "react": "^19.2.4",
@@ -85,6 +98,7 @@
     "jscodeshift": "^17.3.0",
     "lebab": "^3.2.9",
     "putout": "^42.7.18",
-    "restringer": "^2.2.0"
+    "restringer": "^2.2.0",
+    "wabt": "^1.0.39"
   }
 }
