@@ -150,17 +150,54 @@ function detectRecoveryLevels(root) {
   ].filter(fs.existsSync);
   evidence['preserved-runtime'] = preservedFiles.map((file) => path.relative(absoluteRoot, file));
 
+  const linkPlanFile = path.join(absoluteRoot, 'recovery-link-plan.json');
   const linkedFiles = [
     path.join(absoluteRoot, 'recovery-module-index.json'),
-    path.join(absoluteRoot, 'recovery-link-plan.json'),
+    linkPlanFile,
     path.join(absoluteRoot, 'src', 'recovered-parts'),
   ].filter(fs.existsSync);
-  evidence['linked-recovery'] = linkedFiles.map((file) => path.relative(absoluteRoot, file));
+  // linked-recovery requires the page entry to actually run recovered code.
+  // `jsmap rebuild` records `entryLink.status` when it could not prove the
+  // captured entry <script> belongs to a recovered chunk; such a workspace still
+  // boots the captured production bundle, so calling it linked-recovery would
+  // describe preserved-runtime as a level above itself. Workspaces from older
+  // rebuilds carry no entryLink and are left judged on artifacts alone.
+  let entryLink = null;
+  if (fs.existsSync(linkPlanFile)) {
+    try {
+      entryLink = JSON.parse(fs.readFileSync(linkPlanFile, 'utf8')).entryLink || null;
+    } catch {}
+  }
+  evidence['linked-recovery'] = entryLink && entryLink.status !== 'linked'
+    ? []
+    : linkedFiles.map((file) => path.relative(absoluteRoot, file));
+  if (entryLink && entryLink.status !== 'linked') {
+    evidence['linked-recovery-blocked'] = [
+      `recovery-link-plan.json:entryLink.status=${entryLink.status}`,
+      entryLink.reason || `captured entry ${entryLink.capturedEntry} is not linked to a recovered chunk`,
+    ];
+  }
 
-  const labFiles = [
-    path.join(absoluteRoot, 'PROMOTION_MANIFEST.json'),
-    path.join(absoluteRoot, 'src', 'recovered'),
-  ].filter(fs.existsSync);
+  // editable-lab is earned by promoted modules, not by the presence of the
+  // scaffolding that would hold them. A PROMOTION_MANIFEST.json with an empty
+  // `promoted` list and an empty src/recovered/ is an empty playground, and
+  // reporting it as a level above linked-recovery describes one level as another.
+  const manifestFile = path.join(absoluteRoot, 'PROMOTION_MANIFEST.json');
+  const recoveredDir = path.join(absoluteRoot, 'src', 'recovered');
+  const labFiles = [];
+  if (fs.existsSync(manifestFile)) {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+      if (Array.isArray(manifest.promoted) ? manifest.promoted.length > 0 : true) labFiles.push(manifestFile);
+    } catch {
+      labFiles.push(manifestFile);
+    }
+  }
+  if (fs.existsSync(recoveredDir)) {
+    try {
+      if (fs.readdirSync(recoveredDir).some((name) => name.endsWith('.js'))) labFiles.push(recoveredDir);
+    } catch {}
+  }
   evidence['editable-lab'] = labFiles.map((file) => path.relative(absoluteRoot, file));
 
   const sourceAuditFile = path.join(absoluteRoot, 'SOURCE_APP_AUDIT.json');

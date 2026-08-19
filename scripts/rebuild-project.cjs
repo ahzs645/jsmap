@@ -235,9 +235,97 @@ async function repairInvalidWasmAssets(publicRoot, assetBaseUrl) {
   return repaired;
 }
 
+// Returns { name, src } for the captured entry module script, or null.
+// `name` is the basename that matches a recovered chunk manifest `source`;
+// `src` is the attribute value exactly as captured so the tag can be rewritten
+// in place regardless of the site's asset layout.
 function findMainScript(html) {
-  return /<script\b[^>]*type=["']module["'][^>]*src=["']\/?assets\/([^"']+\.js)["'][^>]*>\s*<\/script>/i.exec(html)?.[1] ||
-    /<script\b[^>]*src=["']\/?assets\/([^"']+\.js)["'][^>]*type=["']module["'][^>]*>\s*<\/script>/i.exec(html)?.[1];
+  // Vite's conventional /assets/<name>.js entry is preferred and returned exactly
+  // as captured (byte-stable with existing rollup/webpack recovery behavior).
+  const viteSrc =
+    /<script\b[^>]*type=["']module["'][^>]*src=["'](\/?assets\/[^"']+\.js)["'][^>]*>\s*<\/script>/i.exec(html)?.[1] ||
+    /<script\b[^>]*src=["'](\/?assets\/[^"']+\.js)["'][^>]*type=["']module["'][^>]*>\s*<\/script>/i.exec(html)?.[1];
+  if (viteSrc) return { name: viteSrc.replace(/^\/?assets\//, ''), src: viteSrc };
+
+  // Generalized fallback: many real captures do not use Vite's /assets/ layout —
+  // Astro emits /_astro/<name>.js, per-route apps ship /<app>/index.js, webpack
+  // ships /static/js/<name>.js, etc. Accept any same-origin module script and
+  // return its basename so it matches the recovered chunk manifest `source`
+  // (which is also a basename). External/CDN scripts (analytics beacons, etc.)
+  // and inline module scripts are skipped.
+  for (const match of html.matchAll(/<script\b[^>]*>/gi)) {
+    const tag = match[0];
+    if (!/type=["']module["']/i.test(tag)) continue;
+    const src = /\bsrc=["']([^"']+)["']/i.exec(tag)?.[1];
+    if (!src) continue; // inline module script
+    if (/^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(src)) continue; // external/CDN/protocol-relative
+    const clean = src.split(/[?#]/)[0];
+    if (!/\.js$/i.test(clean)) continue;
+    return { name: path.posix.basename(clean), src };
+  }
+  return null;
+}
+
+// Resolve a captured <script src> to a path relative to the served site root so
+// it can be compared with recovered-chunk provenance.
+function resolveScriptRel(htmlFile, siteRoot, src) {
+  if (!src) return null;
+  const clean = src.split(/[?#]/)[0];
+  if (clean.startsWith('/')) return clean.replace(/^\/+/, '');
+  const htmlDir = path.posix.dirname(toPosix(path.relative(siteRoot, htmlFile)));
+  return path.posix.normalize(path.posix.join(htmlDir === '.' ? '' : htmlDir, clean));
+}
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Index every candidate source file a recovered chunk could have been split
+// from (the deobfuscated snapshots and the preserved capture), keyed by
+// basename. Chunk manifests only record a basename, so this is what makes
+// same-basename bundles (for example /bower/index.js and /knit/index.js)
+// distinguishable at link time.
+async function indexCaptureSources(searchRoots) {
+  const byBasename = new Map();
+  for (const root of searchRoots) {
+    if (!await pathExists(root)) continue;
+    for (const file of await walk(root)) {
+      if (!/\.[cm]?js$/i.test(file)) continue;
+      const base = path.basename(file);
+      const rel = toPosix(path.relative(root, file));
+      if (!byBasename.has(base)) byBasename.set(base, new Map());
+      const rels = byBasename.get(base);
+      if (!rels.has(rel)) rels.set(rel, []);
+      rels.get(rel).push(file);
+    }
+  }
+  return byBasename;
+}
+
+// Decide which captured file a recovered chunk actually came from.
+// `recover` names chunk directories after the bundle basename, so two captured
+// bundles that share a basename can resolve to one chunk name and the later
+// split can overwrite the earlier one. When the basename is unique there is
+// nothing to prove; when it is not, the chunk is matched back to a specific
+// captured file by line count and by its first part being a literal prefix of
+// that file (parts are line slices of their source).
+async function resolveChunkProvenance(sourceIndex, manifest, firstPartText) {
+  const base = path.posix.basename(manifest.source || '');
+  const rels = sourceIndex.get(base);
+  if (!rels || rels.size === 0) return { status: 'no-captured-source', candidates: [] };
+  const candidates = [...rels.keys()].sort();
+  if (candidates.length === 1) return { status: 'unambiguous', source: candidates[0], candidates };
+  const prefix = (firstPartText || '').replace(/\s+$/, '');
+  for (const rel of candidates) {
+    for (const file of rels.get(rel)) {
+      const text = await fsp.readFile(file, 'utf8').catch(() => '');
+      if (!text) continue;
+      if (typeof manifest.totalLines === 'number' && text.split('\n').length !== manifest.totalLines) continue;
+      if (prefix && !text.startsWith(prefix)) continue;
+      return { status: 'verified', source: rel, candidates };
+    }
+  }
+  return { status: 'ambiguous', candidates };
 }
 
 // Order preserved bundles the way a webpack app loads them: runtime/bootstrap
@@ -288,19 +376,23 @@ async function synthesizeBundleOnlyHtml(publicDir) {
   ].join('\n');
 }
 
-function rewriteHtml(html, entryFile) {
-  let next = html
+// Point the captured entry <script> at the linked recovery entry. The tag is
+// matched by the exact `src` that findMainScript reported, so non-Vite layouts
+// (/_astro/<name>.js, /<app>/index.js, /static/js/<name>.js) are rewritten too.
+// Previously only /assets/*.js was rewritten, so any other layout produced a
+// workspace that silently kept loading the captured production bundle.
+// `scriptSrc` is null when the entry link could not be proven; the captured tag
+// is then left untouched rather than wired to an unrelated chunk.
+function rewriteHtml(html, entryFile, scriptSrc) {
+  const next = html
     .replace(/<script\b[^>]*src=["']https:\/\/www\.googletagmanager\.com\/[^>]*>\s*<\/script>/gi, '')
     .replace(/<script\b[^>]*src=["']https:\/\/static\.cloudflareinsights\.com\/[^>]*>\s*<\/script>/gi, '');
-  next = next.replace(
-    /<script\b[^>]*type=["']module["'][^>]*src=["']\/?assets\/[^"']+\.js["'][^>]*>\s*<\/script>/i,
-    `<script type="module" src="/src/recovered-entry/${entryFile}"></script>`,
+  if (!scriptSrc) return next;
+  const entryTag = new RegExp(
+    `<script\\b[^>]*\\bsrc=["']${escapeRegExp(scriptSrc)}["'][^>]*>\\s*</script>`,
+    'i',
   );
-  next = next.replace(
-    /<script\b[^>]*src=["']\/?assets\/[^"']+\.js["'][^>]*type=["']module["'][^>]*>\s*<\/script>/i,
-    `<script type="module" src="/src/recovered-entry/${entryFile}"></script>`,
-  );
-  return next;
+  return next.replace(entryTag, `<script type="module" src="/src/recovered-entry/${entryFile}"></script>`);
 }
 
 function linkHeader(data) {
@@ -540,14 +632,18 @@ async function main() {
   }
   let html = '';
   let mainScript = null;
+  let mainScriptSrc = null;
   if (!bundleOnly) {
     html = await fsp.readFile(htmlFile, 'utf8');
-    mainScript = findMainScript(html);
+    const mainScriptRef = findMainScript(html);
+    mainScript = mainScriptRef ? mainScriptRef.name : null;
+    mainScriptSrc = mainScriptRef ? mainScriptRef.src : null;
     if (!mainScript) {
       throw new Error(
-        `Could not find a module script under /assets/*.js in ${htmlFile}.\n` +
+        `Could not find a same-origin <script type="module"> entry in ${htmlFile}.\n` +
         `'rebuild' links the captured SPA entry to recovered chunks; the HTML must reference its main bundle as ` +
-        `<script type="module" src="/assets/<name>.js">. Pass a different page with --html <file> if this is not the app entry.`,
+        `a local module script (for example <script type="module" src="/assets/<name>.js">, /_astro/<name>.js, ` +
+        `or /<app>/index.js). Pass a different page with --html <file> if this is not the app entry.`,
       );
     }
   } else {
@@ -589,6 +685,14 @@ async function main() {
     },
   };
 
+  // Chunk manifests only record a bundle basename, so the same `source` can
+  // describe two different captured bundles. Index the candidate sources once
+  // and resolve each chunk back to the file it was really split from.
+  const sourceIndex = await indexCaptureSources([
+    path.join(recoveryDir, 'recovery/deobfuscated'),
+    siteRoot,
+  ]);
+
   const recoveredPartsRoot = path.join(outputDir, 'src/recovered-parts');
   for (const manifestPath of manifests) {
     const chunkDir = path.dirname(manifestPath);
@@ -598,7 +702,13 @@ async function main() {
     // AST splits expose `files`; webpack-module splits expose `modules`. Both
     // entries carry file/startLine/endLine/lines, so normalize to one list.
     const manifestItems = manifest.files || manifest.modules || [];
-    const outputSource = manifest.source;
+    const firstPartText = manifestItems.length
+      ? await fsp.readFile(path.join(chunkDir, manifestItems[0].file), 'utf8').catch(() => '')
+      : '';
+    const provenance = await resolveChunkProvenance(sourceIndex, manifest, firstPartText);
+    // Two chunks can carry the same manifest `source`; keep generated entry
+    // module names unique so neither chunk's link is silently dropped.
+    const outputSource = plan.entries[manifest.source] ? `${chunkName}.js` : manifest.source;
     const parts = [];
     for (let index = 0; index < manifestItems.length; index++) {
       const item = manifestItems[index];
@@ -648,6 +758,8 @@ async function main() {
     }
     plan.entries[outputSource] = {
       source: manifest.source,
+      capturedSource: provenance.source || null,
+      provenance,
       chunk: chunkName,
       totalFiles: manifest.totalFiles ?? manifest.moduleCount ?? manifestItems.length,
       totalLines: manifest.totalLines,
@@ -656,6 +768,8 @@ async function main() {
     };
     moduleIndex.entries[outputSource] = {
       chunk: chunkName,
+      capturedSource: provenance.source || null,
+      provenanceStatus: provenance.status,
       parts: parts.map((part) => ({
         file: part.file,
         order: part.order,
@@ -674,9 +788,54 @@ async function main() {
   if (Object.keys(plan.entries).length === 0) {
     throw new Error(`No recovered chunk manifests were found under ${chunksRoot}. Re-run 'jsmap recover' with --large-js-mode split-raw so the captured bundles are split for rebuild.`);
   }
-  if (!bundleOnly && !plan.entries[mainScript]) {
-    throw new Error(`Main script ${mainScript} was not found in recovered chunk manifests.`);
+  // Wire the captured page entry to a recovered entry only when the chunk is
+  // provably the one that bundle was split from. A basename match alone is not
+  // proof: `recover` names chunk directories after the bundle basename, so a
+  // later same-basename bundle can overwrite an earlier one's parts, and
+  // linking on basename would present a different app's code as this page's
+  // recovered entry.
+  let entryLink = null;
+  if (!bundleOnly) {
+    const capturedEntry = resolveScriptRel(htmlFile, siteRoot, mainScriptSrc);
+    const entryList = Object.entries(plan.entries);
+    const proven = entryList.find(([, entry]) => entry.capturedSource && entry.capturedSource === capturedEntry);
+    const byBasename = entryList.filter(([, entry]) => path.posix.basename(entry.source) === path.posix.basename(mainScript));
+    if (!proven && byBasename.length === 0) {
+      throw new Error(`Main script ${mainScript} was not found in recovered chunk manifests.`);
+    }
+    if (proven) {
+      mainScript = proven[0];
+      entryLink = {
+        status: 'linked',
+        capturedEntry,
+        entryModule: mainScript,
+        chunk: proven[1].chunk,
+        chunkSource: proven[1].capturedSource,
+      };
+    } else {
+      const [name, entry] = byBasename[0];
+      mainScript = name;
+      entryLink = {
+        status: 'captured-bundle',
+        capturedEntry,
+        entryModule: name,
+        chunk: entry.chunk,
+        chunkSource: entry.capturedSource,
+        candidates: entry.provenance ? entry.provenance.candidates : [],
+        reason: entry.capturedSource
+          ? `recovered chunk '${entry.chunk}' was split from ${entry.capturedSource}, not from the captured entry ${capturedEntry}`
+          : `recovered chunk '${entry.chunk}' could not be traced back to the captured entry ${capturedEntry}`,
+      };
+      console.warn(
+        `WARNING: entry not linked. ${entryLink.reason}.\n` +
+        `  index.html keeps loading the captured bundle /${capturedEntry}; src/recovered-entry/${name} is generated ` +
+        `but not used by the page. Recorded as entryLink.status=captured-bundle in recovery-link-plan.json.`,
+      );
+    }
+    plan.mainScript = mainScript;
   }
+  plan.entryLink = entryLink;
+  moduleIndex.summary.entryLink = entryLink;
   // In bundle-only mode, pick a representative entry for the synthesized page:
   // prefer a bootstrap/runtime/main bundle, else the entry with the most parts.
   if (bundleOnly && !mainScript) {
@@ -700,7 +859,7 @@ async function main() {
   await fsp.writeFile(path.join(outputDir, 'recovery-module-index.json'), JSON.stringify(moduleIndex, null, 2) + '\n', 'utf8');
   const indexHtml = bundleOnly
     ? await synthesizeBundleOnlyHtml(outputPublicDir)
-    : rewriteHtml(html, mainScript);
+    : rewriteHtml(html, mainScript, entryLink && entryLink.status === 'linked' ? mainScriptSrc : null);
   await fsp.writeFile(path.join(outputDir, 'index.html'), indexHtml, 'utf8');
   await fsp.writeFile(path.join(outputDir, 'package.json'), JSON.stringify({
     name: `${path.basename(recoveryDir).replace(/[^a-zA-Z0-9-]+/g, '-')}-linked-rebuild`,
@@ -757,7 +916,11 @@ for (const [entry, config] of Object.entries(plan.entries)) {
 for (const [file, exportName] of Object.entries(plan.routeStubs || {})) {
   const target = path.join(outDir, file);
   const text = await fs.readFile(target, 'utf8').catch(() => '');
-  if (text && !text.trimStart().startsWith('<!DOCTYPE')) continue;
+  // Only repair a route chunk that WAS captured but came back as an HTML error
+  // document. An absent file is an uncaptured route, and writing a placeholder
+  // component for it would fabricate recovered source for a screen this capture
+  // never contained.
+  if (!text || !text.trimStart().startsWith('<!DOCTYPE')) continue;
   await fs.writeFile(target, [
     "import { j as jsxRuntimeExports } from './vendor-react-odnmRmss.js';",
     \`function \${exportName}() {\`,
@@ -873,7 +1036,9 @@ export default {
     [
       '# jsmap Linked Rebuild',
       '',
-      'This app runs recovered code through generated link metadata.',
+      entryLink && entryLink.status !== 'linked'
+        ? `This workspace still boots the CAPTURED bundle \`/${entryLink.capturedEntry}\`, not recovered code: ${entryLink.reason}. The recovered parts below are inspectable evidence only.`
+        : 'This app runs recovered code through generated link metadata.',
       '',
       '- `src/recovered-parts/*` keeps the recovered split files separate with `@jsmap-link` headers.',
       '- `recovery-link-plan.json` records ordered links back to original bundle entries.',
@@ -891,7 +1056,11 @@ export default {
     'utf8',
   );
 
-  console.log(`Linked rebuild workspace written to ${outputDir}`);
+  if (entryLink && entryLink.status !== 'linked') {
+    console.log(`Rebuild workspace written to ${outputDir} (entry NOT linked — page still boots the captured bundle /${entryLink.capturedEntry}).`);
+  } else {
+    console.log(`Linked rebuild workspace written to ${outputDir}`);
+  }
 }
 
 main().catch((error) => {

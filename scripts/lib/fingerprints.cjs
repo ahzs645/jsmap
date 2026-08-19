@@ -3,7 +3,11 @@ const DEPENDENCY_FINGERPRINTS = [
     name: 'react-router-dom',
     version: '^7.11.0',
     evidence: 'router exports or react-router-dom string',
-    patterns: [/react-router-dom|BrowserRouter|useNavigate|Routes|Navigate/],
+    // Bare `Routes`/`Navigate` are ordinary English words that appear in any app
+    // with navigation: a Lit weaving app was reported as depending on this
+    // package purely because it contained `handleTrackerNavigated`. Require the
+    // package name or a distinctive React Router export instead.
+    patterns: [/react-router-dom|\bBrowserRouter\b|\buseNavigate\b|\bcreateBrowserRouter\b|\bRouterProvider\b|\buseRouteError\b|\bNavLink\b/],
   },
   {
     name: 'react',
@@ -53,8 +57,12 @@ const DEPENDENCY_FINGERPRINTS = [
   {
     name: '@stripe/stripe-js',
     version: '^7.0.0',
-    evidence: 'Stripe string evidence',
-    patterns: [/\bstripe\b|Stripe/],
+    evidence: 'Stripe SDK URL, loader, or publishable key',
+    // "stripe" is a common visual-design word. This fired on the CSS custom
+    // properties `--gesso-snackbar-stripe-width-spacing` and
+    // `--notification-stripe-color`, reporting a weaving app as a Stripe
+    // integration. Require SDK-specific evidence.
+    patterns: [/@stripe\/stripe-js|js\.stripe\.com|\bloadStripe\b|\bpk_(?:live|test)_[0-9A-Za-z]/],
   },
 ];
 
