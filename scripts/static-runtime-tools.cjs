@@ -155,48 +155,165 @@ function normalizeCapturedPathQuery(rawUrl) {
   for (const [key] of url.searchParams) {
     if (sensitive.test(key)) url.searchParams.set(key, '<redacted>');
   }
-  return url.pathname + url.search;
+  // Captured path queries may be stored percent-encoded (e.g. %40 for @)
+  // while browsers send some characters literally; compare decoded forms.
+  let pathname = url.pathname;
+  try { pathname = decodeURIComponent(pathname); } catch { /* keep raw */ }
+  return pathname + url.search;
 }
 
 async function captureRoutes() {
   if (!captureRoutesPromise) {
     captureRoutesPromise = readFile(path.join(captureRoot, 'ROUTE_MAP.json'), 'utf8')
-      .then((value) => JSON.parse(value).routes || [])
+      .then((value) => (JSON.parse(value).routes || []).map((route) => {
+        const queryIndex = String(route.pathQuery).indexOf('?');
+        const pathname = queryIndex === -1 ? String(route.pathQuery) : route.pathQuery.slice(0, queryIndex);
+        const query = queryIndex === -1 ? '' : route.pathQuery.slice(queryIndex);
+        let decodedPathname = pathname;
+        try { decodedPathname = decodeURIComponent(pathname); } catch { /* keep raw */ }
+        return { ...route, decodedPathQuery: decodedPathname + query };
+      }))
       .catch(() => []);
   }
   return captureRoutesPromise;
 }
 
-async function maybeServeCapturedExchange(req, res) {
-  const method = req.method || 'GET';
-  const pathQuery = normalizeCapturedPathQuery(req.url || '/');
-  const route = (await captureRoutes()).find((candidate) =>
-    candidate.origin === 'primary' && candidate.method === method && candidate.pathQuery === pathQuery);
-  if (!route) return false;
-  if (method === 'GET' && !pathQuery.includes('?') && String(route.mimeType || '').toLowerCase().startsWith('text/html')) return false;
+let externalOriginsPromise;
+async function externalOrigins() {
+  if (!externalOriginsPromise) {
+    externalOriginsPromise = captureRoutes().then((routes) => [...new Set(
+      routes.filter((route) => route.origin !== 'primary').map((route) => route.origin),
+    )].sort((a, b) => b.length - a.length));
+  }
+  return externalOriginsPromise;
+}
+
+// Rewrite captured third-party origins to local /__jsmap_external/<host>/…
+// aliases in served text bodies so the browser never leaves the harness: the
+// "human in the middle" half of the replay.
+async function rewriteExternalUrls(body) {
+  const origins = await externalOrigins();
+  if (!origins.length || typeof body !== 'string' || !body.includes('//')) return body;
+  const localBase = 'http://127.0.0.1:' + port;
+  let rewritten = body;
+  for (const origin of origins) {
+    const host = origin.replace(/^https?:\\/\\//, '');
+    const alias = localBase + '/__jsmap_external/' + host;
+    if (rewritten.includes(origin)) rewritten = rewritten.split(origin).join(alias);
+    // Protocol-relative references (//<host>/...) — skip ones already part of
+    // an absolute scheme (preceded by ':').
+    if (rewritten.includes('//' + host)) {
+      const escapedHost = host.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&');
+      rewritten = rewritten.replace(new RegExp('(?<!:)//' + escapedHost, 'g'), alias.replace(/^https?:/, ''));
+    }
+  }
+  return rewritten;
+}
+
+function isTextualMime(mimeType) {
+  const value = String(mimeType || '').toLowerCase();
+  return value.startsWith('text/') || value.includes('json') || value.includes('javascript') || value.includes('svg') || value.includes('xml');
+}
+
+const rewriteCache = new Map();
+async function readRewrittenTextFile(file) {
+  const info = await stat(file);
+  const cached = rewriteCache.get(file);
+  if (cached && cached.mtimeMs === info.mtimeMs) return cached.body;
+  const body = await rewriteExternalUrls(await readFile(file, 'utf8'));
+  rewriteCache.set(file, { mtimeMs: info.mtimeMs, body });
+  if (rewriteCache.size > 256) rewriteCache.delete(rewriteCache.keys().next().value);
+  return body;
+}
+
+function replayCapturedHeaders(res, route) {
   const replayHeaders = new Set(['content-type', 'content-language', 'cache-control', 'etag', 'last-modified', 'location', 'accept-ranges']);
   for (const [name, value] of Object.entries(route.responseHeaders || {})) {
     if (!replayHeaders.has(name.toLowerCase()) && !name.toLowerCase().startsWith('access-control-')) continue;
     res.setHeader(name, value);
   }
+}
+
+async function serveRouteBody(req, res, route) {
+  replayCapturedHeaders(res, route);
   res.statusCode = Number(route.status || 200);
-  if (!route.bodyFile) {
+  const bodyFile = route.bodyFile || route.externalFile;
+  if (!bodyFile) {
     res.end();
     return true;
   }
-  const bodyFile = path.resolve(captureRoot, route.bodyFile);
-  if (!bodyFile.startsWith(captureRoot + path.sep)) return false;
-  const info = await stat(bodyFile);
+  const absolute = path.resolve(captureRoot, bodyFile);
+  if (!absolute.startsWith(captureRoot + path.sep)) return false;
+  const info = await stat(absolute);
+  if (req.method === 'GET' && isTextualMime(route.mimeType)) {
+    const body = await readRewrittenTextFile(absolute);
+    res.setHeader('Content-Type', route.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Length', Buffer.byteLength(body));
+    res.end(body);
+    return true;
+  }
   res.setHeader('Content-Type', route.mimeType || 'application/octet-stream');
   res.setHeader('Content-Length', info.size);
-  createReadStream(bodyFile).pipe(res);
+  createReadStream(absolute).pipe(res);
   return true;
 }
 
-function shimSource() {
+async function maybeServeCapturedExchange(req, res) {
+  const method = req.method || 'GET';
+  const routes = await captureRoutes();
+  const requestUrl = new URL(req.url || '/', 'http://localhost');
+  const externalMatch = requestUrl.pathname.match(/^\\/__jsmap_external\\/([^/]+)(\\/.*)?$/);  if (externalMatch) {
+    const host = externalMatch[1];
+    const rest = (externalMatch[2] || '/') + requestUrl.search;
+    const pathQuery = normalizeCapturedPathQuery(rest);
+    const sameHost = (candidate) =>
+      candidate.origin !== 'primary'
+      && candidate.origin.replace(/^https?:\\/\\//, '') === host;
+    const route = routes.find((candidate) =>
+      sameHost(candidate) && candidate.method === method && candidate.decodedPathQuery === pathQuery)
+      || routes.find((candidate) =>
+        sameHost(candidate) && candidate.method === method && candidate.decodedPathQuery === pathQuery.split('?')[0])
+      // GET-only captures (e.g. directory-tree imports) never recorded request
+      // bodies, so a runtime POST/PUT to a captured GET endpoint replays the
+      // captured GET response — the human-in-the-middle approximation.
+      || routes.find((candidate) => sameHost(candidate) && candidate.decodedPathQuery === pathQuery)
+      || routes.find((candidate) => sameHost(candidate) && candidate.decodedPathQuery === pathQuery.split('?')[0]);
+    if (!route) {
+      // Uncaptured vector tiles / map imagery: answer with empty 204 so map
+      // renderers treat the tile as empty and finish loading instead of
+      // stalling the boot on a failed request.
+      if (/\\.(?:pbf|mvt|png|jpe?g|webp)(?:\\?|$)/i.test(pathQuery)) {
+        res.statusCode = 204;
+        res.end();
+        return true;
+      }
+      res.statusCode = 404;
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.end('Not captured: ' + host + pathQuery);
+      return true;
+    }
+    return serveRouteBody(req, res, route);
+  }
+  const pathQuery = normalizeCapturedPathQuery(req.url || '/');
+  const route = routes.find((candidate) =>
+    candidate.origin === 'primary' && candidate.method === method && candidate.decodedPathQuery === pathQuery);
+  if (!route) return false;
+  if (method === 'GET' && !pathQuery.includes('?') && String(route.mimeType || '').toLowerCase().startsWith('text/html')) return false;
+  return serveRouteBody(req, res, route);
+}
+
+function shimSource(externalHosts) {
   return \`
 (() => {
   window.__JSMAP_STATIC_REQUESTS__ = window.__JSMAP_STATIC_REQUESTS__ || [];
+  const EXTERNAL_HOSTS = new Set(\${JSON.stringify(externalHosts || [])});
+  const toCapturedAlias = (rawUrl) => {
+    try {
+      const parsed = new URL(String(rawUrl), location.href);
+      if (!EXTERNAL_HOSTS.has(parsed.host)) return null;
+      return location.origin + '/__jsmap_external/' + parsed.host + parsed.pathname + parsed.search + parsed.hash;
+    } catch { return null; }
+  };
   const remember = (kind, url, status) => {
     window.__JSMAP_STATIC_REQUESTS__.push({ at: new Date().toISOString(), kind, url: String(url), status });
     if (window.__JSMAP_STATIC_REQUESTS__.length > 500) window.__JSMAP_STATIC_REQUESTS__.shift();
@@ -208,9 +325,19 @@ function shimSource() {
   addEventListener('hashchange', clean);
   const originalFetch = window.fetch;
   window.fetch = async (input, init) => {
+    let request = input;
     const url = input instanceof Request ? input.url : input;
+    const alias = toCapturedAlias(url);
+    if (alias && alias !== url) {
+      remember('fetch-alias', url, 'rewritten');
+      try {
+        request = input instanceof Request ? new Request(alias, input) : alias;
+      } catch {
+        request = alias;
+      }
+    }
     try {
-      const response = await originalFetch(input, init);
+      const response = await originalFetch(request, init);
       remember('fetch', url, response.status);
       return response;
     } catch (error) {
@@ -222,13 +349,14 @@ function shimSource() {
     const original = navigator.sendBeacon.bind(navigator);
     navigator.sendBeacon = (url, data) => {
       remember('beacon', url, 'sent');
-      return original(url, data);
+      return original(toCapturedAlias(url) || url, data);
     };
   }
   const originalOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    const alias = toCapturedAlias(url);
     this.__jsmapStaticUrl = url;
-    return originalOpen.call(this, method, url, ...rest);
+    return originalOpen.call(this, method, alias || url, ...rest);
   };
   const originalSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.send = function(...sendArgs) {
@@ -236,6 +364,20 @@ function shimSource() {
     this.addEventListener('error', () => remember('xhr-error', this.__jsmapStaticUrl || '', 'error'));
     return originalSend.apply(this, sendArgs);
   };
+  for (const level of ['error', 'warn']) {
+    const original = console[level].bind(console);
+    console[level] = (...args) => {
+      remember('console-' + level, args.map((arg) => {
+        if (arg == null) return String(arg);
+        if (arg instanceof Error) return arg.name + ': ' + arg.message;
+        if (typeof arg === 'string') return arg;
+        try { return JSON.stringify(arg); } catch { return String(arg); }
+      }).join(' ').slice(0, 300), 'console');
+      return original(...args);
+    };
+  }
+  addEventListener('error', (event) => remember('window-error', event.message + ' @ ' + String(event.filename || '').slice(0, 120) + ':' + event.lineno, 'error'));
+  addEventListener('unhandledrejection', (event) => remember('unhandled-rejection', String(event.reason).slice(0, 300), 'error'));
 })();\`;
 }
 
@@ -248,7 +390,21 @@ async function maybeServeNextDataFallback(req, res) {
 
 async function resolveFile(urlPath) {
   const primary = safeJoin(urlPath);
-  try { return { file: primary, info: await stat(primary) }; } catch {}
+  try {
+    const info = await stat(primary);
+    if (info.isDirectory()) {
+      try {
+        const indexFile = path.join(primary, 'index.html');
+        return { file: indexFile, info: await stat(indexFile) };
+      } catch {
+        // Directory without an index (or the capture's entry HTML lives at a
+        // subpath, e.g. /demos/index.html): serve the configured entry.
+        const fallback = path.join(root, defaultEntry);
+        return { file: fallback, info: await stat(fallback) };
+      }
+    }
+    return { file: primary, info };
+  } catch {}
   try { return { file: primary + '.html', info: await stat(primary + '.html') }; } catch {}
   try { return { file: path.join(primary, 'index.html'), info: await stat(path.join(primary, 'index.html')) }; } catch {}
   if (path.extname(new URL(urlPath, 'http://localhost').pathname) === '') {
@@ -271,7 +427,8 @@ const server = http.createServer(async (req, res) => {
     const pathname = new URL(req.url || '/', 'http://localhost').pathname;
     if (pathname === '/__jsmap_static_shim.js') {
       res.setHeader('Cache-Control', 'no-store, max-age=0');
-      send(res, 200, shimSource(), 'text/javascript; charset=utf-8');
+      const hosts = (await externalOrigins()).map((origin) => origin.replace(/^https?:\\/\\//, ''));
+      send(res, 200, shimSource(hosts), 'text/javascript; charset=utf-8');
       return;
     }
     if (await maybeServeCapturedExchange(req, res)) return;
@@ -284,12 +441,19 @@ const server = http.createServer(async (req, res) => {
     }
     const contentType = types.get(path.extname(file)) || 'application/octet-stream';
     if (contentType.startsWith('text/html')) {
-      let body = await readFile(file, 'utf8');
+      let body = await readRewrittenTextFile(file);
       if (!body.includes('/__jsmap_static_shim.js')) {
         body = body.replace('</head>', '<script src="/__jsmap_static_shim.js?v=' + shimVersion + '"></script></head>');
       }
       res.setHeader('Cache-Control', 'no-store, max-age=0');
       send(res, 200, body, contentType);
+      return;
+    }
+    if (isTextualMime(contentType)) {
+      const body = await readRewrittenTextFile(file);
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Length', Buffer.byteLength(body));
+      res.end(body);
       return;
     }
     res.setHeader('Content-Length', info.size);
@@ -333,6 +497,7 @@ async function commandHarness(argv) {
       'cache-busted injected shim',
       'captured JSON/API replay from preserved files',
       'sanitized HAR exchange replay when recovery/mitm-capture exists',
+      'captured third-party origin replay under /__jsmap_external/<host>/ with URL rewriting in served text bodies',
       'extensionless route support',
       'static _next/data JSON fallback',
       'CORS-friendly preserved runtime serving',

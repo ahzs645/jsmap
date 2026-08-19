@@ -102,6 +102,11 @@ function scanDir(root) {
 
 function urlForStub(stub, backfillBase) {
   if (stub.url) return stub.url;                       // embedded in the placeholder
+  if (backfillBase === 'dir-tree') {
+    // "Save All Resources"-style directory-tree capture: the first path
+    // segment is the host (e.g. maps.situm.com/assets/app.wasm).
+    return 'https://' + stub.file.replace(/\\/g, '/');
+  }
   if (backfillBase) return backfillBase.replace(/\/$/, '') + '/' + stub.file.replace(/\\/g, '/');
   return null;
 }

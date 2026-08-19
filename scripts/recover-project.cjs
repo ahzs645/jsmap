@@ -30,6 +30,7 @@ const {
   looksLikeHtmlDocument,
   unwrapHtmlWrappedJs,
   classifySourceMapContent,
+  repairBeautifierDamageIfBroken,
 } = require('./lib/deobfuscation-pipeline.cjs');
 
 const SCRIPTS_DIR = __dirname;
@@ -2386,17 +2387,43 @@ async function copyProjectFiles(inputDir, outputDir, force) {
 // can actually run. Only detected corruption is touched; clean captures are
 // left byte-for-byte intact.
 async function repairPublicCapture(publicDir) {
-  const summary = { repairedJs: [], brokenMaps: [] };
+  const summary = { repairedJs: [], brokenMaps: [], beautifierRepairedJs: [], beautifierRepairedHtml: [] };
   const files = await walkDirectory(publicDir);
   for (const file of files) {
     const rel = toPosix(path.relative(publicDir, file));
     if (isJavaScript(rel)) {
       const content = await fsp.readFile(file, 'utf8').catch(() => null);
-      if (content == null || !looksLikeHtmlDocument(content)) continue;
-      const recovered = unwrapHtmlWrappedJs(content);
-      if (recovered) {
-        await fsp.writeFile(file, recovered.code, 'utf8');
-        summary.repairedJs.push(rel);
+      if (content == null) continue;
+      if (looksLikeHtmlDocument(content)) {
+        const recovered = unwrapHtmlWrappedJs(content);
+        if (recovered) {
+          await fsp.writeFile(file, recovered.code, 'utf8');
+          summary.repairedJs.push(rel);
+        }
+        continue;
+      }
+      // Split compound tokens from buggy pretty-printers (e.g. `e ? .x`) do
+      // not parse in browsers; repair only when broken so parseable files
+      // stay byte-for-byte intact (SRI hashes, string/regex contents).
+      const repaired = repairBeautifierDamageIfBroken(content);
+      if (repaired) {
+        await fsp.writeFile(file, repaired.code, 'utf8');
+        summary.beautifierRepairedJs.push(rel);
+      }
+    } else if (/\.html?$/i.test(rel)) {
+      const content = await fsp.readFile(file, 'utf8').catch(() => null);
+      if (content == null || !content.includes('<script')) continue;
+      let touched = false;
+      const repairedHtml = content.replace(/<script(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)<\/script>/gi, (block, js) => {
+        if (!js || !js.trim()) return block;
+        const repaired = repairBeautifierDamageIfBroken(js);
+        if (!repaired) return block;
+        touched = true;
+        return block.replace(js, repaired.code);
+      });
+      if (touched) {
+        await fsp.writeFile(file, repairedHtml, 'utf8');
+        summary.beautifierRepairedHtml.push(rel);
       }
     } else if (/\.map$/i.test(rel)) {
       const content = await fsp.readFile(file, 'utf8').catch(() => null);
@@ -2740,8 +2767,8 @@ async function main() {
   console.log(`Large JS mode: ${flags.largeJsMode}`);
   if (recoveryAudit.summary.warningCount) console.log(`Quality audit warnings: ${recoveryAudit.summary.warningCount} (see recovery/QUALITY_AUDIT.md)`);
   if (htmlWrappedCaptures.length) console.log(`Repaired HTML-wrapped JS captures: ${htmlWrappedCaptures.filter((c) => c.recovered).length}/${htmlWrappedCaptures.length}`);
-  if (publicRepairs.repairedJs.length || publicRepairs.brokenMaps.length) {
-    console.log(`Repaired preserved public/: ${publicRepairs.repairedJs.length} JS file(s) unwrapped, ${publicRepairs.brokenMaps.length} fake map(s) set aside (.broken)`);
+  if (publicRepairs.repairedJs.length || publicRepairs.brokenMaps.length || publicRepairs.beautifierRepairedJs.length || publicRepairs.beautifierRepairedHtml.length) {
+    console.log(`Repaired preserved public/: ${publicRepairs.repairedJs.length} JS file(s) unwrapped, ${publicRepairs.beautifierRepairedJs.length} JS file(s) with split compound tokens rejoined, ${publicRepairs.beautifierRepairedHtml.length} HTML file(s) with inline-script repairs, ${publicRepairs.brokenMaps.length} fake map(s) set aside (.broken)`);
   }
   if (invalidSourceMaps.length) console.log(`Unusable captured source maps: ${invalidSourceMaps.length} (see source-map-is-html-shell warning)`);
   if (excludedLargeJs.length) console.log(`Preserved large JS: ${excludedLargeJs.join(', ')}`);

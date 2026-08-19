@@ -151,7 +151,8 @@ function classifySourceMapContent(content) {
 //   import(x) -> import (x)   (dynamic import)
 //   yield f() -> yield<newline>f()
 //   4n,0x1Fn  -> 4 n, 0x1F n  (BigInt literals)
-//   {#x}      -> {# x}        (private class fields)
+//   {#x}      -> {#<newline>x} (private class fields)
+//   async x() -> async<newline>x () (async object/class methods)
 const BEAUTIFIER_REPAIRS = [
   ['optional-chaining', /\?[ \t]+\.(?=[A-Za-z_$([])/g, '?.'],
   ['nullish-coalescing', /\?[ \t]+\?/g, '??'],
@@ -161,7 +162,15 @@ const BEAUTIFIER_REPAIRS = [
   ['dynamic-import', /\bimport[ \t]+\(/g, 'import('],
   ['yield-split', /\byield[ \t]*\n[ \t]*(?=[A-Za-z_$`'"([!~]|import\b)/g, 'yield '],
   ['bigint-literal', /\b(0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|\d+)[ \t]+n(?![\w$])/g, '$1n'],
-  ['private-field', /#[ \t\r\n]+(?=[A-Za-z_$])/g, '#'],
+  // Require a line break. A same-line `# Text` is common and meaningful in
+  // OBJ/MTL payload strings; the damaged private fields in these captures are
+  // consistently split by the pretty-printer onto the following line.
+  ['private-field', /#[ \t]*\r?\n[ \t]*(?=[A-Za-z_$])/g, '#'],
+  // Reserved words are valid method names. The damaged PackCAD capture contains
+  // `async<newline>return () {`, which is the pretty-printer's split form of
+  // `async return() {`. Restrict this repair to the complete no-argument method
+  // header so a valid ASI boundary such as `async\nwork()` is not changed.
+  ['async-method', /\basync[ \t]*\n[ \t]+([A-Za-z_$][\w$]*)[ \t]+\(\)[ \t]*\{/g, 'async $1() {'],
 ];
 
 // Apply the deterministic compound-token repairs. Returns { code, repairs, total }.
@@ -175,8 +184,78 @@ function repairBeautifierDamage(code) {
       result = result.replace(pattern, replacement);
     }
   }
+  const strings = joinSplitStrings(result);
+  if (strings.repairs > 0) {
+    repairs['split-string'] = strings.repairs;
+    result = strings.code;
+  }
   const total = Object.values(repairs).reduce((sum, count) => sum + count, 0);
   return { code: result, repairs, total };
+}
+
+// Buggy pretty-printers also wrap long lines *inside* string literals, turning
+// "opacity 500ms linear" into "opacity<newline>500ms linear" — invalid JS.
+// Newlines are never legal inside single/double-quoted strings, so joining
+// them with a space is deterministic. Template literals and line
+// continuations are left alone. Returns { code, repairs }.
+//
+// The scanner tracks regex literals heuristically (a `/` after an operator or
+// keyword starts a regex) so a quote inside a regex (e.g. /'/) does not
+// desync the string state. As defense in depth, if the replacement count
+// looks like scanner desync rather than real damage (SPLIT_STRING_CAP), the
+// whole repair is discarded — real pretty-printer string wraps are rare per
+// file, desyncs run away into the thousands.
+const SPLIT_STRING_CAP = 256;
+
+function joinSplitStrings(code) {
+  let out = '';
+  let repairs = 0;
+  let quote = null; // null | "'" | '"' | '`'
+  let lineComment = false;
+  let blockComment = false;
+  let regex = false;
+  let regexClass = false;
+  let prevSignificant = ''; // last non-space, non-comment char outside strings/regex
+  const regexAllowedBefore = new Set(['', '(', ')', ',', '=', ':', '[', ']', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '/', '%', '<', '>', '^', '~', '\n']);
+  for (let i = 0; i < code.length; i += 1) {
+    const ch = code[i];
+    const next = code[i + 1];
+    if (repairs > SPLIT_STRING_CAP) return { code, repairs: 0 };
+    if (lineComment) {
+      out += ch;
+      if (ch === '\n') lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      out += ch;
+      if (ch === '*' && next === '/') { out += next; i += 1; blockComment = false; }
+      continue;
+    }
+    if (regex) {
+      out += ch;
+      if (ch === '\\') { out += next ?? ''; i += 1; continue; }
+      if (ch === '[') { regexClass = true; continue; }
+      if (ch === ']') { regexClass = false; continue; }
+      if (ch === '/' && !regexClass) { regex = false; prevSignificant = '/'; }
+      continue;
+    }
+    if (quote) {
+      if (ch === '\\') { out += ch + (next ?? ''); i += 1; continue; }
+      if (ch === quote) { out += ch; quote = null; prevSignificant = quote; continue; }
+      if (ch === '\n' && quote !== '`') { out += ' '; repairs += 1; continue; }
+      out += ch;
+      continue;
+    }
+    if (ch === '/' && next === '/') { out += ch + next; i += 1; lineComment = true; continue; }
+    if (ch === '/' && next === '*') { out += ch + next; i += 1; blockComment = true; continue; }
+    if (ch === '/' && next !== '/' && next !== '*' && regexAllowedBefore.has(prevSignificant)) {
+      out += ch; regex = true; regexClass = false; continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') { out += ch; quote = ch; continue; }
+    if (!/\s/.test(ch)) prevSignificant = ch;
+    out += ch;
+  }
+  return { code: out, repairs };
 }
 
 let _acorn = null;
@@ -235,6 +314,59 @@ function repairBeautifierDamageIfBroken(code) {
   const repaired = repairBeautifierDamage(code);
   if (repaired.total > 0 && isStrictlyParseable(repaired.code)) return repaired;
   return null;
+}
+
+// Repair beautifier damage whenever split compound tokens are present and the
+// repaired version parses — even when the original also parses. Some spaced
+// forms (e.g. `e ?.originalEvent`) are tolerated by V8/acorn but rejected by
+// other browser engines with `Unexpected token '.'`, so parse failure alone is
+// not a sufficient gate for code that must run in a real browser.
+function repairBeautifierDamageIfDamaged(code) {
+  if (typeof code !== 'string' || !code) return null;
+  const repaired = repairBeautifierDamage(code);
+  if (repaired.total > 0 && isStrictlyParseable(repaired.code)) return repaired;
+  return null;
+}
+
+// Real-world APIs emit JSON with literal control characters inside strings
+// (e.g. "Anchor\nStores"), which strict JSON.parse — and therefore
+// response.json() in the browser — rejects. Escape raw control characters
+// inside string literals so the payload parses while preserving content.
+// Returns { text, repairs }.
+function sanitizeJsonControlChars(text) {
+  let out = '';
+  let repairs = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === '\\') { out += ch + (text[i + 1] ?? ''); i += 1; continue; }
+      if (ch === '"') { out += ch; inString = false; continue; }
+      const code = ch.charCodeAt(0);
+      if (code < 0x20) {
+        if (ch === '\n') out += '\\n';
+        else if (ch === '\r') out += '\\r';
+        else if (ch === '\t') out += '\\t';
+        else out += `\\u${code.toString(16).padStart(4, '0')}`;
+        repairs += 1;
+        continue;
+      }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') { out += ch; inString = true; continue; }
+    out += ch;
+  }
+  return { text: out, repairs };
+}
+
+// Parse JSON strictly; on failure, sanitize control characters inside strings
+// and retry. Returns the parseable text or null.
+function ensureParseableJson(text) {
+  try { JSON.parse(text); return text; } catch { /* try sanitized */ }
+  const sanitized = sanitizeJsonControlChars(text);
+  if (!sanitized.repairs) return null;
+  try { JSON.parse(sanitized.text); return sanitized.text; } catch { return null; }
 }
 
 async function withMutedConsoleError(callback) {
@@ -966,6 +1098,10 @@ module.exports = {
   classifySourceMapContent,
   repairBeautifierDamage,
   repairBeautifierDamageIfBroken,
+  repairBeautifierDamageIfDamaged,
+  joinSplitStrings,
+  sanitizeJsonControlChars,
+  ensureParseableJson,
   normalizeCode,
   transformJavaScript,
   transformCSS,

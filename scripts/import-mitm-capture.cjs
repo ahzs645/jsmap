@@ -6,6 +6,7 @@ const path = require('node:path');
 const zlib = require('node:zlib');
 const { spawnSync } = require('node:child_process');
 const { detectFramework } = require('./recovery-contract.cjs');
+const { repairBeautifierDamageIfBroken, ensureParseableJson } = require('./lib/deobfuscation-pipeline.cjs');
 
 const SENSITIVE_HEADERS = /^(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token|x-xsrf-token|x-amz-security-token|x-goog-api-key)$/i;
 const SENSITIVE_QUERY_KEYS = /(?:^|[_-])(?:access[_-]?token|api[_-]?key|auth|authorization|code|credential|id[_-]?token|jwt|key|password|refresh[_-]?token|secret|session|signature|token)(?:$|[_-])/i;
@@ -135,6 +136,47 @@ function writeFile(file, value) {
   fs.writeFileSync(file, value);
 }
 
+// A URL path can be both a file and a directory prefix in the same capture
+// (e.g. `/api/v1/buildings` and `/api/v1/buildings/7033.html`). A naive
+// materialization then crashes with EEXIST/ENOTDIR. Resolve conflicts by
+// relocating the blocking file to `<path>/index.html` and updating the owning
+// route so replay metadata stays accurate.
+function createConflictResolver(outputDir) {
+  const fileOwners = new Map(); // absPath -> { route, field, baseRoot }
+  const relocations = [];
+
+  function relocate(blockingFile) {
+    const tmp = `${blockingFile}.jsmap-tmp-${process.pid}`;
+    fs.renameSync(blockingFile, tmp);
+    fs.mkdirSync(blockingFile, { recursive: true });
+    const relocated = path.join(blockingFile, 'index.html');
+    fs.renameSync(tmp, relocated);
+    const owner = fileOwners.get(blockingFile);
+    if (owner) {
+      const rel = path.relative(owner.baseRoot, relocated).split(path.sep).join('/');
+      owner.route[owner.field] = rel;
+      fileOwners.delete(blockingFile);
+      fileOwners.set(relocated, owner);
+    }
+    relocations.push({ from: path.relative(outputDir, blockingFile), to: path.relative(outputDir, relocated) });
+  }
+
+  function ensureWritable(absPath, baseRoot) {
+    const relParts = path.relative(baseRoot, absPath).split(path.sep);
+    let current = baseRoot;
+    for (let i = 0; i < relParts.length - 1; i += 1) {
+      current = path.join(current, relParts[i]);
+      if (fs.existsSync(current) && !fs.statSync(current).isDirectory()) relocate(current);
+    }
+    if (fs.existsSync(absPath) && fs.statSync(absPath).isDirectory()) {
+      return path.join(absPath, 'index.html');
+    }
+    return absPath;
+  }
+
+  return { fileOwners, relocations, ensureWritable };
+}
+
 function importHar(harFile, outputDir, flags) {
   const raw = fs.readFileSync(harFile);
   const har = JSON.parse(raw.toString('utf8'));
@@ -153,6 +195,7 @@ function importHar(harFile, outputDir, flags) {
   const routes = [];
   const materialized = new Map();
   const warnings = [];
+  const resolver = createConflictResolver(outputDir);
   const redactions = { requestHeaders: 0, responseHeaders: 0, queryValues: 0, urlCredentials: 0, requestBodiesOmitted: 0 };
   const protocols = { http: 0, websocket: 0, eventStream: 0, other: 0 };
 
@@ -197,6 +240,29 @@ function importHar(harFile, outputDir, flags) {
     const decoded = decodeHarBody(response.content, responseHeaders);
     if (decoded.decodeError) warnings.push({ entry: index, code: 'content-decode-failed', detail: decoded.decodeError });
     if (!decoded.buffer && Number(response.content?.size || response.bodySize || 0) > 0) warnings.push({ entry: index, code: 'missing-response-body' });
+    // Repair buggy pretty-printer damage (split compound tokens, newlines
+    // inside string literals) in captured JavaScript so the replayed runtime
+    // parses in a real browser. Gated on parse failure: files that already
+    // parse are left byte-for-byte intact (SRI hashes, string/regex contents).
+    if (decoded.buffer && /javascript|ecmascript/i.test(mimeType)) {
+      const repaired = repairBeautifierDamageIfBroken(decoded.buffer.toString('utf8'));
+      if (repaired) {
+        decoded.buffer = Buffer.from(repaired.code, 'utf8');
+        warnings.push({ entry: index, code: 'beautifier-damage-repaired', repairs: repaired.repairs });
+      }
+    }
+    // Some APIs emit JSON with literal control characters inside strings,
+    // which response.json() rejects; sanitize to parseable JSON.
+    if (decoded.buffer && /json/i.test(mimeType)) {
+      const text = decoded.buffer.toString('utf8');
+      const parseable = ensureParseableJson(text);
+      if (parseable && parseable !== text) {
+        decoded.buffer = Buffer.from(parseable, 'utf8');
+        warnings.push({ entry: index, code: 'json-control-chars-sanitized' });
+      } else if (!parseable) {
+        warnings.push({ entry: index, code: 'json-unparseable' });
+      }
+    }
 
     let bodyFile = null;
     let bodyHash = null;
@@ -208,7 +274,8 @@ function importHar(harFile, outputDir, flags) {
       const absoluteBody = path.join(metadataRoot, bodyFile);
       if (!fs.existsSync(absoluteBody)) writeFile(absoluteBody, decoded.buffer);
       if (originalUrl.origin !== primaryOrigin) {
-        const absoluteExternalFile = path.join(externalRoot, originalUrl.hostname, materializedPath(originalUrl, mimeType));
+        let absoluteExternalFile = path.join(externalRoot, originalUrl.hostname, materializedPath(originalUrl, mimeType));
+        absoluteExternalFile = resolver.ensureWritable(absoluteExternalFile, externalRoot);
         if (!fs.existsSync(absoluteExternalFile)) writeFile(absoluteExternalFile, decoded.buffer);
         externalFile = path.relative(metadataRoot, absoluteExternalFile).replace(/\\/g, '/');
       }
@@ -219,13 +286,16 @@ function importHar(harFile, outputDir, flags) {
       publicFile = materializedPath(originalUrl, mimeType);
       const collisionKey = publicFile.toLowerCase();
       if (!materialized.has(collisionKey)) {
-        writeFile(path.join(outputDir, publicFile), decoded.buffer);
+        const absolutePublic = resolver.ensureWritable(path.join(outputDir, publicFile), outputDir);
+        publicFile = path.relative(outputDir, absolutePublic).replace(/\\/g, '/');
+        writeFile(absolutePublic, decoded.buffer);
         materialized.set(collisionKey, index);
+        materialized.set(publicFile.toLowerCase(), index);
       } else if (materialized.get(collisionKey) !== index) {
         warnings.push({ entry: index, code: 'public-path-variant', path: publicFile, canonicalEntry: materialized.get(collisionKey) });
       }
     }
-    routes.push({
+    const route = {
       entry: index,
       method: request.method || 'GET',
       origin: originalUrl.origin === primaryOrigin ? 'primary' : originalUrl.origin,
@@ -248,8 +318,19 @@ function importHar(harFile, outputDir, flags) {
         sensitiveHeaderNames: requestSensitiveHeaders.map((header) => String(header.name).toLowerCase()),
       },
       decodedContentEncoding: decoded.decodedEncoding,
-    });
+    };
+    routes.push(route);
+    if (publicFile) {
+      resolver.fileOwners.set(path.join(outputDir, publicFile), { route, field: 'materializedPath', baseRoot: outputDir });
+    }
+    if (externalFile) {
+      resolver.fileOwners.set(path.join(metadataRoot, externalFile), { route, field: 'externalFile', baseRoot: metadataRoot });
+    }
   });
+
+  for (const relocation of resolver.relocations) {
+    warnings.push({ code: 'path-conflict-relocated', from: relocation.from, to: relocation.to });
+  }
 
   if (protocols.websocket) warnings.push({ code: 'websocket-frames-not-imported', count: protocols.websocket });
   if (protocols.eventStream) warnings.push({ code: 'event-stream-replayed-as-snapshot', count: protocols.eventStream });

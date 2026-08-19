@@ -23,6 +23,8 @@
  *   recovery-level <project-dir>                       Detect framework route and achieved recovery level
  *   source-plan <input-dir>                            Plan reviewed conventional source modules
  *   source-export <plan> <output-dir>                  Export reviewed source modules with provenance
+ *   assets <capture-dir>                               Extract assets inlined in bundles as data URIs
+ *   coverage <capture-dir>                             Report chunks the capture is missing, and capture health
  *   asset-audit <project-dir>                          Localize and verify source-app assets
  *   source-audit <project-dir>                         Gate source-app completion with build/browser evidence
  *   mitm-import <capture.har> <capture-dir>            Import an authorized HAR capture safely
@@ -185,6 +187,22 @@ Commands:
       conversions, verified package imports, and SOURCE_PROVENANCE.json.
       Options: --allow-pending (explicit preview), --verify-packages.
 
+  assets <capture-dir> [--dump-dir <dir>] [--sheet <sheet.svg>] [--min-bytes N]
+      Extract assets the bundles contain rather than reference: icons, fonts and
+      wasm inlined as data: URIs. These never appear as files, so a capture can
+      hold megabytes of artwork no file listing will show. De-duplicates by content
+      hash, sniffs the real format from magic bytes, and reports inlined bytes as a
+      share of bundle size. --sheet renders every image into one contact sheet,
+      which is how you work out which glyph is which.
+
+  coverage <capture-dir> [--list-missing] [--base-url <url>]
+      Report what the capture is missing. Webpack fetches chunks on demand, so a
+      saved page only holds the code it actually ran: grepping and finding nothing
+      means either "does not exist" or "was never captured". This reads the chunk
+      map out of the webpack runtime and diffs it against the files on disk, naming
+      what is absent. Also flags source maps that are really SPA shells, JavaScript
+      saved as HTML, and empty files.
+
   asset-audit <source-app-dir> [--source-root <capture-public>] [--mitm-root <capture-evidence>] [--write]
       Parse HTML/CSS/JS asset references, strip query/hash lookup noise, localize
       uniquely matched assets (including captured external responses from a MITM
@@ -200,6 +218,12 @@ Commands:
       Import authorized HTTP exchanges from a HAR archive. Materializes the
       primary origin, stores replay bodies outside the public tree, redacts
       credentials and sensitive query values, and omits all request bodies.
+
+  capture-dir <saved-dir> <out.har> [--origin <url>]
+      Convert a "Save All Resources"-style directory-tree capture (per-host
+      folders, _DataURI dumps) into a synthetic GET-only HAR for mitm-import /
+      mitm-recover. Re-detects MIME by content, strips .html from JSON API
+      responses, and folds query-variant filenames.
 
   mitm-recover <capture.har> <recovery-dir> [--capture-dir <dir>] [--origin <url>]
       Chain MITM import, framework-aware recovery, preserved harness generation,
@@ -350,6 +374,8 @@ Examples:
   node scripts/jsmap.cjs editable-lab ./recovered-project-linked ./recovered-editable --top 25
   node scripts/jsmap.cjs source-plan ./recovered-project-linked/src/promoted --out ./SOURCE_PLAN.json
   node scripts/jsmap.cjs source-export ./SOURCE_PLAN.json ./source-app --write --verify-packages
+  node scripts/jsmap.cjs coverage ./captured-site --list-missing
+  node scripts/jsmap.cjs assets ./captured-site --dump-dir ./assets --sheet ./assets/sheet.svg
   node scripts/jsmap.cjs asset-audit ./source-app --source-root ./recovered-project/public --write
   node scripts/jsmap.cjs source-audit ./source-app --install --url http://127.0.0.1:4173 --interaction '[data-primary-action]'
   node scripts/jsmap.cjs rename-apply ./recovered-project-linked --dry-run
@@ -682,6 +708,14 @@ function main() {
     case 'source-export':
       runScript('source-project.cjs', ['export', ...subArgs]);
       break;
+    case 'assets':
+    case 'embedded-assets':
+      runScript('extract-embedded-assets.cjs', subArgs);
+      break;
+    case 'coverage':
+    case 'capture-coverage':
+      runScript('capture-coverage.cjs', subArgs);
+      break;
     case 'asset-audit':
     case 'asset-localize':
       runScript('asset-localization.cjs', subArgs);
@@ -699,6 +733,10 @@ function main() {
     case 'mitm-verify':
     case 'verify-capture':
       runScript('verify-mitm-capture.cjs', subArgs);
+      break;
+    case 'capture-dir':
+    case 'capture-dir-to-har':
+      runMjsScript('capture-dir-to-har.mjs', subArgs);
       break;
     case 'editable-lab':
       runScript('generate-editable-workspace.cjs', subArgs);

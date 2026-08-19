@@ -26,6 +26,36 @@ Pass `--origin https://app.example` when origin inference picks a CDN or API.
 Pass `--capture-dir <dir>` to control the intermediate materialized capture.
 Existing output is never replaced unless `--force` is explicit.
 
+## Directory-tree captures
+
+"Save All Resources"-style directory trees can be converted to a synthetic
+GET-only HAR and recovered through the same pipeline:
+
+```bash
+node scripts/jsmap.cjs capture-dir <saved-dir> <out.har> --origin https://app.example
+node scripts/jsmap.cjs mitm-recover <out.har> ./recovered --origin https://app.example --force
+```
+
+The converter (`scripts/capture-dir-to-har.mjs`) maps `<host>/<url-path>/<file>`
+back to URLs, re-detects MIME by content, strips `.html` from extensionless
+JSON API responses, folds `base-<longhex>.ext` query-variant siblings into one
+route, and skips `_DataURI/` and `.DS_Store`.
+
+During replay the harness serves captured third-party origins under
+`/__jsmap_external/<host>/...` and rewrites captured origins in served text
+bodies and runtime fetch/XHR/beacon calls to those aliases. Runtime POST/PUT
+requests to GET-captured endpoints replay the captured GET response.
+
+Missing or stub assets can be repaired with recorded provenance:
+`scripts/backfill-capture-asset.cjs <dir> <url>` appends a `_backfilled` route
+to `ROUTE_MAP.json`; `repair-stubs --backfill dir-tree` re-fetches
+placeholder/corrupt files using their `<host>/<path>` tree layout.
+
+Captured JavaScript with pretty-printer damage (split compound tokens, newlines
+inside string literals) is repaired only when it fails to parse and the repair
+parses; captured JSON with literal control characters in strings is sanitized.
+Repairs are recorded as warnings in `MITM_CAPTURE.json`.
+
 Captured third-party assets can be localized into an exported source app:
 
 ```bash

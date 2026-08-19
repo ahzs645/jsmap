@@ -115,6 +115,54 @@ line formatting, average identifier length, and escape-sequence cleanliness. The
 report shows the average/median score, grade distribution, and the lowest-scoring
 files as concrete manual-cleanup targets.
 
+### Reading facts out of a capture
+
+Not every job is "turn this back into an app". Often you want a specific fact: which
+icons ship with it, what the design tokens are, whether a feature exists at all. Two
+commands serve that directly.
+
+Extract assets the bundles *contain* rather than reference — icons, fonts and wasm
+inlined as `data:` URIs, which never appear as files and so show up in no file
+listing:
+
+```bash
+node scripts/jsmap.cjs assets ./captured-site --dump-dir ./assets --sheet ./assets/sheet.svg
+```
+
+It de-duplicates by content hash (the same icon is routinely repeated across chunks),
+sniffs the real format from magic bytes rather than trusting the mime, and reports
+inlined bytes as a share of bundle size — usually the answer to "why is this chunk
+10 MB". `--sheet` renders every image into a single contact sheet, which is the only
+practical way to work out which glyph is which: a mime type and a byte count do not
+say, and the surrounding minified code rarely names them.
+
+Report what the capture is *missing*:
+
+```bash
+node scripts/jsmap.cjs coverage ./captured-site --list-missing
+```
+
+This matters more than it sounds. Webpack fetches chunks on demand, so a saved page
+only contains the code it actually ran — everything behind a route you did not visit
+is simply absent. Grepping and finding nothing then means either "this does not
+exist" or "this was never captured", and those lead to opposite conclusions. The
+webpack runtime carries the full chunk-id → filename map for every chunk the app
+*can* load, so diffing it against the files on disk names exactly what is absent:
+
+```
+  161 of 591 referenced chunks present (27.2%)
+  430 never loaded by the captured page
+
+  missing chunks (168 named, 262 unnamed):
+     304  aiBuilder
+     218  angularCloudFlowAnalyticsPage
+       7  approvalsPage
+```
+
+The same pass reports capture damage — source maps that are really SPA shells,
+JavaScript saved as HTML, empty files — so you know up front whether deobfuscation
+has anything to work with.
+
 ### Imperfect real-world captures
 
 Captures are frequently lossy, and jsmap now detects and repairs the common
@@ -162,6 +210,50 @@ query-shaped variants in `.jsmap-mitm/`. It removes authorization/cookie/token
 headers, redacts URL user-info and sensitive query values, and omits request bodies and their
 hashes. Response bodies are retained and may contain private application data,
 so review the capture before sharing or committing it.
+
+### Directory-tree captures (`capture-dir`)
+
+"Save All Resources"-style captures (per-host folders, URL path mapped to
+folders, `_DataURI/` data-URL dumps) are not HAR files. Convert them first:
+
+```bash
+node scripts/jsmap.cjs capture-dir <saved-dir> <out.har> [--origin <url>]
+node scripts/jsmap.cjs mitm-recover <out.har> <recovery-dir> --origin <url> --force
+```
+
+The converter maps `<host>/<url-path>/<file>` back to URLs, re-detects MIME
+types by content, strips the `.html` suffix the capture tool appends to
+extensionless JSON API responses, folds query-variant filenames
+(`base-<longhex>.ext` siblings) into single routes, and skips `_DataURI/` and
+`.DS_Store`. The synthetic HAR is GET-only; request bodies never existed.
+
+During replay the harness also serves captured third-party origins under
+`/__jsmap_external/<host>/...` and rewrites captured origins in served
+HTML/JS/CSS/JSON bodies (plus runtime fetch/XHR/beacon calls via the injected
+shim) to those local aliases, so the browser never leaves the harness. A
+runtime POST/PUT to an endpoint captured as GET replays the captured GET
+response (request bodies were never recorded). Uncaptured vector-tile/image
+requests receive an empty 204 so map renderers finish loading.
+
+Assets the capture never recorded (e.g. lazily-loaded plugins) can be repaired
+explicitly with provenance:
+
+```bash
+node scripts/backfill-capture-asset.cjs <capture-or-recovery-dir> <url>
+node scripts/jsmap.cjs repair-stubs <capture-dir> --backfill dir-tree
+```
+
+`backfill-capture-asset` re-fetches the URL from its origin, writes it into the
+capture's external store, and appends a `_backfilled` route (with SHA-256) to
+`ROUTE_MAP.json`. `repair-stubs --backfill dir-tree` maps
+`<host>/<path>` stub files back to `https://<host>/<path>` for re-fetching.
+
+Captured JavaScript damaged by buggy pretty-printers (split compound tokens
+like `e ? .x`, newlines inside string literals) is repaired when — and only
+when — the file fails to parse and the repaired bytes do parse, so parseable
+vendor files stay byte-for-byte intact (SRI hashes survive). Captured JSON
+with literal control characters inside strings is sanitized to parseable JSON.
+Both repairs are recorded as warnings in `MITM_CAPTURE.json`.
 
 During `recover`, route evidence moves to `recovery/mitm-capture/` rather than
 the served `public/` tree. The generated harness replays matching primary-origin

@@ -26,6 +26,8 @@ test('reverses split compound tokens and the result parses', () => {
     '}',
     'class C { #',
     '  field; m(){ return this.#field } }', // private field split
+    'const iterator = { async',
+    '  return () { return { done: true }; } };', // async method header split
   ].join('\n');
 
   // sanity: the broken form really does not parse
@@ -39,11 +41,13 @@ test('reverses split compound tokens and the result parses', () => {
   assert.ok(repairs['bigint-literal'] >= 2);
   assert.ok(repairs['dynamic-import'] >= 1);
   assert.ok(repairs['private-field'] >= 1);
+  assert.equal(repairs['async-method'], 1);
   // repaired code parses (the real assertion) and the compound tokens are rejoined
   acorn.parse(code, { ecmaVersion: 'latest' });
   assert.match(code, /\?\.prop/);     // optional chaining token rejoined (space before ? is valid)
   assert.match(code, /\?\? y/);       // nullish token rejoined
   assert.match(code, /4n << 0x1Fn/);  // BigInt suffixes rejoined
+  assert.match(code, /async return\(\)/); // async method header rejoined
 });
 
 test('does not touch valid code (gated repair returns null)', () => {
@@ -65,6 +69,35 @@ test('keeps a real ternary with a numeric branch intact', () => {
   // `cond ? .5 : 1` is a valid ternary (.5 is a number) — must NOT become optional chaining
   const valid = 'let x = cond ? .5 : 1;';
   assert.equal(repairBeautifierDamage(valid).repairs['optional-chaining'], undefined);
+});
+
+test('does not join async across an ordinary ASI boundary', () => {
+  const valid = 'async\nwork();';
+  const { code, repairs } = repairBeautifierDamage(valid);
+  assert.equal(repairs['async-method'], undefined);
+  assert.equal(code, valid);
+});
+
+test('keeps hash-prefixed export text intact', () => {
+  const valid = 'const objHeader = `# Texture Coordinates:`; const mtlHeader = "# MTL file";';
+  const { code, repairs } = repairBeautifierDamage(valid);
+  assert.equal(repairs['private-field'], undefined);
+  assert.equal(code, valid);
+});
+
+test('joins strings split by a newline inside the literal', () => {
+  const broken = 'el.style.transition = "opacity\n500ms linear";';
+  assert.throws(() => acorn.parse(broken, { ecmaVersion: 'latest' }), 'split string should not parse');
+  const { code, repairs } = repairBeautifierDamage(broken);
+  assert.equal(repairs['split-string'], 1);
+  assert.match(code, /"opacity 500ms linear"/);
+  acorn.parse(code, { ecmaVersion: 'latest' });
+});
+
+test('split-string repair keeps template literals and line continuations intact', () => {
+  const valid = 'const t = `line1\nline2`;\nconst s = "a" + \\\n  "b";';
+  const { repairs } = repairBeautifierDamage(valid);
+  assert.equal(repairs['split-string'], undefined);
 });
 
 console.log(`\nbeautifier repair tests passed (${passed} cases).`);

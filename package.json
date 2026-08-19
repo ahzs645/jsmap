@@ -40,6 +40,8 @@
     "test:source-app-workflow": "node scripts/test-source-app-workflow.cjs",
     "test:deobfuscation-tools": "node scripts/test-deobfuscation-tools.cjs",
     "test:custom-element-naming": "node scripts/test-custom-element-naming.cjs",
+    "test:embedded-assets": "node scripts/test-embedded-assets.cjs",
+    "test:capture-coverage": "node scripts/test-capture-coverage.cjs",
     "split:bundle": "node scripts/split-bundle-ast.cjs"
   },
   "dependencies": {
