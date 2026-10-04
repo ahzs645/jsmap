@@ -10,10 +10,18 @@
 // `@customElement` class decorator (`Klass = __decorateClass([ce("tag")], Klass)`),
 // which carries the large majority of registrations in decorator-based apps.
 //
+// A third shape carries whole apps that use no decorators at all:
+// `customElements.define("tag", class extends Base {})`, the inline anonymous
+// class. It has no binding to rename, but the tag is still the proven name of
+// the element the statement registers -- which is what the emitted file should
+// be called. On a 329 KB vanilla-web-components Vite bundle 29 of 31
+// registrations were inline, and refusing them left the components in files
+// called `settings.js` and `canvas.js`.
+//
 // The test also pins the guardrails: a hyphenated string that is not a
 // registration must not become a name, a binding registered under two tags must
-// keep its minified name, and every tag-derived name must carry the evidence
-// that proved it.
+// keep its minified name, every tag-derived name must carry the evidence that
+// proved it, and the manifest must never list two entries under one filename.
 
 const assert = require('node:assert');
 const fs = require('node:fs');
@@ -70,13 +78,33 @@ const bundle = [
 const bundleFile = path.join(workDir, 'app.js');
 fs.writeFileSync(bundleFile, bundle, 'utf8');
 
-function split(outDir) {
-  execFileSync(process.execPath, [SPLITTER, bundleFile, outDir, '--force', '--summary', '--module-granularity', 'declarations'], { stdio: 'pipe' });
+/**
+ * The invariant every split must satisfy: one file on disk per manifest entry,
+ * every listed byte range readable at the name it is listed under, and the parts
+ * still tiling the input. Two entries under one filename means the second write
+ * destroyed the first part's source.
+ */
+function assertManifestHonoured(outDir, manifest, sourceText) {
+  const names = manifest.files.map((entry) => entry.file);
+  assert.equal(new Set(names).size, names.length, `${outDir}: two manifest entries share a filename`);
+  const onDisk = fs.readdirSync(outDir).filter((name) => name.endsWith('.js') && name !== '_index.js');
+  assert.equal(onDisk.length, manifest.files.length, `${outDir}: manifest entries and files on disk disagree`);
+  let joined = '';
+  for (const entry of manifest.files) {
+    assert.ok(fs.existsSync(path.join(outDir, entry.file)), `${entry.file} is listed but not written`);
+    joined += sourceText.slice(entry.sourceRange[0], entry.sourceRange[1]);
+  }
+  assert.equal(joined, sourceText, `${outDir}: the parts must reproduce the input byte for byte`);
+}
+
+function split(outDir, file = bundleFile) {
+  execFileSync(process.execPath, [SPLITTER, file, outDir, '--force', '--summary', '--module-granularity', 'declarations'], { stdio: 'pipe' });
   return JSON.parse(fs.readFileSync(path.join(outDir, '_manifest.json'), 'utf8'));
 }
 
 const outDir = path.join(workDir, 'split');
 const manifest = split(outDir);
+assertManifestHonoured(outDir, manifest, bundle);
 const byFile = new Map(manifest.files.map((entry) => [entry.file, entry]));
 const tagged = manifest.files.filter((entry) => entry.customElementTag);
 
@@ -150,6 +178,127 @@ for (const entry of tagged) {
   assert.ok(entry.file.startsWith(entry.customElementTag), `${entry.file} must be named from its tag`);
 }
 console.log('  ok - every tag-derived name records a registration line that proves it');
+
+// ── the inline anonymous class shape (a whole app's worth of components) ──
+//
+// A vanilla web-components app registers each component as an inline anonymous
+// class, so there is no binding anywhere to carry the tag. The tag still names
+// the element, and the file that holds the registration is that element.
+//
+// The fixture also builds the exact filename collision that destroyed recovered
+// source on a real capture: `demo-widget` is registered twice (class part plus
+// registration part, so deduplication generates `demo-widget-2`), and a second
+// element is *literally* tagged `demo-widget-2`.
+const inlineBundle = [
+  '// Two components registered inline, back to back, with no binding at all.',
+  'window.customElements.define(',
+  '  "action-dropdown",',
+  '  class extends HTMLElement {',
+  '    connectedCallback() { this.textContent = "dropdown"; }',
+  '  }',
+  ');',
+  'window.customElements.define(',
+  '  "swap-symbols-dialog",',
+  '  class extends HTMLElement {',
+  '    connectedCallback() { this.textContent = "swap"; }',
+  '  }',
+  ');',
+  '',
+  '// A named-binding registration in the same bundle: behaviour must not change.',
+  'var PanelClass = class extends HTMLElement {',
+  '  connectedCallback() { this.textContent = "panel"; }',
+  '};',
+  'customElements.define("demo-widget", PanelClass);',
+  '',
+  '// A declaration between the runs, so the next registration is its own part.',
+  'function separator(value) { return String(value); }',
+  '',
+  '// Literally named `demo-widget-2` -- the name deduplication just generated.',
+  'customElements.define("demo-widget-2", class extends HTMLElement {});',
+  '',
+  '// Decoys: not `customElements`, and not a class we can point at.',
+  'registry.define("not-an-element", 5);',
+  'customElements.define("factory-made", makeComponent());',
+  '',
+].join('\n');
+
+const inlineFile = path.join(workDir, 'inline-app.js');
+fs.writeFileSync(inlineFile, inlineBundle, 'utf8');
+const inlineDir = path.join(workDir, 'split-inline');
+const inlineManifest = split(inlineDir, inlineFile);
+assertManifestHonoured(inlineDir, inlineManifest, inlineBundle);
+const inlineByFile = new Map(inlineManifest.files.map((entry) => [entry.file, entry]));
+const inlineLines = inlineBundle.split('\n');
+
+assert.deepEqual(
+  inlineManifest.files.map((entry) => entry.file),
+  ['action-dropdown.js', 'demo-widget.js', 'demo-widget-2.js', 'separator.js', 'demo-widget-2-2.js'],
+  'inline registrations name their parts, and the literal `demo-widget-2` does not overwrite the generated one',
+);
+console.log('  ok - an inline anonymous `customElements.define` yields a tag-derived filename');
+
+const dropdown = inlineByFile.get('action-dropdown.js');
+assert.equal(dropdown.customElementTag, 'action-dropdown', 'the first tag in the section names it');
+assert.equal(dropdown.customElementEvidence.shape, 'customElements.define-inline-class', 'the inline shape is recorded as the proof');
+assert.equal(dropdown.customElementEvidence.anonymousClass, true, 'the evidence says outright that there was no binding');
+assert.ok(!dropdown.customElementEvidence.identifier, 'an inline class contributes no identifier to rename');
+assert.ok(fs.readFileSync(path.join(inlineDir, 'action-dropdown.js'), 'utf8').includes('this.textContent = "dropdown"'), 'the named part holds the component');
+console.log('  ok - an inline registration records the class as anonymous, not as a fake binding');
+
+// ── several registrations in one emitted section ──
+assert.equal(dropdown.customElementEvidence.namedBy, 'first-registration-in-section', 'the naming rule is stated in the manifest');
+assert.deepEqual(
+  dropdown.customElementEvidence.tags.map((entry) => entry.tag),
+  ['action-dropdown', 'swap-symbols-dialog'],
+  'every element the part registers is recorded, in document order',
+);
+for (const entry of dropdown.customElementEvidence.tags) {
+  const line = inlineLines[entry.registrationLine - 1] || '';
+  const window = inlineLines.slice(entry.registrationLine - 1, entry.registrationLine + 2).join('\n');
+  assert.ok(line.includes('customElements.define'), `${entry.tag} must point at its own define call`);
+  assert.ok(window.includes(`"${entry.tag}"`), `${entry.tag} evidence must reach the tag literal`);
+}
+assert.ok(
+  fs.readFileSync(path.join(inlineDir, 'action-dropdown.js'), 'utf8').includes('this.textContent = "swap"'),
+  'the second component really is inside the part named after the first',
+);
+console.log('  ok - a part registering several elements is named for the first and records them all');
+
+// ── the named-binding path is untouched by any of that ──
+const namedBinding = inlineByFile.get('demo-widget.js');
+assert.equal(namedBinding.customElementTag, 'demo-widget');
+assert.equal(namedBinding.customElementEvidence.shape, 'customElements.define', 'a named binding keeps the plain define shape');
+assert.equal(namedBinding.customElementEvidence.identifier, 'PanelClass', 'the binding is still the evidence');
+assert.ok(!namedBinding.customElementEvidence.anonymousClass, 'a named binding is not marked anonymous');
+assert.ok(!namedBinding.customElementEvidence.tags, 'a lone registration records no tag list');
+assert.deepEqual(namedBinding.declarations, ['PanelClass'], 'the original declaration name stays in the manifest');
+assert.equal(inlineByFile.get('demo-widget-2.js').customElementTag, 'demo-widget', 'its registration part is the deduplicated sibling');
+console.log('  ok - a named-binding registration behaves exactly as before');
+
+// ── the collision itself ──
+const literal = inlineByFile.get('demo-widget-2-2.js');
+assert.equal(literal.customElementTag, 'demo-widget-2', 'the element literally tagged `demo-widget-2` still gets its own file');
+assert.notEqual(literal.startLine, inlineByFile.get('demo-widget-2.js').startLine, 'the two parts are different byte ranges');
+assert.ok(
+  fs.readFileSync(path.join(inlineDir, 'demo-widget-2.js'), 'utf8').includes('customElements.define("demo-widget", PanelClass)'),
+  'the part that claimed `demo-widget-2` first still holds its own source',
+);
+console.log('  ok - a generated name and a literal name of the same shape both survive');
+
+// ── guardrails on the new shape ──
+const inlineNames = inlineManifest.files.map((entry) => entry.file);
+const inlineTags = new Set(inlineManifest.files.flatMap((entry) => [
+  entry.customElementTag,
+  ...(entry.customElementEvidence?.tags || []).map((tag) => tag.tag),
+]).filter(Boolean));
+assert.ok(!inlineTags.has('not-an-element'), '`registry.define` is not a custom element registration');
+assert.ok(!inlineTags.has('factory-made'), 'a factory call is neither a binding nor a class; do not guess a name from it');
+assert.ok(!inlineNames.some((name) => name.startsWith('not-an-element') || name.startsWith('factory-made')));
+console.log('  ok - non-registration `define` calls and factory arguments are still refused');
+
+const inlineRerun = split(path.join(workDir, 'split-inline-again'), inlineFile);
+assert.deepEqual(inlineRerun.files.map((entry) => entry.file), inlineNames, 'inline naming and collision suffixes are stable across runs');
+console.log('  ok - inline tag names and collision suffixes are deterministic');
 
 // ── naming is deterministic across runs ──
 const rerun = split(path.join(workDir, 'split-again'));

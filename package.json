@@ -53,7 +53,8 @@
     "test:dependency-fingerprints": "node scripts/test-dependency-fingerprints.cjs",
     "test:binding-graph": "node scripts/test-binding-graph.cjs",
     "test:module-partition": "node scripts/test-module-partition.cjs",
-    "test:promotion-roundtrip": "node scripts/test-promotion-roundtrip.cjs"
+    "test:promotion-roundtrip": "node scripts/test-promotion-roundtrip.cjs",
+    "test:linker-part-collision": "node scripts/test-linker-part-collision.cjs"
   },
   "dependencies": {
     "@wakaru/unminify": "^0.2.2",

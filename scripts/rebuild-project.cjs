@@ -959,6 +959,25 @@ for (const [entry, config] of Object.entries(plan.entries)) {
       continue;
     }
   }
+  // The header below is written from the plan while the body is read from disk.
+  // If two plan entries resolve to one file, the split lost a section: the header
+  // asserts a line range the body does not match, and that file is inlined twice.
+  // On a real capture this hoisted a customElements.define above its base class
+  // and the page died with a TDZ error, while the build reported success.
+  const seenPartFiles = new Map();
+  for (const part of config.parts) {
+    const previous = seenPartFiles.get(part.file);
+    if (previous !== undefined) {
+      throw new Error(
+        \`Recovered part collision in \${entry}: '\${part.file}' is claimed by two plan entries \`
+        + \`(L\${previous[0]}-L\${previous[1]} and L\${part.sourceRange[0]}-L\${part.sourceRange[1]}).\\n\`
+        + 'One of those sections was overwritten on disk and its source is lost. Re-run '
+        + "'jsmap recover' with a build of jsmap that reserves resolved filenames; do not link this workspace."
+      );
+    }
+    seenPartFiles.set(part.file, part.sourceRange);
+  }
+
   const parts = [];
   parts.push(\`/* Rebuilt by jsmap from recovery-link-plan.json entry \${entry}. */\`);
   parts.push('const __jsmapDynamicImport = (specifier) => specifier;');

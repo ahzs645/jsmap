@@ -221,6 +221,7 @@ function nodeLineCount(lineIndex, node) {
 /** Registration shapes, recorded verbatim as the evidence for a tag name. */
 const CUSTOM_ELEMENT_SHAPES = {
   define: 'customElements.define',
+  defineInline: 'customElements.define-inline-class',
   decorator: 'decorate-class-decorator',
   alias: 'class-alias',
 };
@@ -264,7 +265,25 @@ function walkAst(root, visit) {
   }
 }
 
-/** Shape 1: `customElements.define("tag", Klass)` (also `window.customElements`). */
+/**
+ * Shape 1: `customElements.define("tag", Klass)` (also `window.customElements`).
+ *
+ * Two argument forms are read, and they are not interchangeable:
+ *
+ *   1. `define("tag", Klass)` ties the tag to a top-level binding, so the tag can
+ *      also name the *declaration* part that holds `Klass`.
+ *   2. `define("tag", class extends Base {})` registers an inline anonymous
+ *      class. There is no binding to carry the tag to -- but the tag is still the
+ *      proven name of the element that statement registers, which is exactly what
+ *      the emitted file should be called. Vanilla web-component apps built
+ *      without decorators use this form almost exclusively: on one 329 KB Vite
+ *      bundle 29 of 31 registrations were inline, so refusing them dropped nearly
+ *      every component name and left the components in generically named parts.
+ *
+ * The inline form is returned with `identifier: null`. That keeps it out of the
+ * binding-keyed rename path, where a name that binds nothing is useless, while
+ * still letting it reach the statement-keyed path that names files.
+ */
 function readDefineRegistration(node) {
   if (node.type !== 'CallExpression') return null;
   const callee = node.callee;
@@ -278,9 +297,15 @@ function readDefineRegistration(node) {
 
   const [tagArg, classArg] = node.arguments;
   if (!tagArg || tagArg.type !== 'Literal' || !isCustomElementTag(tagArg.value)) return null;
-  // An inline `class extends …` has no binding to rename; only identifiers help.
-  if (!classArg || classArg.type !== 'Identifier') return null;
-  return { identifier: classArg.name, tag: tagArg.value, shape: CUSTOM_ELEMENT_SHAPES.define };
+  if (classArg?.type === 'Identifier') {
+    return { identifier: classArg.name, tag: tagArg.value, shape: CUSTOM_ELEMENT_SHAPES.define };
+  }
+  if (classArg?.type === 'ClassExpression') {
+    return { identifier: null, tag: tagArg.value, shape: CUSTOM_ELEMENT_SHAPES.defineInline };
+  }
+  // Anything else (a call, a member expression, a factory result) is neither a
+  // binding to rename nor a class we can point at; do not guess.
+  return null;
 }
 
 /** Shape 2: `Klass = __decorateClass([customElement("tag"), …], Klass)`. */
@@ -320,7 +345,9 @@ function readDecoratorRegistration(node) {
  *
  * A binding registered under two different tags is dropped from `byIdentifier`:
  * minifiers reuse short names across module scopes, and a wrong tag is worse
- * than a minified one.
+ * than a minified one. Registrations of an inline anonymous class have no
+ * binding at all and never enter `byIdentifier`; they reach naming only through
+ * `byStatementStart`, which names the statement that carries them.
  */
 function collectCustomElementRegistrations(ast) {
   const byIdentifier = new Map();
@@ -339,12 +366,23 @@ function collectCustomElementRegistrations(ast) {
     byStatementStart.set(statement.start, found);
     total += found.length;
     for (const registration of found) {
+      // No binding, nothing to key on: the inline-class form names files only.
+      if (!registration.identifier) continue;
       const existing = byIdentifier.get(registration.identifier);
       if (!existing) byIdentifier.set(registration.identifier, registration);
       else if (existing.tag !== registration.tag) conflicting.add(registration.identifier);
     }
   }
   for (const identifier of conflicting) byIdentifier.delete(identifier);
+
+  // An ambiguous binding is not allowed to name anything, on either path. The
+  // registrations stay in `byStatementStart` so the tags can still be recorded
+  // as evidence -- an uncertain name is preserved and reported, never applied.
+  for (const found of byStatementStart.values()) {
+    for (const registration of found) {
+      if (registration.identifier && conflicting.has(registration.identifier)) registration.ambiguous = true;
+    }
+  }
 
   // esbuild sometimes registers through an alias (`let Vo = M;` followed by
   // `customElements.define("gesso-select", Vo)`). Carry the tag back to the
@@ -369,7 +407,7 @@ function collectCustomElementRegistrations(ast) {
     }
   }
 
-  return { byIdentifier, byStatementStart, total };
+  return { byIdentifier, byStatementStart, conflicting, total };
 }
 
 /** Registration evidence for a declaration section, keyed by its bound names. */
@@ -383,25 +421,54 @@ function matchDeclarationRegistration(names, registry) {
 }
 
 /**
- * Registration evidence for a run of side-effect statements. Only attribute the
- * chunk when every registration it contains names the same element, so a chunk
- * that batches several `customElements.define` calls keeps its generic name.
+ * Registration evidence for a run of side-effect statements.
+ *
+ * A run routinely batches several registrations: a vanilla web-components app
+ * emits one `customElements.define("tag", class extends Base {})` statement per
+ * component and the size-based chunker packs as many as fit into one part. The
+ * naming rule is therefore:
+ *
+ *   - the first *unambiguous* registration in document order names the section,
+ *   - every distinct tag the section registers is carried into the manifest as
+ *     evidence, so nothing the capture proved is dropped on the floor, and
+ *   - a tag from an ambiguous binding (one binding registered under two tags)
+ *     is recorded but never allowed to name anything, exactly as on the
+ *     binding-keyed path. A section with nothing but ambiguous registrations
+ *     keeps its generic name.
+ *
+ * Refusing to name any batched chunk was the previous rule, and it cost real,
+ * proven component names: on one capture a single generically named part
+ * swallowed eight registrations. A first-in-document-order name is a true
+ * statement about the part (it does register that element), it is deterministic,
+ * and `evidence.tags` keeps the rest of the truth attached to it.
  */
 function matchStatementRegistration(nodes, registry) {
   if (!registry || registry.byStatementStart.size === 0) return null;
-  let match = null;
+  const found = [];
   for (const node of nodes) {
-    for (const registration of registry.byStatementStart.get(node.start) || []) {
-      if (!match) match = registration;
-      else if (match.tag !== registration.tag) return null;
-    }
+    for (const registration of registry.byStatementStart.get(node.start) || []) found.push(registration);
   }
-  return match;
+  if (found.length === 0) return null;
+  found.sort((a, b) => a.start - b.start);
+
+  const seen = new Set();
+  const distinct = [];
+  for (const registration of found) {
+    if (seen.has(registration.tag)) continue;
+    seen.add(registration.tag);
+    distinct.push(registration);
+  }
+  const primary = distinct.find((registration) => !registration.ambiguous);
+  if (!primary) return null;
+  return distinct.length > 1 ? { ...primary, tags: distinct } : primary;
 }
 
 /** Serializable provenance for a tag-derived section name. */
 function customElementEvidence(registration, lineIndex) {
-  const evidence = { identifier: registration.identifier, shape: registration.shape };
+  const evidence = {};
+  if (registration.identifier) evidence.identifier = registration.identifier;
+  else evidence.anonymousClass = true;
+  evidence.shape = registration.shape;
   if (registration.decorator) evidence.decorator = registration.decorator;
   if (registration.aliasOf) evidence.aliasOf = registration.aliasOf;
   // The registration often sits far from the class it names (bootstrap calls at
@@ -412,6 +479,18 @@ function customElementEvidence(registration, lineIndex) {
   }
   if (lineIndex && registration.aliasStart != null) {
     evidence.aliasLine = offsetToLine(lineIndex, registration.aliasStart);
+  }
+  // A part that registers several elements records all of them: the file carries
+  // one name, but the manifest must not pretend the other components are absent.
+  if (registration.tags?.length > 1) {
+    evidence.namedBy = 'first-registration-in-section';
+    evidence.tags = registration.tags.map((entry) => {
+      const tag = { tag: entry.tag };
+      if (lineIndex && entry.start != null) tag.registrationLine = offsetToLine(lineIndex, entry.start);
+      // Recorded, but disqualified from naming: this binding carries two tags.
+      if (entry.ambiguous) tag.ambiguousBinding = true;
+      return tag;
+    });
   }
   return evidence;
 }
@@ -1012,8 +1091,43 @@ function processDeclarationModules(source, options = {}) {
   return materializeSections(sections, source, lineIndex);
 }
 
+/**
+ * Manifest entries that share a filename, in the order they collide.
+ *
+ * Two entries under one name is not a cosmetic flaw: the second write overwrites
+ * the first, so the byte range the first entry points at exists in the manifest
+ * and nowhere on disk. The recovered source in that range is gone.
+ */
+function findDuplicateFileNames(files) {
+  const seen = new Set();
+  const duplicates = [];
+  for (const file of files) {
+    if (seen.has(file.fileName)) duplicates.push(file.fileName);
+    else seen.add(file.fileName);
+  }
+  return duplicates;
+}
+
+/**
+ * Give every section a unique output filename.
+ *
+ * Deduplication appends `-2`, `-3`, … to a repeated base name, which means the
+ * generated names live in the same namespace as the names sections arrive with:
+ * the size-based chunker emits literal `side-effects-2`, `side-effects-3`
+ * sections, and a tag can slug to anything. Counting occurrences of the *base*
+ * name alone therefore never reserved a generated name, so a second section
+ * genuinely called `side-effects-2` claimed a filename the deduplicator had
+ * already handed out, and its file overwrote the earlier one. Measured on a
+ * 466 KB capture: 192 manifest entries, 191 files on disk, 377 bytes of
+ * recovered source destroyed.
+ *
+ * Every resolved name is now reserved, and the suffix loop probes until it finds
+ * a name nothing has claimed -- from either direction, whichever section came
+ * first keeps the name it asked for.
+ */
 function assignFileNames(sections) {
-  const usedNames = new Map();
+  const occurrences = new Map();
+  const taken = new Set();
   const result = [];
 
   for (let i = 0; i < sections.length; i++) {
@@ -1021,11 +1135,27 @@ function assignFileNames(sections) {
     let baseName = section.name || `section-${String(i + 1).padStart(3, '0')}`;
     baseName = baseName.replace(/[^a-zA-Z0-9_-]/g, '-');
 
-    const count = usedNames.get(baseName) || 0;
-    usedNames.set(baseName, count + 1);
-    if (count > 0) baseName = `${baseName}-${count + 1}`;
+    let count = occurrences.get(baseName) || 0;
+    let resolved = count === 0 ? baseName : `${baseName}-${count + 1}`;
+    while (taken.has(resolved)) {
+      count += 1;
+      resolved = `${baseName}-${count + 1}`;
+    }
+    occurrences.set(baseName, count + 1);
+    taken.add(resolved);
 
-    result.push({ ...section, fileName: `${baseName}.js` });
+    result.push({ ...section, fileName: `${resolved}.js` });
+  }
+
+  // Names are collision-free by construction above, so this can only fire on a
+  // future defect -- which is exactly when it must fire. A splitter that emits a
+  // manifest it cannot honour is worse than one that refuses to emit at all.
+  const duplicates = findDuplicateFileNames(result);
+  if (duplicates.length > 0) {
+    throw new Error(
+      `split-bundle-ast: ${duplicates.length} filename collision(s) would overwrite recovered source: ` +
+      `${[...new Set(duplicates)].join(', ')}`,
+    );
   }
   return result;
 }
@@ -1217,6 +1347,29 @@ async function pathExists(p) {
   try { await fs.access(p); return true; } catch { return false; }
 }
 
+/**
+ * Fail the split when the emitted directory cannot honour its own manifest.
+ *
+ * Two manifest entries under one filename means one of them was overwritten and
+ * the source in its range is not in the output at all. That is silent data loss
+ * in a recovery tool, so it is a hard failure, not a warning.
+ */
+async function assertManifestMatchesDisk(outputDir, manifest) {
+  const uniqueNames = new Set(manifest.map((entry) => entry.file));
+  const onDisk = new Set(await fs.readdir(outputDir));
+  const missing = manifest.filter((entry) => !onDisk.has(entry.file)).map((entry) => entry.file);
+
+  if (uniqueNames.size === manifest.length && missing.length === 0) return;
+
+  const duplicates = [...new Set(findDuplicateFileNames(manifest.map((entry) => ({ fileName: entry.file }))))];
+  const details = [
+    `${manifest.length} manifest entr(ies) resolved to ${uniqueNames.size} unique filename(s)`,
+    duplicates.length > 0 ? `overwritten: ${duplicates.join(', ')}` : null,
+    missing.length > 0 ? `missing on disk: ${missing.slice(0, 10).join(', ')}` : null,
+  ].filter(Boolean).join('; ');
+  throw new Error(`split-bundle-ast: manifest does not match ${outputDir} -- ${details}`);
+}
+
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -1359,6 +1512,13 @@ async function main() {
     }
   }
 
+  // The manifest is a promise that every listed byte range is readable at the
+  // listed filename. Check the promise against the directory that was actually
+  // written -- one entry per file, every entry present -- before reporting a
+  // split. `assignFileNames` makes a collision impossible upstream; this catches
+  // anything that could make the two disagree downstream of it.
+  await assertManifestMatchesDisk(outputDir, manifest);
+
   if (summary) {
     const largest = [...files]
       .sort((a, b) => Buffer.byteLength(b.content) - Buffer.byteLength(a.content))
@@ -1442,6 +1602,7 @@ module.exports = {
   parseBundle,
   sealSectionRanges,
   findUnparseableParts,
+  findDuplicateFileNames,
   splitSource,
   processBundle,
   assignFileNames,

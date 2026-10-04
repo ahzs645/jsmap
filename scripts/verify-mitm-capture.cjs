@@ -12,6 +12,16 @@
 // secret in full — matches are masked — and it exits non-zero when high-severity
 // secrets are found so it can be wired into a pre-commit / pre-share gate.
 //
+// Severity line (see SESSION_CREDENTIAL_NAMES / PII_PATTERNS below):
+//   high   — anything that grants access: a token literal, a private key, a
+//            cookie, or a retained CSRF/authorization/session value. These fail
+//            the run, because sharing the capture shares a live session.
+//   review — secret-*named* fields whose value is not token-shaped, and PII
+//            (emails, UUIDs) inside captured response bodies. These are surfaced
+//            for a human but do not fail the run: response bodies carry
+//            identifiers in bulk, and a gate that fails on every address is a
+//            gate people route around with --allow-secrets.
+//
 // Usage:
 //   node scripts/jsmap.cjs mitm-verify <dir> [--json <out>] [--max-bytes <n>]
 //                                            [--allow-secrets] [--quiet]
@@ -33,6 +43,16 @@ const BINARY_EXT = new Set([
   '.ogg', '.wav', '.pdf', '.zip', '.gz', '.br', '.glb', '.gltf', '.bin',
 ]);
 
+// Separator between a secret-shaped NAME and its VALUE.
+//
+// A bare `[:=]` also matches the first `=` of `==`, `===` and `=>`, which turns
+// a comparison into a bogus "assignment": `"password"===t.type` was reported as
+// `named-secret:password` with the value `==t.type;t.type=e?`. Requiring the `=`
+// not to be followed by `=` or `>` kills that whole class of false positive
+// while still matching real `name=value` / `name: value` pairs. Any pattern that
+// pairs a name with a value must use this instead of `[:=]`.
+const ASSIGN = '(?::|=(?![=>]))';
+
 // High-severity: credential-shaped tokens. category, regex, and a masker hint.
 const SECRET_PATTERNS = [
   { category: 'jwt', severity: 'high', re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\b/g },
@@ -43,14 +63,64 @@ const SECRET_PATTERNS = [
   { category: 'slack-token', severity: 'high', re: /\bxox[baprs]-[0-9A-Za-z-]{10,}\b/g },
   { category: 'private-key-block', severity: 'high', re: /-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----/g },
   { category: 'bearer-token', severity: 'high', re: /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi },
-  { category: 'set-cookie', severity: 'high', re: /\bset-cookie\b\s*[:=]\s*\S+/gi },
+  { category: 'set-cookie', severity: 'high', re: new RegExp(`\\bset-cookie\\b\\s*${ASSIGN}\\s*\\S+`, 'gi') },
 ];
 
-// Review-severity: secret-named key/value pairs (JSON, query, form, headers).
-// The value is masked; short/obvious placeholder values are ignored.
-const NAMED_SECRET_RE =
-  /("?)(password|passwd|pwd|secret|client[_-]?secret|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|session[_-]?token|private[_-]?key|authorization)\1\s*[:=]\s*("?)([^"'\s,&}]{6,})\3/gi;
+// Secret-named key/value pairs (JSON, query, form, headers). The value is
+// masked; short/obvious placeholder values are ignored.
+//
+// `csrf` / `csrfToken` / `xsrf` are in this list because AGENTS.md says
+// verbatim: "Never retain authorization, cookie, token, or CSRF headers."
+// Without them the scanner enforced four of those five categories and passed
+// captures holding a live CSRF token.
+const NAMED_SECRET_RE = new RegExp(
+  '("?)(password|passwd|pwd|secret|client[_-]?secret|api[_-]?key|apikey'
+  + '|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|session[_-]?token'
+  + '|csrf[_-]?token|csrf|xsrf[_-]?token|xsrf'
+  + '|private[_-]?key|authorization)'
+  + `\\1\\s*${ASSIGN}\\s*("?)([^"'\\s,&}]{6,})\\3`,
+  'gi',
+);
 const PLACEHOLDER_VALUES = /^(?:null|true|false|undefined|<redacted>|redacted|example|changeme|your[_-]?\w+|xx+|\*+|0+|123456|password)$/i;
+
+// Names that denote a live session/authorization credential, not merely a
+// secret-sounding field. A retained value under one of these is a session
+// compromise rather than a review item — provided the value actually looks like
+// an opaque token (see looksLikeOpaqueToken) and not a code fragment.
+const SESSION_CREDENTIAL_NAMES = new Set([
+  'csrf', 'csrftoken', 'xsrf', 'xsrftoken',
+  'accesstoken', 'refreshtoken', 'idtoken', 'authtoken', 'sessiontoken',
+  'clientsecret', 'privatekey', 'authorization',
+]);
+
+// PII in captured *response bodies*. AGENTS.md: treat response bodies as
+// "potentially private even after request redaction. Require review before they
+// are shared or committed." Emails and UUIDs are the two shapes that reliably
+// mark an account record (`user.email`, `user.id`) without needing to parse the
+// body's schema.
+const PII_PATTERNS = [
+  { category: 'pii:email', severity: 'review', re: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,24}\b/g },
+  { category: 'pii:uuid', severity: 'review', re: /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi },
+];
+
+// Application code and stylesheets shipped by the site. PII detection is
+// deliberately NOT applied here: a bundle legitimately contains published
+// contact addresses (dmca@…, reports@…, support@…) and vendor UUID constants,
+// and flagging those trains people to ignore the scanner.
+const APP_SOURCE_EXT = new Set([
+  '.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx', '.map', '.css', '.scss', '.less',
+  '.svg', '.vue', '.svelte', '.md',
+]);
+
+// Directories a capture writes response bodies into.
+const CAPTURE_BODY_DIR_RE = /(?:^|\/)(?:\.jsmap-mitm|mitm-capture|bodies|responses)(?:\/|$)/;
+
+// Path shapes that mark a stored API response rather than a static asset.
+// Mirrored-site captures name bodies after their route, so `api/auth/me.html`
+// is a response body even though its extension says HTML.
+const API_ROUTE_RE = /(?:^|\/)(?:api|apis|graphql|gql|rest|rpc|_api|oauth|auth|session|account)(?:$|[/.])/i;
+
+const JSON_SNIFF_MAX_BYTES = 4 * 1024 * 1024;
 
 function parseArgs(argv) {
   const flags = { json: null, maxBytes: DEFAULT_MAX_BYTES, allowSecrets: false, quiet: false };
@@ -67,10 +137,52 @@ function parseArgs(argv) {
   return { flags, positional };
 }
 
+function sha8(value) {
+  return crypto.createHash('sha256').update(String(value)).digest('hex').slice(0, 8);
+}
+
 function mask(value) {
   const str = String(value);
   if (str.length <= 8) return `${str.slice(0, 2)}${'*'.repeat(Math.max(1, str.length - 2))}`;
-  return `${str.slice(0, 4)}…${str.slice(-2)} [${str.length} chars, sha256:${crypto.createHash('sha256').update(str).digest('hex').slice(0, 8)}]`;
+  return `${str.slice(0, 4)}…${str.slice(-2)} [${str.length} chars, sha256:${sha8(str)}]`;
+}
+
+// PII is masked with no plaintext at all: the first four characters of an email
+// local part are themselves identifying, so the length + digest is the whole
+// preview. Correlating two findings by digest still works.
+function maskOpaque(value) {
+  const str = String(value);
+  return `[${str.length} chars, sha256:${sha8(str)}]`;
+}
+
+// Is this value plausibly a real opaque credential, as opposed to a code
+// fragment that happened to sit to the right of a secret-shaped name in a
+// minified bundle? Rejects template-literal fragments (`` `Bearer ``), member
+// expressions (`e.headers.authorization`), and bare words.
+function looksLikeOpaqueToken(value) {
+  if (value.length < 16) return false;
+  if (!/^[A-Za-z0-9_\-+/=.]+$/.test(value)) return false;
+  if (/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/.test(value)) return false;
+  if (/^[A-Za-z]+$/.test(value)) return false;
+  return true;
+}
+
+function looksLikeJsonDocument(text) {
+  if (text.length > JSON_SNIFF_MAX_BYTES) return false;
+  const trimmed = text.trim();
+  if (trimmed.length < 2) return false;
+  if (trimmed[0] !== '{' && trimmed[0] !== '[') return false;
+  try { JSON.parse(trimmed); return true; } catch { return false; }
+}
+
+// Which files are captured response bodies (PII-scanned) vs application source
+// (secret-scanned only). Extension wins first so a bundle is never PII-scanned
+// no matter where a capture filed it.
+function isResponseBody(rel, text) {
+  if (APP_SOURCE_EXT.has(path.extname(rel).toLowerCase())) return false;
+  if (CAPTURE_BODY_DIR_RE.test(rel)) return true;
+  if (API_ROUTE_RE.test(rel)) return true;
+  return looksLikeJsonDocument(text);
 }
 
 function walk(dir, out = []) {
@@ -100,7 +212,7 @@ function lineOf(text, index) {
   return line;
 }
 
-function scanText(text, relFile, findings) {
+function scanText(text, relFile, findings, options = {}) {
   for (const { category, severity, re } of SECRET_PATTERNS) {
     re.lastIndex = 0;
     let m;
@@ -115,7 +227,28 @@ function scanText(text, relFile, findings) {
     const key = n[2];
     const val = n[4];
     if (PLACEHOLDER_VALUES.test(val)) continue;
-    findings.push({ file: relFile, line: lineOf(text, n.index), category: `named-secret:${key.toLowerCase()}`, severity: 'review', preview: `${key}=${mask(val)}` });
+    const normalizedKey = key.toLowerCase().replace(/[_-]/g, '');
+    const isLiveCredential = SESSION_CREDENTIAL_NAMES.has(normalizedKey) && looksLikeOpaqueToken(val);
+    // A value we are confident is a live credential gets no plaintext prefix at
+    // all; file:line is enough for a human to find it in the capture.
+    const preview = `${key}=${isLiveCredential ? maskOpaque(val) : mask(val)}`;
+    findings.push({ file: relFile, line: lineOf(text, n.index), category: `named-secret:${key.toLowerCase()}`, severity: isLiveCredential ? 'high' : 'review', preview });
+  }
+
+  if (!options.responseBody) return;
+  for (const { category, severity, re } of PII_PATTERNS) {
+    re.lastIndex = 0;
+    // Dedupe per file+category: one address repeated across a body is one
+    // disclosure, not hundreds of findings.
+    const seen = new Set();
+    let p;
+    while ((p = re.exec(text)) !== null) {
+      if (p[0].length === 0) { re.lastIndex++; continue; }
+      const digest = sha8(p[0]);
+      if (seen.has(digest)) continue;
+      seen.add(digest);
+      findings.push({ file: relFile, line: lineOf(text, p.index), category, severity, preview: maskOpaque(p[0]) });
+    }
   }
 }
 
@@ -168,6 +301,7 @@ function main() {
     responseBodiesStored: null,
     invariantViolations: [],
     scannedFiles: 0,
+    scannedResponseBodies: 0,
     skippedBinary: 0,
     skippedLarge: 0,
     findings: [],
@@ -187,7 +321,10 @@ function main() {
     try { buffer = fs.readFileSync(file); } catch { continue; }
     if (looksBinary(buffer)) { report.skippedBinary++; continue; }
     report.scannedFiles++;
-    scanText(buffer.toString('utf8'), rel, report.findings);
+    const text = buffer.toString('utf8');
+    const responseBody = isResponseBody(rel, text);
+    if (responseBody) report.scannedResponseBodies++;
+    scanText(text, rel, report.findings, { responseBody });
   }
 
   for (const f of report.findings) {
