@@ -680,7 +680,10 @@ async function main() {
 
   const chunksRoot = path.join(recoveryDir, 'src/recovered-chunks');
   const deobfuscatedAssets = path.join(recoveryDir, 'recovery/deobfuscated', toPosix(path.relative(publicDir, siteRoot)), 'assets');
-  const manifests = (await walk(chunksRoot)).filter((file) => path.basename(file) === '_manifest.json');
+  // No split output at all (every bundle under recover's split threshold) must
+  // reach the actionable "no manifests" error below, not an ENOENT from readdir.
+  const manifests = (await pathExists(chunksRoot) ? await walk(chunksRoot) : [])
+    .filter((file) => path.basename(file) === '_manifest.json');
   const plan = {
     generatedBy: 'jsmap rebuild',
     generatedAt: new Date().toISOString(),

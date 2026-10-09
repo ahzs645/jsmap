@@ -108,6 +108,18 @@ const DEPENDENCY_FINGERPRINTS = [
     ],
     versionPattern: /reactiveElementVersions\s*(?:\?\?|\|\|)=\s*\[\]\s*\)\s*\.push\(\s*["'`]([^"'`]+)["'`]/,
   },
+  // Angular stamps every bootstrapped root component with `ng-version`. Ivy
+  // compiles that into a static attribute array, `["ng-version","20.3.2"]`,
+  // which survives minification verbatim and states the shipped
+  // @angular/core version. Ivy definition statics (`ɵcmp`/`ɵfac`/`ɵprov`, often
+  // written as `ɵfac` in minified output) are Angular-only property names.
+  {
+    name: '@angular/core',
+    version: '^20.3.2',
+    evidence: 'Angular ng-version root stamp or Ivy definition statics',
+    patterns: [/["']ng-version["']/, /(?:ɵ|\\u0275)(?:cmp|fac|prov|inj|mod|dir)\b/],
+    versionPattern: /\[\s*["']ng-version["']\s*,\s*["'](\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)["']\s*\]/,
+  },
   {
     name: '@lit/context',
     version: '^1.1.6',
@@ -399,6 +411,75 @@ function detectDependencyFingerprints(text) {
   return deps.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// The Angular CLI ships a `3rdpartylicenses.txt` beside the bundles listing
+// every npm package it bundled. It names packages and licenses, never versions.
+// Two layouts exist:
+//   esbuild application builder (v17+):  "Package: @angular/core" / "License: \"MIT\""
+//   webpack builder (license-webpack-plugin): a bare package-name line followed
+//   by a bare SPDX license line, entries separated by blank lines.
+const LICENSE_NOTICE_FILE = /(?:^|\/)3rdpartylicenses\.txt$/i;
+const NPM_PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
+// Bare license-line layout only: restrict to SPDX identifiers so a lowercase
+// word inside license prose ("permission", "software") followed by some other
+// line is never read as a package entry.
+const SPDX_LICENSE_LINE = /^\(?(?:MIT|ISC|0BSD|Apache-2\.0|BSD-[234]-Clause|MPL-2\.0|Unlicense|CC0-1\.0|CC-BY-[34]\.0|BlueOak-1\.0\.0|Python-2\.0|WTFPL|Zlib|(?:LGPL|GPL)-[23]\.[01](?:-only|-or-later)?)(?:\s+(?:OR|AND)\s+[A-Za-z0-9.+-]+)*\)?$/;
+
+function parseThirdPartyLicenses(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  const packages = new Map();
+  const add = (name, license, layout) => {
+    if (!NPM_PACKAGE_NAME.test(name) || packages.has(name)) return;
+    packages.set(name, { name, license: license || null, layout });
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const tagged = /^Package:\s*(\S+)\s*$/.exec(lines[i]);
+    if (tagged) {
+      const licenseLine = /^License:\s*"?([^"]*)"?\s*$/.exec(lines[i + 1] || '');
+      add(tagged[1], licenseLine ? licenseLine[1].trim() : null, 'package-tag');
+      continue;
+    }
+    const name = lines[i].trim();
+    const license = (lines[i + 1] || '').trim();
+    const startsEntry = i === 0 || lines[i - 1].trim() === '';
+    if (startsEntry && name !== license && NPM_PACKAGE_NAME.test(name) && SPDX_LICENSE_LINE.test(license)) {
+      add(name, license, 'bare');
+    }
+  }
+  return [...packages.values()];
+}
+
+function licenseNoticeDependencies(text, file) {
+  return parseThirdPartyLicenses(text).map((pkg) => ({
+    name: pkg.name,
+    version: null,
+    resolution: 'license-notice',
+    evidenceType: 'license-notice',
+    detail: pkg.license ? `${pkg.name} (${pkg.license}) listed in ${file}` : `${pkg.name} listed in ${file}`,
+    file,
+    license: pkg.license,
+  }));
+}
+
+// Angular framework packages are published in lockstep: one release sets the
+// same version on every package below. A version stamped by @angular/core is
+// therefore a strong hint for its siblings, but still only a hint — the bundle
+// never states their versions. @angular/cdk and @angular/material are released
+// separately and are deliberately absent.
+const ANGULAR_LOCKSTEP_PACKAGES = new Set([
+  '@angular/animations',
+  '@angular/common',
+  '@angular/compiler',
+  '@angular/elements',
+  '@angular/forms',
+  '@angular/localize',
+  '@angular/platform-browser',
+  '@angular/platform-browser-dynamic',
+  '@angular/platform-server',
+  '@angular/router',
+  '@angular/service-worker',
+  '@angular/upgrade',
+]);
+
 function normalizePackageName(name) {
   if (!name || typeof name !== 'string') return null;
   const trimmed = name.trim();
@@ -508,7 +589,11 @@ function primaryRuntimeSignal(text, context = {}) {
 }
 
 module.exports = {
+  ANGULAR_LOCKSTEP_PACKAGES,
   DEPENDENCY_FINGERPRINTS,
+  LICENSE_NOTICE_FILE,
+  licenseNoticeDependencies,
+  parseThirdPartyLicenses,
   RUNTIME_FINGERPRINTS,
   VENDOR_REQUIRE_MAP,
   classifyRequireName,

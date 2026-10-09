@@ -17,10 +17,15 @@ Check the current level and framework route with:
 node scripts/jsmap.cjs recovery-level ./recovered-project
 ```
 
-`recover-workflow` detects Vite/Rollup, Next/Turbopack, webpack, and unknown
-captures before choosing a route. Next captures receive the preserved Next
+`recover-workflow` detects Vite/Rollup, Next/Turbopack, webpack, Angular, and
+unknown captures before choosing a route. Next captures receive the preserved Next
 harness and route-asset audit; unknown captures remain inspection-first instead
-of being forced through a Vite rebuild.
+of being forced through a Vite rebuild. Angular is reported as the framework
+while the bundler picks the route: Angular CLI esbuild builds (`main-HASH.js`,
+no module runtime) take `linked-esm`, webpack-era Angular builds keep
+`linked-webpack`. Angular needs two independent markers — the `ng-version`
+stamp plus Ivy statics (`ɵfac`/`ɵcmp`/`ɵprov`) or a `3rdpartylicenses.txt`
+entry for `@angular/core`; a single marker only leaves a `hint`.
 
 Generate a source-oriented recovery workspace from a captured static app:
 
@@ -174,6 +179,21 @@ The same pass reports capture damage — source maps that are really SPA shells,
 JavaScript saved as HTML, empty files — so you know up front whether deobfuscation
 has anything to work with.
 
+Builds without a chunk map still name files they fetch later. `coverage` also
+checks literal local asset references in JS, CSS (`url()`), and HTML
+(`src`/`href`) against the capture, strips query/hash for lookup, and lists each
+unresolved one with the files that reference it:
+
+```
+  6 local asset references in JS/CSS/HTML, 5 present, 1 unresolved
+  missing from the capture:
+    assets/login_logo.jpg  <- main-BQGSVHIO.js
+```
+
+A literal proves a file is named, not that the code reaching it runs, so every
+entry is `reachability: "unverified"`. A same-named file elsewhere is listed
+separately as an ambiguous basename match, never as a resolution.
+
 ### Imperfect real-world captures
 
 Captures are frequently lossy, and jsmap now detects and repairs the common
@@ -196,6 +216,13 @@ defects instead of silently producing garbage:
 - Inferred dependency versions from content fingerprints are written as `"*"`
   (with the curated version kept as a non-authoritative `lastKnownVersion` hint),
   so recovered `package.json` does not pin guessed versions.
+- An Angular CLI `3rdpartylicenses.txt` is read as package-name evidence
+  (`resolution: "license-notice"`, version `"*"`). `@angular/core` takes its exact
+  version from the bundle's own `ng-version` stamp; lockstep `@angular/*`
+  siblings record that version only as a `lastKnownVersion` hint
+  (`angular-lockstep-hint`), never a pin.
+- Package boundaries are emitted only for buckets that received evidence, so a
+  capture with no CAD/editor/viewport code gets no such packages.
 - `recover` exits non-zero on a fully-degenerate capture (nothing split, no
   usable maps, nothing transformed); pass `--allow-empty` to treat that as
   success.

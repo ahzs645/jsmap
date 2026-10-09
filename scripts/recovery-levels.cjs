@@ -24,7 +24,7 @@ function parseArgs(argv) {
 
 function main() {
   const { flags, positional } = parseArgs(process.argv.slice(2));
-  if (!positional[0]) throw new Error('Usage: jsmap recovery-level <project-dir> [--framework auto|vite|next|webpack|unknown] [--out <prefix>] [--json]');
+  if (!positional[0]) throw new Error('Usage: jsmap recovery-level <project-dir> [--framework auto|vite|next|webpack|angular|unknown] [--out <prefix>] [--json]');
   const root = path.resolve(positional[0]);
   if (!fs.existsSync(root)) throw new Error(`Project directory not found: ${root}`);
   const levels = detectRecoveryLevels(root);

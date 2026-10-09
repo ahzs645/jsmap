@@ -28,10 +28,18 @@
 //
 // The same pass reports capture damage: source maps that are really SPA shells,
 // JavaScript saved as HTML, and empty files.
+//
+// Not every build has a chunk map. An Angular esbuild app ships one ESM entry
+// with no runtime at all, yet still names files it will fetch later: a login
+// logo that only loads when the login dialog opens, a config.json read at boot.
+// Those literal references in JS, CSS and HTML are checked against the capture
+// too, so an image the page never requested shows up as a named gap instead of
+// a silent 404 later. A literal proves the file is referenced, not that the
+// code reaching it runs, so every such gap is reported as reachability-unverified.
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { walkFiles } = require('./recovery-contract.cjs');
+const { JSMAP_GENERATED_SCRIPT, walkFiles } = require('./recovery-contract.cjs');
 
 // Anything past this is not a chunk-map object literal; it guards the backward
 // scan from walking an entire 10 MB bundle looking for a brace.
@@ -177,7 +185,99 @@ function expectedFilenames(template) {
   return files;
 }
 
+const ASSET_EXTENSIONS = 'png|jpe?g|gif|svg|webp|avif|ico|bmp|json|woff2?|ttf|otf|eot|mp3|mp4|m4a|webm|ogg|wav|wasm|glb|gltf|hdr|ktx2|pdf|xml|csv|css|m?js';
+// A quoted, relative-or-root path ending in an asset extension, optionally with
+// a query/hash. `${` and whitespace are excluded, so template interpolations and
+// prose never match.
+const JS_ASSET_LITERAL = new RegExp(`(["'\`])((?:\\.{1,2}/|/)?[A-Za-z0-9_@~-][A-Za-z0-9_@~.\\-/]*\\.(?:${ASSET_EXTENSIONS}))(?:[?#][^"'\`\\s]*)?\\1`, 'g');
+const CSS_URL = /url\(\s*(["']?)([^"')]+?)\1\s*\)/g;
+const HTML_ASSET_ATTRIBUTE = /\b(?:src|href|poster|data-src)\s*=\s*(["'])([^"']+)\1/gi;
+const ASSET_PATH = new RegExp(`\\.(?:${ASSET_EXTENSIONS})$`, 'i');
+const SCRIPT_OR_STYLE_PATH = /\.(?:m?js|css)$/i;
+const TOOLING_MANIFESTS = new Set(['package.json', 'package-lock.json', 'tsconfig.json', 'jsconfig.json', 'bower.json', 'lerna.json', 'composer.json']);
+
+// Normalise one raw reference to a capture-relative lookup path, or null when it
+// is not a local file reference (absolute URL, data URI, fragment, ...).
+function normaliseAssetReference(raw, kind) {
+  let ref = String(raw || '').trim();
+  if (!ref || /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(ref)) return null;
+  ref = ref.replace(/[?#].*$/, '');
+  if (!ASSET_PATH.test(ref) || /(?:^|\/)node_modules\//.test(ref)) return null;
+  // `@scope/pkg/lib/index.js` is a module specifier, not a URL.
+  if (ref.startsWith('@')) return null;
+  const bare = !ref.includes('/');
+  // Build-tool manifests named by bundled tooling code are never page assets.
+  if (TOOLING_MANIFESTS.has(path.posix.basename(ref))) return null;
+  // Bundled libraries mention "index.js"/"styles.css" in messages; only a
+  // path-shaped JS/CSS reference is a fetch target worth reporting.
+  if (kind === 'js' && bare && SCRIPT_OR_STYLE_PATH.test(ref)) return null;
+  // "cdn.example.com/x.png" is a host without a scheme, not a local path.
+  const firstSegment = ref.replace(/^\.{0,2}\//, '').split('/')[0];
+  if (!bare && !ref.startsWith('.') && !ref.startsWith('/') && /\.[a-z]{2,}$/i.test(firstSegment)) return null;
+  return { ref, bare };
+}
+
+function findAssetReferences(source, kind) {
+  const refs = [];
+  const patterns = kind === 'css' ? [CSS_URL] : kind === 'html' ? [HTML_ASSET_ATTRIBUTE, CSS_URL] : [JS_ASSET_LITERAL];
+  for (const pattern of patterns) {
+    pattern.lastIndex = 0;
+    let match;
+    while ((match = pattern.exec(source))) {
+      const normalised = normaliseAssetReference(match[2], kind);
+      if (normalised) refs.push(normalised);
+    }
+  }
+  return refs;
+}
+
+function analyseAssetReferences(root, textFiles, presentBasenames) {
+  const byRef = new Map();
+  for (const { file, kind } of textFiles) {
+    let source;
+    try {
+      source = fs.readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    const rel = path.relative(root, file).replace(/\\/g, '/');
+    for (const { ref, bare } of findAssetReferences(source, kind)) {
+      // Resolve against the capture root (how <base href> and root-absolute
+      // URLs resolve) and against the referencing file's own directory.
+      const candidates = ref.startsWith('/')
+        ? [path.join(root, ref)]
+        : [path.join(root, ref), path.join(path.dirname(file), ref)];
+      const entry = byRef.get(ref) || { ref, bare, referencedFrom: [], exists: false };
+      if (!entry.referencedFrom.includes(rel) && entry.referencedFrom.length < 5) entry.referencedFrom.push(rel);
+      if (!entry.exists) entry.exists = candidates.some((candidate) => fs.existsSync(candidate));
+      byRef.set(ref, entry);
+    }
+  }
+  const found = [];
+  const missing = [];
+  const basenameOnly = [];
+  for (const entry of byRef.values()) {
+    if (entry.exists) {
+      found.push(entry.ref);
+      continue;
+    }
+    const gap = {
+      ref: entry.ref,
+      referencedFrom: entry.referencedFrom,
+      kind: entry.bare ? 'bare-name' : 'path',
+      reachability: 'unverified',
+    };
+    // A file with the same basename elsewhere is an ambiguous match, not a
+    // resolution: it is reported separately and still counts as a gap.
+    if (presentBasenames.has(path.posix.basename(entry.ref))) basenameOnly.push(gap);
+    else missing.push(gap);
+  }
+  const order = (a, b) => (a.kind === b.kind ? a.ref.localeCompare(b.ref) : a.kind === 'path' ? -1 : 1);
+  return { referenced: byRef.size, found: found.sort(), missing: missing.sort(order), basenameOnly: basenameOnly.sort(order) };
+}
+
 function inspectCapture(root) {
+  const textFiles = [];
   const present = new Set();
   const health = { fakeSourceMaps: [], htmlWrappedJs: [], emptyFiles: [] };
   const runtimes = [];
@@ -199,6 +299,12 @@ function inspectCapture(root) {
 
     const isMap = /\.(map|jssourcemap)$/i.test(base);
     const isJs = /\.[cm]?js$/i.test(base);
+    // jsmap's own workspace helpers name workspace files, not capture assets.
+    if (JSMAP_GENERATED_SCRIPT.test(path.relative(root, file).replace(/\\/g, '/'))) continue;
+    if (stat.size <= 32 * 1024 * 1024) {
+      if (/\.css$/i.test(base)) textFiles.push({ file, kind: 'css' });
+      else if (/\.html?$/i.test(base)) textFiles.push({ file, kind: 'html' });
+    }
     if (!isMap && !isJs) continue;
 
     let head = '';
@@ -230,16 +336,18 @@ function inspectCapture(root) {
       health.htmlWrappedJs.push({ file: path.relative(root, file), bytes: stat.size });
       continue;
     }
+    if (stat.size <= 32 * 1024 * 1024) textFiles.push({ file, kind: 'js' });
 
     // Only bother reading whole files that could hold a runtime chunk map.
     if (stat.size < 400_000_000) runtimes.push(file);
   }
 
-  return { present, health, runtimes };
+  return { present, health, runtimes, textFiles };
 }
 
 function analyse(root) {
-  const { present, health, runtimes } = inspectCapture(root);
+  const { present, health, runtimes, textFiles } = inspectCapture(root);
+  const assets = analyseAssetReferences(root, textFiles, present);
 
   const templates = [];
   for (const file of runtimes) {
@@ -281,7 +389,7 @@ function analyse(root) {
     if (isNamed(a) !== isNamed(b)) return isNamed(a) ? -1 : 1;
     return a.name.localeCompare(b.name, undefined, { numeric: true });
   });
-  return { templates, expected, found, missing, health, presentCount: present.size };
+  return { templates, expected, found, missing, health, assets, presentCount: present.size };
 }
 
 function report(result, root, flags) {
@@ -313,6 +421,31 @@ function report(result, root, flags) {
       if (show.length < result.missing.length) {
         lines.push(`    ... and ${result.missing.length - show.length} more (--list-missing)`);
       }
+    }
+  }
+
+  const { assets } = result;
+  if (assets.referenced > 0) {
+    const gaps = assets.missing.length + assets.basenameOnly.length;
+    lines.push(`\n  ${assets.referenced} local asset references in JS/CSS/HTML, ${assets.found.length} present, ${gaps} unresolved`);
+    const listGaps = (label, entries) => {
+      if (!entries.length) return;
+      lines.push(`  ${label}:`);
+      const show = flags.listMissing ? entries : entries.slice(0, 15);
+      for (const entry of show) {
+        const note = entry.kind === 'bare-name' ? ' (bare name)' : '';
+        lines.push(`    ${entry.ref}${note}  <- ${entry.referencedFrom.join(', ')}`);
+      }
+      if (show.length < entries.length) lines.push(`    ... and ${entries.length - show.length} more (--list-missing)`);
+    };
+    listGaps('missing from the capture', assets.missing);
+    listGaps('only a same-named file elsewhere (ambiguous, path does not resolve)', assets.basenameOnly);
+    if (gaps > 0) {
+      lines.push(
+        '  These are static references: the file is named in shipped code, but whether\n' +
+          '  the code that loads it runs was not verified. Treat each as an open gap;\n' +
+          '  do not substitute a placeholder for a file the capture never contained.'
+      );
     }
   }
 
@@ -383,6 +516,12 @@ function main() {
     present: result.found.length,
     missing: result.missing,
     health: result.health,
+    assets: {
+      referenced: result.assets.referenced,
+      present: result.assets.found.length,
+      missing: result.assets.missing,
+      basenameOnly: result.assets.basenameOnly,
+    },
     runtimes: [...new Set(result.templates.map(t => t.runtime))],
   };
 
@@ -401,4 +540,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { analyse, findChunkTemplates, readIdMap };
+module.exports = { analyse, findAssetReferences, findChunkTemplates, normaliseAssetReference, readIdMap };

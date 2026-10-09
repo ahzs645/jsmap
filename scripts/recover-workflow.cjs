@@ -7,7 +7,7 @@ const path = require('node:path');
 const { detectFramework } = require('./recovery-contract.cjs');
 
 function printUsage() {
-  console.error('Usage: jsmap recover-workflow <recovery-dir> [linked-dir] [--framework auto|vite|next|webpack|unknown] [--force] [--fetch-missing <asset-base-url>] [--limit N] [--write] [--actions a,b,c] [--integrate] [--integrate-write] [--integrate-install] [--integrate-build-check-max-kb N] [--integrate-auto-downgrade]');
+  console.error('Usage: jsmap recover-workflow <recovery-dir> [linked-dir] [--framework auto|vite|next|webpack|angular|unknown] [--force] [--fetch-missing <asset-base-url>] [--limit N] [--write] [--actions a,b,c] [--integrate] [--integrate-write] [--integrate-install] [--integrate-build-check-max-kb N] [--integrate-auto-downgrade]');
 }
 
 function parseArgs(argv) {
@@ -48,7 +48,7 @@ function parseArgs(argv) {
   }
   if (!Number.isFinite(flags.limit) || flags.limit <= 0) throw new Error('--limit must be a positive number');
   if (!['metadata', 'imports', 'lazy'].includes(flags.integrateVendorMode)) throw new Error('--integrate-vendor-mode must be metadata, lazy, or imports');
-  if (!['auto', 'vite', 'next', 'webpack', 'unknown'].includes(flags.framework)) throw new Error('--framework must be auto, vite, next, webpack, or unknown');
+  if (!['auto', 'vite', 'next', 'webpack', 'angular', 'unknown'].includes(flags.framework)) throw new Error('--framework must be auto, vite, next, webpack, angular, or unknown');
   if (flags.integrateBuildCheckMaxKb != null && (!Number.isFinite(flags.integrateBuildCheckMaxKb) || flags.integrateBuildCheckMaxKb <= 0)) {
     throw new Error('--integrate-build-check-max-kb must be a positive number');
   }
@@ -82,12 +82,18 @@ async function main() {
   const scriptsDir = __dirname;
   const jsmap = path.join(scriptsDir, 'jsmap.cjs');
   const framework = detectFramework(recoveryDir, flags.framework);
-  const usesLinkedWorkspace = ['linked-vite', 'linked-webpack'].includes(framework.strategy);
+  const usesLinkedWorkspace = ['linked-vite', 'linked-webpack', 'linked-esm'].includes(framework.strategy);
   const reportRoot = usesLinkedWorkspace ? linkedDir : recoveryDir;
   const reportDir = path.join(reportRoot, 'recovery-workflow');
 
-  await fsp.mkdir(reportDir, { recursive: true });
-  await fsp.writeFile(path.join(reportDir, 'framework-route.json'), `${JSON.stringify(framework, null, 2)}\n`, 'utf8');
+  // The report lives inside the linked workspace on linked routes, and
+  // `rebuild` (re)creates that directory from scratch: writing the report first
+  // made rebuild refuse ("Output exists") or, under --force, delete it again.
+  const writeFrameworkRoute = async () => {
+    await fsp.mkdir(reportDir, { recursive: true });
+    await fsp.writeFile(path.join(reportDir, 'framework-route.json'), `${JSON.stringify(framework, null, 2)}\n`, 'utf8');
+  };
+  if (!usesLinkedWorkspace) await writeFrameworkRoute();
   console.log(`\nFramework: ${framework.framework} (${framework.bundler})`);
   console.log(`Recovery route: ${framework.strategy}`);
 
@@ -138,6 +144,7 @@ async function main() {
   if (flags.force) rebuildArgs.push('--force');
   if (flags.fetchMissing) rebuildArgs.push('--fetch-missing', flags.fetchMissing);
   run('rebuild linked workspace', rebuildArgs, process.cwd());
+  await writeFrameworkRoute();
 
   run('stats before promotion', [jsmap, 'stats', linkedDir, '--out', path.join(reportDir, 'stats-before')], process.cwd());
   run('promotion plan', [jsmap, 'promote-plan', linkedDir, '--top', String(flags.limit)], process.cwd());
@@ -156,7 +163,7 @@ async function main() {
 
   runCommand('linked workspace build check', 'npm', ['run', 'build'], linkedDir);
   run('stats after build', [jsmap, 'stats', linkedDir, '--out', path.join(reportDir, 'stats-after')], process.cwd());
-  run('record recovery level', [jsmap, 'recovery-level', linkedDir, '--framework', framework.framework === 'vite-rollup' ? 'vite' : 'webpack', '--out', path.join(reportDir, 'recovery-level')], process.cwd());
+  run('record recovery level', [jsmap, 'recovery-level', linkedDir, '--framework', framework.framework === 'vite-rollup' ? 'vite' : framework.framework, '--out', path.join(reportDir, 'recovery-level')], process.cwd());
 
   if (flags.integrate || flags.integrateWrite) {
     const integrateArgs = [jsmap, 'integrate', linkedDir, flags.integrateWrite ? '--write' : '--dry-run', '--vendor-mode', flags.integrateVendorMode, '--out', path.join(reportDir, 'integration-plan')];

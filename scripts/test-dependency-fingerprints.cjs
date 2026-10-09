@@ -20,6 +20,8 @@ const assert = require('node:assert');
 const {
   detectDependencyFingerprints,
   detectRuntimeFingerprints,
+  licenseNoticeDependencies,
+  parseThirdPartyLicenses,
   primaryRuntimeSignal,
 } = require('./lib/fingerprints.cjs');
 
@@ -262,6 +264,83 @@ test('the nine packages of the knit capture are all reported together', () => {
     assert.ok(!names(capture).includes(absent), `${absent} inferred from a Lit capture`);
   }
   assert.ok(!runtimeIds(capture).includes('typescript-compiler'), 'WebGL still read as a TypeScript compiler');
+});
+
+// ── Angular: ng-version stamp and the CLI license notice ───────────────────
+// Shapes from an Angular 20.3.2 CLI (esbuild application builder) capture whose
+// recover reported "Dependencies inferred: none" for 11 bundled packages.
+
+test('@angular/core is detected with the ng-version stamp as its version', () => {
+  const minified = 'function eN(t,n,e,i){let r=t?["ng-version","20.3.2"]:Tk(n.selectors[0]),o=null}';
+  const dep = byName(minified, '@angular/core');
+  assert.equal(dep?.version, '20.3.2');
+  assert.equal(dep.resolution, 'content-fingerprint-version-stamp');
+  // deobfuscated whitespace still yields the stamp
+  assert.equal(byName('let r = t ? [ "ng-version", "17.1.0-rc.0" ] : x;', '@angular/core')?.version, '17.1.0-rc.0');
+});
+
+test('Ivy statics identify @angular/core but never invent a version', () => {
+  const dep = byName('class t{static \\u0275fac=function(i){return new(i||t)};static \\u0275prov=S({})}', '@angular/core');
+  assert.ok(dep, 'escaped Ivy statics should identify Angular');
+  assert.equal(dep.version, null);
+  assert.ok(byName('class t { static ɵcmp = defineComponent({}); }', '@angular/core'));
+  // the prefix must be the Ivy marker, not an ordinary identifier
+  assert.equal(byName('const fac = 1; obj.prov = 2; u0275fac();', '@angular/core'), undefined);
+});
+
+test('the esbuild-builder license notice lists packages and licenses, no versions', () => {
+  const notice = [
+    'Package: @angular/core',
+    'License: "MIT"',
+    '',
+    'The MIT License',
+    '',
+    'Copyright (c) 2010-2025 Google LLC. https://angular.dev/license',
+    '',
+    'Permission is hereby granted, free of charge, to any person obtaining a copy',
+    '--------------------------------------------------------------------------------',
+    'Package: rxjs',
+    'License: "Apache-2.0"',
+    '',
+    '--------------------------------------------------------------------------------',
+    'Package: tslib',
+    'License: "0BSD"',
+    '',
+  ].join('\n');
+  assert.deepEqual(parseThirdPartyLicenses(notice).map((pkg) => [pkg.name, pkg.license]), [
+    ['@angular/core', 'MIT'],
+    ['rxjs', 'Apache-2.0'],
+    ['tslib', '0BSD'],
+  ]);
+  const deps = licenseNoticeDependencies(notice, '3rdpartylicenses.txt');
+  assert.ok(deps.every((dep) => dep.version === null && dep.resolution === 'license-notice'));
+  assert.equal(deps[0].detail, '@angular/core (MIT) listed in 3rdpartylicenses.txt');
+});
+
+test('the webpack-builder license notice is parsed without reading prose as packages', () => {
+  const notice = [
+    '@angular/core',
+    'MIT',
+    'The MIT License',
+    '',
+    'permission',
+    'is hereby granted',
+    'zone.js',
+    'MIT',
+    '',
+    'luxon',
+    'MIT',
+    'Copyright 2019 JS Foundation and other contributors',
+    '',
+    'core-js',
+    '(MIT OR Apache-2.0)',
+  ].join('\n');
+  const names = parseThirdPartyLicenses(notice).map((pkg) => pkg.name);
+  assert.ok(names.includes('@angular/core'));
+  assert.ok(names.includes('luxon'));
+  assert.ok(names.includes('core-js'));
+  assert.ok(!names.includes('permission'), 'a prose word followed by a non-SPDX line is not a package');
+  assert.ok(!names.includes('zone.js'), 'an entry must start after a blank line');
 });
 
 console.log(`\ndependency-fingerprint tests passed (${passed} cases).`);

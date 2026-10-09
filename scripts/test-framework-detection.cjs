@@ -204,6 +204,91 @@ test('the head/tail seam cannot forge a marker', () => {
   assert.equal(viteMarker(readHeadTailSample(file, 16, 16)), null);
 });
 
+// Shapes taken from a real Angular 20 CLI (esbuild "application" builder)
+// capture: Ivy statics escaped as ɵ in minified output, the root stamp as
+// a static attribute array, and the CLI's license notice beside the bundles.
+const ANGULAR_MAIN = 'var Qh;class t{static \\u0275fac=function(i){return new(i||t)};static \\u0275prov=S({token:t,providedIn:"root"})}function eN(t,n){let r=t?["ng-version","20.3.2"]:Tk(n)}';
+const ANGULAR_LICENSES = 'Package: @angular/core\nLicense: "MIT"\n\nThe MIT License\n--------\n\nPackage: rxjs\nLicense: "Apache-2.0"\n';
+
+test('an Angular esbuild capture routes to angular/linked-esm', () => {
+  const root = capture('angular-esbuild', {
+    'index.html': '<app-root>Loading</app-root><script src="main-BQGSVHIO.js" type="module"></script>',
+    'main-BQGSVHIO.js': ANGULAR_MAIN,
+    '3rdpartylicenses.txt': ANGULAR_LICENSES,
+    'prerendered-routes.json': '{"routes":{}}',
+  });
+  const result = detectFramework(root);
+  assert.equal(result.framework, 'angular');
+  assert.equal(result.bundler, 'esbuild');
+  assert.equal(result.strategy, 'linked-esm');
+  assert.ok(result.evidence.includes('angular:ng-version:main-BQGSVHIO.js'), JSON.stringify(result.evidence));
+  assert.ok(result.evidence.includes('angular:ivy-statics:main-BQGSVHIO.js'), JSON.stringify(result.evidence));
+  assert.ok(result.evidence.includes('angular:license:3rdpartylicenses.txt'), JSON.stringify(result.evidence));
+});
+
+test('ng-version plus a license notice is enough without Ivy statics', () => {
+  const root = capture('angular-license-only', {
+    'main.js': 'let r=["ng-version","17.0.1"];',
+    '3rdpartylicenses.txt': '@angular/core\nMIT\nThe MIT License\n',
+  });
+  assert.equal(detectFramework(root).framework, 'angular');
+});
+
+test('a webpack-era Angular build is angular on the webpack route', () => {
+  const root = capture('angular-webpack', {
+    'index.html': '<script src="runtime.1a2b.js"></script><script src="main.3c4d.js"></script>',
+    'runtime.1a2b.js': '(self.webpackChunkapp=self.webpackChunkapp||[]);function __webpack_require__(){}',
+    'main.3c4d.js': `(self.webpackChunkapp=self.webpackChunkapp||[]).push([[179],{1:()=>{${ANGULAR_MAIN}}}]);`,
+  });
+  const result = detectFramework(root);
+  assert.equal(result.framework, 'angular');
+  assert.equal(result.bundler, 'webpack');
+  assert.equal(result.strategy, 'linked-webpack');
+});
+
+test('a single Angular marker does not route, it only leaves a hint', () => {
+  // A docs page or third-party script may quote "ng-version"; that alone must
+  // not move a capture off inspection-first.
+  const root = capture('angular-single-marker', {
+    'app.js': 'document.body.setAttribute("ng-version", "x");',
+  });
+  const result = detectFramework(root);
+  assert.equal(result.framework, 'unknown');
+  assert.equal(result.strategy, 'inspection-first');
+  assert.match(result.hint, /single Angular marker \(ng-version\)/);
+  // Ivy statics or a license notice without the ng-version stamp do not route either.
+  const noStamp = capture('angular-no-stamp', {
+    'app.js': 'class A{static \\u0275fac=1}',
+    '3rdpartylicenses.txt': ANGULAR_LICENSES,
+  });
+  assert.equal(detectFramework(noStamp).framework, 'unknown');
+});
+
+test('--framework angular keeps the bundler-derived route', () => {
+  const esbuild = detectFramework(capture('angular-override-esm', { 'main.js': 'export {};' }), 'angular');
+  assert.equal(esbuild.framework, 'angular');
+  assert.equal(esbuild.confidence, 'explicit');
+  assert.equal(esbuild.strategy, 'linked-esm');
+  const webpack = detectFramework(capture('angular-override-webpack', {
+    'main.js': '(self.webpackChunkapp=self.webpackChunkapp||[]).push([[1],{}]);',
+  }), 'angular');
+  assert.equal(webpack.strategy, 'linked-webpack');
+});
+
+test('jsmap-generated workspace scripts do not vote on the framework', () => {
+  // These helpers quote `/_next/static/` and `__vitePreload` as data. Before
+  // they were excluded, a recovered Angular workspace scored next:5 from
+  // preserved-runtime-surface.mjs alone.
+  const root = capture('generated-scripts', {
+    'scripts/preserved-runtime-surface.mjs': 'const nextAssets = /\\/_next\\/static\\//; window.__NEXT_DATA__;',
+    'scripts/link-recovered-assets.mjs': 'const helper = "__vitePreload";',
+    'public/app.js': 'globalThis.app = 1;',
+  });
+  const result = detectFramework(root);
+  assert.equal(result.framework, 'unknown');
+  assert.deepEqual(result.evidence, []);
+});
+
 test('an explicit --framework override still wins', () => {
   const result = detectFramework(tempRoot, 'vite');
   assert.equal(result.framework, 'vite-rollup');

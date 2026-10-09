@@ -45,6 +45,7 @@
     "split:bundle": "node scripts/split-bundle-ast.cjs",
     "test:wasm-wat-repair": "node scripts/test-wasm-wat-repair.cjs",
     "test:framework-detection": "node scripts/test-framework-detection.cjs",
+    "test:angular-capture": "node scripts/test-angular-capture.cjs",
     "test:stub-missing-imports": "node scripts/test-stub-missing-imports.cjs",
     "test:split-seam-safety": "node scripts/test-split-seam-safety.cjs",
     "test:rename-apply-safety": "node scripts/test-rename-apply-safety.cjs",

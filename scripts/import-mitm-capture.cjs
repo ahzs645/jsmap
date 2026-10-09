@@ -390,7 +390,7 @@ function main() {
     return;
   }
   if (action === 'recover') {
-    if (!positional[0] || !positional[1]) throw new Error('Usage: jsmap mitm-recover <capture.har> <recovery-dir> [--capture-dir <capture-output-dir>] [--origin <url>] [--framework auto|vite|next|webpack|unknown] [--force] [--replace-non-jsmap-output]');
+    if (!positional[0] || !positional[1]) throw new Error('Usage: jsmap mitm-recover <capture.har> <recovery-dir> [--capture-dir <capture-output-dir>] [--origin <url>] [--framework auto|vite|next|webpack|angular|unknown] [--force] [--replace-non-jsmap-output]');
     const harFile = path.resolve(positional[0]);
     const recoveryDir = path.resolve(positional[1]);
     const captureDir = path.resolve(flags.captureDir || `${recoveryDir}-mitm-capture`);

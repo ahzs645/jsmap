@@ -159,10 +159,10 @@ Commands:
       Summarize recovered part counts, package boundaries, readiness, largest
       leftover files, linked entry sizes, promotion output, and quality warnings.
 
-  recover-workflow <recovery-dir> [linked-dir] [--framework auto|vite|next|webpack|unknown]
+  recover-workflow <recovery-dir> [linked-dir] [--framework auto|vite|next|webpack|angular|unknown]
       Run the practical human/agent recovery loop in one command:
         framework route -> rebuild/harness/inspection -> stats -> promotion work
-      For linked Vite/webpack routes:
+      For linked Vite/webpack/Angular-esbuild routes:
         rebuild -> stats -> promote-plan -> promote-apply dry-run
         -> optional --write build-check -> npm run build -> final stats/report.
       Options: --force, --fetch-missing <asset-base-url>, --limit N,
@@ -193,7 +193,7 @@ Commands:
       and reviewable before/after snippets. Starts with conservative editor
       runtime heuristics such as Monaco type/theme/command setup.
 
-  recovery-level <project-dir> [--framework auto|vite|next|webpack|unknown]
+  recovery-level <project-dir> [--framework auto|vite|next|webpack|angular|unknown]
       Detect the framework-aware recovery route and report the highest achieved
       artifact level: preserved-runtime, linked-recovery, editable-lab, or
       independently audited source-app. Inspection is stdout-only by default;
@@ -259,7 +259,7 @@ Commands:
 
   mitm-recover <capture.har> <recovery-dir> [--capture-dir <capture-output-dir>] [--origin <url>]
       Chain MITM import, framework-aware recovery, preserved harness generation,
-      and recovery-level reporting. Options: --framework auto|vite|next|webpack|unknown,
+      and recovery-level reporting. Options: --framework auto|vite|next|webpack|angular|unknown,
       --repair-wasm, --allow-empty, --force, --replace-non-jsmap-output.
       --capture-dir is a disposable destination, never the saved-resource input.
 

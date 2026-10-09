@@ -21,9 +21,12 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const {
+  ANGULAR_LOCKSTEP_PACKAGES,
+  LICENSE_NOTICE_FILE,
   detectDependencyFingerprints,
   detectRuntimeFingerprints,
   extractPackageCoordinateFromReference,
+  licenseNoticeDependencies,
   primaryRuntimeSignal,
 } = require('./lib/fingerprints.cjs');
 const {
@@ -287,15 +290,47 @@ function isJsmapGeneratedArtifact(rel) {
   return JSMAP_GENERATED_EVIDENCE.test(toPosix(rel));
 }
 
-function detectDependencies(filesByRel, sourceMapEvidence = []) {
+function detectDependencies(filesByRel, sourceMapEvidence = [], licenseEvidence = []) {
   const capturedOnly = Object.entries(filesByRel)
     .filter(([rel]) => !isJsmapGeneratedArtifact(rel))
     .map(([, text]) => text);
   const allText = capturedOnly.join('\n');
-  return mergeDependencyEvidence([
+  return applyAngularLockstepHint(mergeDependencyEvidence([
     ...detectDependencyFingerprints(allText),
     ...sourceMapEvidence.flatMap((item) => item.packages),
-  ]);
+    ...licenseEvidence,
+  ]));
+}
+
+// A license notice proves a package was bundled but says nothing about its
+// version. When @angular/core stamped its own version, record it on the
+// lockstep siblings as a non-authoritative hint only: package.json keeps "*".
+function applyAngularLockstepHint(dependencies) {
+  const core = dependencies.find((dep) => dep.name === '@angular/core');
+  if (!core || !core.version || core.version === '*') return dependencies;
+  return dependencies.map((dep) => {
+    if (!ANGULAR_LOCKSTEP_PACKAGES.has(dep.name) || (dep.version && dep.version !== '*')) return dep;
+    return {
+      ...dep,
+      lastKnownVersion: core.version,
+      resolution: 'angular-lockstep-hint',
+      evidenceItems: [
+        ...dep.evidenceItems,
+        { type: 'angular-lockstep-hint', detail: `@angular/core ${core.version} version stamp; Angular framework packages release in lockstep` },
+      ],
+    };
+  });
+}
+
+async function collectLicenseNoticeEvidence(rootDir) {
+  const evidence = [];
+  for (const file of await walkDirectory(rootDir)) {
+    const rel = toPosix(path.relative(rootDir, file));
+    if (!LICENSE_NOTICE_FILE.test(rel) || isJsmapGeneratedArtifact(rel)) continue;
+    const text = await fsp.readFile(file, 'utf8').catch(() => '');
+    evidence.push(...licenseNoticeDependencies(text, rel));
+  }
+  return evidence;
 }
 
 async function collectSourceMapEvidence(rootDir) {
@@ -694,8 +729,12 @@ function buildPackageBoundaries(filesByRel, dependencies, splitEntries = []) {
   }
 
   const depNames = new Set(dependencies.map((dep) => dep.name));
+  // The bucket roster is a fixed vocabulary from earlier CAD/editor captures.
+  // Emitting the empty ones gave an Angular clinical-settings app `cad-kernel`,
+  // `viewport` and `editor` packages with no code in them, which reads as a
+  // claim about the app. Only buckets that received evidence are boundaries.
   return Object.values(packages)
-    .filter((pkg) => pkg.assets.length > 0 || pkg.name !== '@jsmap-recovered/support')
+    .filter((pkg) => pkg.assets.length > 0)
     .map((pkg) => ({
       ...pkg,
       deps: pkg.deps.filter((dep) => depNames.has(dep)),
@@ -2711,7 +2750,8 @@ async function main() {
     ...await collectSourceMapEvidence(absoluteInputDir),
     ...await collectSourceMapEvidence(deobfuscatedDir),
   ]);
-  const dependencies = detectDependencies(filesByRel, sourceMapEvidence);
+  const licenseEvidence = await collectLicenseNoticeEvidence(absoluteInputDir);
+  const dependencies = detectDependencies(filesByRel, sourceMapEvidence, licenseEvidence);
   const boundaries = buildPackageBoundaries(filesByRel, dependencies, splitManifestData.entries);
   const recoveryAudit = createRecoveryAudit(splitManifestData.entries, splitManifestData.manifests, sourceMapEvidence, {
     moduleGranularity: flags.moduleGranularity,

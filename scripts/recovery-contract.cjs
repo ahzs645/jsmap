@@ -34,6 +34,11 @@ const SKIP_DIRECTORIES = new Set([
   'coverage',
 ]);
 
+// jsmap writes these helpers into every recovery/linked workspace. They quote
+// framework markers (`/_next/static/`, `__vitePreload`) as data, so letting them
+// vote would route a workspace by jsmap's own tooling instead of the capture.
+const JSMAP_GENERATED_SCRIPT = /^scripts\/(?:editable-migration-status|editable-shell-parity|editable-shell-readiness|link-recovered-assets|preserved-runtime-surface|refresh-recovery|serve-public)\.mjs$/;
+
 function walkFiles(root, options = {}) {
   const maxFiles = options.maxFiles || 12000;
   const files = [];
@@ -141,6 +146,19 @@ function viteMarker(text) {
   return null;
 }
 
+// Angular is a framework, not a bundler: the CLI's esbuild "application"
+// builder (v17+) emits plain ESM (`main-HASH.js`, `chunk-HASH.js`) that the
+// linked rebuild links directly, while older CLI builds are webpack bundles.
+// Two kinds of evidence are required before a capture is called Angular, so a
+// stray "ng-version" string in docs or a third-party script cannot reroute it:
+//   ng-version   the root-component stamp, `["ng-version","20.3.2"]` in Ivy
+//   ivy-statics  Ivy definition statics `ɵcmp`/`ɵfac`/`ɵprov`/`ɵinj`/`ɵmod`/`ɵdir`,
+//                usually escaped as `\u0275fac` in minified output
+//   license      3rdpartylicenses.txt listing @angular/core (checked separately)
+const ANGULAR_NG_VERSION_MARKER = /["']ng-version["']/;
+const ANGULAR_IVY_STATIC_MARKER = /(?:ɵ|\\u0275)(?:cmp|fac|prov|inj|mod|dir)\b/;
+const ANGULAR_LICENSE_NOTICE = /(?:^|\n)(?:Package:\s*)?@angular\/core\s*(?:\r?\n)/;
+
 // Pure content classifier shared by detectFramework and its regression tests.
 function matchFrameworkMarkers(content) {
   const text = typeof content === 'string' ? content : '';
@@ -151,10 +169,25 @@ function matchFrameworkMarkers(content) {
   // own, and letting those raise viteScore is how a Next capture could be
   // pulled off `preserved-harness-next`.
   const vite = next || turbopack ? null : viteMarker(text);
-  return { turbopack, next, vite, webpack: WEBPACK_MARKER.test(text) };
+  return {
+    turbopack,
+    next,
+    vite,
+    webpack: WEBPACK_MARKER.test(text),
+    angularNgVersion: ANGULAR_NG_VERSION_MARKER.test(text),
+    angularIvy: ANGULAR_IVY_STATIC_MARKER.test(text),
+  };
 }
 
 function detectFramework(root, override = 'auto') {
+  if (override === 'angular') {
+    // The override names the framework; the bundler (and so the route) still
+    // comes from the capture, so a webpack-era Angular build stays on webpack.
+    const detected = detectFramework(root, 'auto');
+    const result = frameworkResult('angular', 'explicit', [`--framework ${override}`]);
+    if (detected.bundler === 'webpack') Object.assign(result, { bundler: 'webpack', strategy: 'linked-webpack' });
+    return result;
+  }
   if (override !== 'auto') {
     const normalized = override === 'vite' ? 'vite-rollup' : override === 'next' ? 'next' : override;
     return frameworkResult(normalized, 'explicit', [`--framework ${override}`]);
@@ -162,12 +195,14 @@ function detectFramework(root, override = 'auto') {
   const absoluteRoot = path.resolve(root);
   const files = walkFiles(absoluteRoot, { maxFiles: 6000 });
   const rels = files.map((file) => path.relative(absoluteRoot, file).replace(/\\/g, '/'));
-  const candidates = files.filter((file) => /(?:\.html|\.json|\.[cm]?js)$/i.test(file));
+  const candidates = files.filter((file) => /(?:\.html|\.json|\.[cm]?js)$/i.test(file)
+    && !JSMAP_GENERATED_SCRIPT.test(path.relative(absoluteRoot, file).replace(/\\/g, '/')));
   const evidence = [];
   let nextScore = 0;
   let turbopackScore = 0;
   let viteScore = 0;
   let webpackScore = 0;
+  const angularMarkers = new Set();
 
   const packageFile = path.join(absoluteRoot, 'package.json');
   if (fs.existsSync(packageFile)) {
@@ -186,6 +221,10 @@ function detectFramework(root, override = 'auto') {
         webpackScore += 5;
         evidence.push('package:webpack');
       }
+      if (dependencies['@angular/core']) {
+        angularMarkers.add('package');
+        evidence.push('package:@angular/core');
+      }
     } catch {}
   }
 
@@ -195,6 +234,11 @@ function detectFramework(root, override = 'auto') {
       if (evidence.length < 20) evidence.push(`path:${rel}`);
     }
     if (/(?:^|\/)assets\/[^/]+-[A-Za-z0-9_-]+\.(?:js|css)$/.test(rel)) viteScore += 2;
+    if (/(?:^|\/)3rdpartylicenses\.txt$/i.test(rel) && !angularMarkers.has('license')
+      && ANGULAR_LICENSE_NOTICE.test(readSample(path.join(absoluteRoot, rel), 256 * 1024))) {
+      angularMarkers.add('license');
+      if (evidence.length < 20) evidence.push(`angular:license:${rel}`);
+    }
   }
   for (const file of candidates.slice(0, 240)) {
     const rel = path.relative(absoluteRoot, file).replace(/\\/g, '/');
@@ -216,16 +260,35 @@ function detectFramework(root, override = 'auto') {
       webpackScore += 4;
       if (evidence.length < 20) evidence.push(`webpack:${rel}`);
     }
+    if (/\.[cm]?js$/i.test(rel)) {
+      for (const [kind, hit] of [['ng-version', markers.angularNgVersion], ['ivy-statics', markers.angularIvy]]) {
+        if (!hit || angularMarkers.has(kind)) continue;
+        angularMarkers.add(kind);
+        if (evidence.length < 20) evidence.push(`angular:${kind}:${rel}`);
+      }
+    }
   }
+  const angular = angularMarkers.has('ng-version')
+    && (angularMarkers.has('ivy-statics') || angularMarkers.has('license') || angularMarkers.has('package'));
 
   if (nextScore >= 6) {
     const result = frameworkResult('next', turbopackScore > 0 ? 'high' : 'medium', evidence);
     result.bundler = turbopackScore > 0 ? 'turbopack' : webpackScore > 0 ? 'webpack' : 'unknown';
     return result;
   }
+  // Angular names the framework; the bundler still decides the route. A
+  // webpack-era Angular build keeps the webpack module-runtime route.
+  if (angular) {
+    const result = frameworkResult('angular', 'high', evidence);
+    if (webpackScore >= 4) Object.assign(result, { bundler: 'webpack', strategy: 'linked-webpack' });
+    return result;
+  }
   if (viteScore >= 5) return frameworkResult('vite-rollup', 'high', evidence);
   if (webpackScore >= 4) return frameworkResult('webpack', 'medium', evidence);
-  return frameworkResult('unknown', 'low', evidence);
+  const result = frameworkResult('unknown', 'low', evidence);
+  // One Angular marker on its own never routes, but is worth a pointer.
+  if (angularMarkers.size) result.hint = `single Angular marker (${[...angularMarkers].join(', ')}); need ng-version plus Ivy statics or a 3rdpartylicenses.txt entry before routing as angular`;
+  return result;
 }
 
 function frameworkResult(framework, confidence, evidence) {
@@ -233,6 +296,7 @@ function frameworkResult(framework, confidence, evidence) {
     next: { bundler: 'unknown', strategy: 'preserved-harness-next' },
     'vite-rollup': { bundler: 'rollup', strategy: 'linked-vite' },
     webpack: { bundler: 'webpack', strategy: 'linked-webpack' },
+    angular: { bundler: 'esbuild', strategy: 'linked-esm' },
     unknown: { bundler: 'unknown', strategy: 'inspection-first' },
   };
   return { framework, confidence, evidence: [...new Set(evidence)].slice(0, 20), ...routes[framework] };
@@ -343,6 +407,7 @@ function writeJsonAndMarkdown(prefix, data, title, sections = []) {
 }
 
 module.exports = {
+  JSMAP_GENERATED_SCRIPT,
   RECOVERY_LEVELS,
   detectFramework,
   detectRecoveryLevels,

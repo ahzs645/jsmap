@@ -127,6 +127,54 @@ async function main() {
     const plainOut = run([plain, '--out', path.join(tmp, 'plain-report')]);
     assert.match(plainOut, /No webpack chunk map found/);
 
+    // Builds without a chunk map still name the files they fetch. Modeled on an
+    // Angular 20 esbuild capture whose single ESM entry referenced a login logo
+    // that was never requested, so the capture did not contain it.
+    const angular = path.join(tmp, 'angular');
+    await write(path.join(angular, 'index.html'), [
+      '<base href="./index.html"><link rel="icon" href="favicon.ico">',
+      '<link rel="stylesheet" href="styles-K43J3WP6.css">',
+      '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto">',
+      '<script src="main-BQGSVHIO.js" type="module"></script>',
+    ].join('\n'));
+    await write(path.join(angular, 'favicon.ico'), 'ico');
+    await write(path.join(angular, 'config.json'), '{}');
+    await write(path.join(angular, 'images/logo.png'), 'png');
+    await write(path.join(angular, 'shared/logo.png'), 'png');
+    await write(path.join(angular, 'styles-K43J3WP6.css'), [
+      '.a{background:url(images/logo.png)}',
+      '.b{background:url("data:image/png;base64,AAAA")}',
+      '.c{src:url(https://fonts.gstatic.com/s/roboto.woff2) format("woff2")}',
+      '.d{background:url(fonts/missing.woff2?v=3#iefix)}',
+    ].join('\n'));
+    await write(path.join(angular, 'main-BQGSVHIO.js'), [
+      'class t{loginLogo="assets/login_logo.jpg";async loadConfig(e="config.json"){}}',
+      'let logo="images/logo.png",alt="branding/logo.png",lazy=()=>import("./chunk-ABC123.js");',
+      // Bundled-library prose and specifiers that are not page assets.
+      'throw new Error("see index.js or package.json");import("@scope/pkg/lib/index.js");',
+      'let cdn="cdn.example.com/pic.png",tpl=`${base}/x.png`;',
+    ].join('\n'));
+    await write(path.join(angular, 'scripts/serve-public.mjs'), 'const shell = "src/main.js";');
+
+    const angularOut = run([angular, '--json']);
+    const angularManifest = JSON.parse(angularOut);
+    const missingRefs = angularManifest.assets.missing.map(entry => entry.ref);
+    assert.deepEqual(missingRefs, ['./chunk-ABC123.js', 'assets/login_logo.jpg', 'fonts/missing.woff2'],
+      'literal references absent from the capture are named; query/hash stripped for lookup');
+    const login = angularManifest.assets.missing.find(entry => entry.ref === 'assets/login_logo.jpg');
+    assert.equal(login.reachability, 'unverified', 'a literal does not prove the loading code runs');
+    assert.deepEqual(login.referencedFrom, ['main-BQGSVHIO.js']);
+    assert.deepEqual(angularManifest.assets.basenameOnly.map(entry => entry.ref), ['branding/logo.png'],
+      'a same-named file elsewhere is ambiguous, not a resolution');
+    for (const noise of ['index.js', 'package.json', 'cdn.example.com/pic.png', 'src/main.js', 'favicon.ico', 'config.json', 'images/logo.png']) {
+      assert.ok(!missingRefs.includes(noise), `${noise} must not be reported missing`);
+    }
+    assert.ok(!angularOut.includes('@scope/pkg'), 'module specifiers are not assets');
+    assert.equal(angularManifest.referenced, 0, 'still no webpack chunk map');
+    const angularText = run([angular]);
+    assert.match(angularText, /assets\/login_logo\.jpg {2}<- main-BQGSVHIO\.js/);
+    assert.match(angularText, /do not substitute a placeholder/);
+
     console.log('capture-coverage tests passed');
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true });

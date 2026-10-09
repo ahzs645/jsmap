@@ -33,6 +33,8 @@ Detect the framework and bundler before choosing a rebuild path:
 - Vite/Rollup: linked Vite recovery.
 - Next.js/Turbopack: preserved Next harness and route-asset audit first.
 - Webpack: module-runtime reconstruction and linked recovery.
+- Angular: the bundler decides. CLI esbuild output takes linked ESM recovery;
+  webpack-era Angular takes the webpack route.
 - Unknown: inspection-first; do not force a Vite rebuild.
 
 Use `recover-workflow --framework <value>` only when capture evidence justifies
