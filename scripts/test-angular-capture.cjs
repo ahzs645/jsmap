@@ -116,11 +116,29 @@ function main() {
       const log = `${error.stdout || ''}${error.stderr || ''}`;
       assert.match(log, /linked workspace build check/, `workflow failed before the build step:\n${log.slice(-2000)}`);
     }
+    if (fs.existsSync(path.join(linked, 'dist/index.html'))) {
+      const linkedLevel = JSON.parse(execFileSync(process.execPath, [JSMAP, 'recovery-level', linked, '--json'], { encoding: 'utf8' }));
+      assert.equal(linkedLevel.status, 'linked-recovery');
+      assert.equal(linkedLevel.framework.strategy, 'linked-esm');
+    }
     const route = readJson(path.join(linked, 'recovery-workflow/framework-route.json'));
     assert.equal(route.framework, 'angular');
     assert.equal(route.strategy, 'linked-esm');
     assert.ok(fs.existsSync(path.join(linked, 'recovery-workflow/stats-before.json')), 'stats-before report missing');
     assert.ok(fs.existsSync(path.join(linked, 'recovery-workflow/promotion-plan.json')), 'promotion plan missing');
+
+    // ── rebuild with nothing split gives the actionable error, not ENOENT ─
+    const unsplit = path.join(tempRoot, 'unsplit');
+    execFileSync(process.execPath, [JSMAP, 'recover', input, unsplit, '--force', '--engine', 'webcrack', '--timeout', '60'], { stdio: 'pipe' });
+    assert.ok(!fs.existsSync(path.join(unsplit, 'src/recovered-chunks')), 'fixture bundle should be under the default split threshold');
+    let rebuildError = '';
+    try {
+      execFileSync(process.execPath, [JSMAP, 'rebuild', unsplit, path.join(tempRoot, 'unsplit-linked')], { stdio: 'pipe' });
+    } catch (error) {
+      rebuildError = String(error.stderr || '');
+    }
+    assert.match(rebuildError, /No recovered chunk manifests were found/);
+    assert.doesNotMatch(rebuildError, /ENOENT/);
 
     console.log('angular-capture recovery test passed');
   } finally {

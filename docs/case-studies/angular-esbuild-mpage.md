@@ -34,7 +34,12 @@ Every marker below survives production minification:
 
 A docs page or third-party script can quote `"ng-version"`, so detection
 requires the stamp plus one other kind before it reroutes a capture. With a
-single marker the result stays `inspection-first` and carries a `hint`.
+single marker the result stays `inspection-first` and carries a `hint`. The
+stamp sits wherever `@angular/core` landed in the bundle, which can be outside
+the 256 KB head / 64 KB tail sample, so once Ivy statics or the license notice
+are seen the scripts are read whole for it. A `package.json` dependency is not
+counted: a recovered workspace's own `package.json` is derived from the license
+notice and would count the same evidence twice.
 
 Framework and bundler are separate axes. Older Angular CLI builds are webpack
 bundles (`runtime.HASH.js`, `polyfills.HASH.js`, `webpackChunk…`), so they are
@@ -88,12 +93,3 @@ Browser check (Chromium, 1280x800) on the preserved runtime and the linked
 build: identical requests, the same header/tab shell, the same failed CCL ping,
 and `ng-version="20.3.2"` on the root element. That supports the linked
 level, not any interaction parity.
-
-## Decisions taken with a human reviewer
-
-The judgment calls above (stop at linked-recovery, no backend stub, keep the
-`"*"` convention over excluding unversioned packages, two-marker detection,
-`angular` as the framework on both bundler routes) were put to a reviewer
-playing the repo owner before implementation. Where the reviewer's first answer
-conflicted with the README's documented `"*"` convention, the conflict went back
-to the reviewer, who chose the existing convention.

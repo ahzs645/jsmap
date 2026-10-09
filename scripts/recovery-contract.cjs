@@ -221,10 +221,6 @@ function detectFramework(root, override = 'auto') {
         webpackScore += 5;
         evidence.push('package:webpack');
       }
-      if (dependencies['@angular/core']) {
-        angularMarkers.add('package');
-        evidence.push('package:@angular/core');
-      }
     } catch {}
   }
 
@@ -268,8 +264,21 @@ function detectFramework(root, override = 'auto') {
       }
     }
   }
+  // The ng-version stamp sits wherever @angular/core landed in the bundle, which
+  // in a large main chunk can be outside the head/tail sample. When other
+  // Angular evidence already exists, read the scripts whole for the stamp
+  // rather than miss it; captures without Angular evidence pay nothing.
+  if (!angularMarkers.has('ng-version') && (angularMarkers.has('ivy-statics') || angularMarkers.has('license'))) {
+    for (const file of candidates.slice(0, 240)) {
+      if (!/\.[cm]?js$/i.test(file)) continue;
+      if (!ANGULAR_NG_VERSION_MARKER.test(readSample(file, 32 * 1024 * 1024))) continue;
+      angularMarkers.add('ng-version');
+      if (evidence.length < 20) evidence.push(`angular:ng-version:${path.relative(absoluteRoot, file).replace(/\\/g, '/')}`);
+      break;
+    }
+  }
   const angular = angularMarkers.has('ng-version')
-    && (angularMarkers.has('ivy-statics') || angularMarkers.has('license') || angularMarkers.has('package'));
+    && (angularMarkers.has('ivy-statics') || angularMarkers.has('license'));
 
   if (nextScore >= 6) {
     const result = frameworkResult('next', turbopackScore > 0 ? 'high' : 'medium', evidence);

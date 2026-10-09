@@ -264,6 +264,26 @@ test('a single Angular marker does not route, it only leaves a hint', () => {
   assert.equal(detectFramework(noStamp).framework, 'unknown');
 });
 
+test('an ng-version stamp outside the head/tail sample is still found', () => {
+  // A 745 KB Angular main chunk leaves ~420 KB unsampled; @angular/core can
+  // land there. Ivy statics in the head are enough to justify a full read.
+  const filler = `var pad="${'x'.repeat(200 * 1024)}";`;
+  const root = capture('angular-mid-stamp', {
+    'main-ABC.js': `class t{static \\u0275fac=1}${filler}${filler}let r=["ng-version","19.2.0"];${filler}${filler}`,
+  });
+  const result = detectFramework(root);
+  assert.equal(result.framework, 'angular');
+  assert.ok(result.evidence.includes('angular:ng-version:main-ABC.js'), JSON.stringify(result.evidence));
+});
+
+test('package.json @angular/core is not a second Angular marker', () => {
+  const root = capture('angular-package-only', {
+    'package.json': JSON.stringify({ dependencies: { '@angular/core': '^20.0.0' } }),
+    'main.js': 'let r=["ng-version","20.0.0"];',
+  });
+  assert.equal(detectFramework(root).framework, 'unknown');
+});
+
 test('--framework angular keeps the bundler-derived route', () => {
   const esbuild = detectFramework(capture('angular-override-esm', { 'main.js': 'export {};' }), 'angular');
   assert.equal(esbuild.framework, 'angular');
