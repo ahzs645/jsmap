@@ -13,7 +13,7 @@
 // The fixture content is synthetic; only the build shapes match the capture.
 
 const assert = require('node:assert/strict');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -43,7 +43,53 @@ const MAIN = [
   'export{eN as bootstrap};',
 ].join('\n');
 
-function main() {
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// The dev server must serve the linked entry for /index.html too (the captured
+// public/index.html used to shadow it), and must re-link when a part is edited.
+async function checkDevServer(linked) {
+  const port = 5199;
+  const server = spawn(process.execPath, [JSMAP_VITE(linked), '--host', '127.0.0.1', '--port', String(port), '--strictPort'], {
+    cwd: linked,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let log = '';
+  server.stdout.on('data', (chunk) => { log += chunk; });
+  server.stderr.on('data', (chunk) => { log += chunk; });
+  try {
+    const base = `http://127.0.0.1:${port}`;
+    for (let i = 0; i < 100 && !log.includes('ready in'); i++) await sleep(100);
+    assert.ok(log.includes('ready in'), `vite dev did not start:\n${log}`);
+    const indexHtml = await (await fetch(`${base}/index.html`)).text();
+    assert.match(indexHtml, /src\/recovered-entry\//, '/index.html must be the linked page, not the captured one');
+
+    const partsDir = path.join(linked, 'src/recovered-parts');
+    const chunk = fs.readdirSync(partsDir)[0];
+    const part = path.join(partsDir, chunk, fs.readdirSync(path.join(partsDir, chunk)).find((file) => file.endsWith('.js')));
+    fs.appendFileSync(part, '\n/* jsmap-relink-probe */\n');
+    const entryUrl = `${base}/src/recovered-entry/${fs.readdirSync(path.join(linked, 'src/recovered-entry'))[0]}`;
+    let relinked = false;
+    for (let i = 0; i < 50 && !relinked; i++) {
+      await sleep(100);
+      relinked = (await (await fetch(entryUrl)).text()).includes('jsmap-relink-probe');
+    }
+    assert.ok(relinked, `editing a recovered part did not re-link the entry:\n${log}`);
+  } finally {
+    server.kill();
+  }
+}
+
+// The workflow's build step installed nothing locally; resolve vite the way the
+// generated `npm run dev` does, from the linked workspace or jsmap itself.
+function JSMAP_VITE(linked) {
+  for (const root of [linked, ROOT]) {
+    const bin = path.join(root, 'node_modules/vite/bin/vite.js');
+    if (fs.existsSync(bin)) return bin;
+  }
+  throw new Error('vite not installed');
+}
+
+async function main() {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jsmap-angular-capture-'));
   try {
     const input = path.join(tempRoot, 'capture');
@@ -120,6 +166,7 @@ function main() {
       const linkedLevel = JSON.parse(execFileSync(process.execPath, [JSMAP, 'recovery-level', linked, '--json'], { encoding: 'utf8' }));
       assert.equal(linkedLevel.status, 'linked-recovery');
       assert.equal(linkedLevel.framework.strategy, 'linked-esm');
+      await checkDevServer(linked);
     }
     const route = readJson(path.join(linked, 'recovery-workflow/framework-route.json'));
     assert.equal(route.framework, 'angular');
@@ -146,4 +193,7 @@ function main() {
   }
 }
 
-main();
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

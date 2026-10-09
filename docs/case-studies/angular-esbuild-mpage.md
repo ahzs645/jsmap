@@ -21,6 +21,8 @@ a live backend, so no browser parity beyond the boot shell can be shown.
 | `coverage`: "No webpack chunk map found", nothing else | Only webpack chunk maps were checked | Literal JS/CSS/HTML asset references checked too |
 | `recover-workflow` died at "stats before promotion" on every linked route | Report dir written into the linked dir before `rebuild` recreated it | Write the route report after `rebuild` |
 | `rebuild` crashed with `ENOENT` when nothing was split | `readdir` on a missing `src/recovered-chunks` | Treat a missing chunks dir as zero manifests |
+| Editing `src/recovered-parts/*` under `npm run dev` changed nothing | The entry is a concatenation of the parts, rebuilt only by `npm run link` | Dev plugin re-links on save and reloads the page |
+| After any reload the dev server ran the *captured* bundle | The router moved to `/index.html#/`; Vite serves `public/index.html` (the captured page) before its own | Dev middleware serves the linked page for `/index.html` |
 | Recovery workspaces scored `next:5` from jsmap's own scripts | Generated `scripts/*.mjs` quote framework markers as data | Exclude jsmap-generated workspace scripts from detection and coverage |
 
 ## Angular evidence and why two markers

@@ -99,7 +99,11 @@ deobfuscated snapshots to `recovery/deobfuscated/`, splits inspectable chunks in
 `src/recovered-chunks/`, and creates inferred package boundaries under `packages/*`.
 The linked rebuild keeps split files separate under `src/recovered-parts/*` with
 machine-readable `@jsmap-link` headers, writes `recovery-link-plan.json`, and
-generates runnable `src/recovered-entry/*` files from those links. It also writes
+generates runnable `src/recovered-entry/*` files from those links. Under
+`npm run dev`, saving any `src/recovered-parts/*` file re-runs the linker and
+reloads the page, so the linked workspace is a hot-reloading way to edit the
+real app; `/index.html` is served from the linked page rather than the captured
+copy in `public/`. It also writes
 `recovery-module-index.json` with declarations, exports, import edges, runtime
 signals, and extraction-readiness labels for human/agent follow-up. The
 promotion planner reads that index and writes `recovery-promotion-plan.json` and
