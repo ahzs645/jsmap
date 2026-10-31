@@ -17,7 +17,7 @@ function usage() {
   jsmap next-doctor <recovery-dir>
   jsmap shim-api <recovery-dir> [--record] [--from-browser-log <file>]
   jsmap shim-ui <recovery-dir>
-  jsmap verify-static <url> [--expect-text <text>] [--expect-selector <selector>] [--click <selector>]
+  jsmap verify-static <url> [--expect-text <text>] [--expect-selector <selector>] [--click <selector>] [--chromium-executable-path <path>]
 `);
 }
 
@@ -32,6 +32,7 @@ function parseFlags(argv) {
       else if (key === 'framework') flags.framework = argv[++i];
       else if (key === 'replay-policy') flags.replayPolicy = argv[++i];
       else if (key === 'from-browser-log') flags.fromBrowserLog = argv[++i];
+      else if (key === 'chromium-executable-path') flags.chromiumExecutablePath = argv[++i];
       else if (key === 'expect-text') {
         flags.expectText ||= [];
         flags.expectText.push(argv[++i]);
@@ -385,16 +386,35 @@ async function readRewrittenTextFile(file) {
   return body;
 }
 
-function replayCapturedHeaders(res, route) {
+async function replayCapturedHeaders(res, route) {
   const replayHeaders = new Set(['content-type', 'content-language', 'cache-control', 'etag', 'last-modified', 'location', 'accept-ranges']);
   for (const [name, value] of Object.entries(route.responseHeaders || {})) {
     if (!replayHeaders.has(name.toLowerCase()) && !name.toLowerCase().startsWith('access-control-')) continue;
+    if (name.toLowerCase() === 'location') {
+      try {
+        const target = new URL(value, route.sanitizedUrl);
+        if (!['http:', 'https:'].includes(target.protocol)) throw new Error('Unsupported redirect protocol');
+        const routes = await captureRoutes();
+        const primary = routes.find((candidate) => candidate.origin === 'primary' && candidate.sanitizedUrl);
+        const primaryOrigin = primary ? new URL(primary.sanitizedUrl).origin : null;
+        const targetPath = normalizeCapturedPathQuery(target.href);
+        const captured = routes.some((candidate) => candidate.decodedPathQuery === targetPath
+          && (target.origin === primaryOrigin ? candidate.origin === 'primary' : candidate.origin === target.origin));
+        // Preserve redirect status and query semantics while keeping the browser
+        // in the local evidence harness. Uncaptured targets become explicit 404s.
+        const alias = !captured ? '/__jsmap_uncaptured_redirect'
+          : target.origin === primaryOrigin ? target.pathname + target.search + target.hash
+            : '/__jsmap_external/' + target.host + target.pathname + target.search + target.hash;
+        res.setHeader(name, alias);
+      } catch { res.setHeader(name, '/__jsmap_uncaptured_redirect'); }
+      continue;
+    }
     res.setHeader(name, value);
   }
 }
 
 async function serveRouteBody(req, res, route) {
-  replayCapturedHeaders(res, route);
+  await replayCapturedHeaders(res, route);
   res.statusCode = Number(route.status || 200);
   const bodyFile = route.bodyFile || route.externalFile;
   if (!bodyFile) {
@@ -420,10 +440,38 @@ async function serveRouteBody(req, res, route) {
 async function maybeServeCapturedExchange(req, res) {
   const method = req.method || 'GET';
   const routes = await captureRoutes();
-  const policy = await replayPolicy();
-  const strict = Boolean(policy?.strictOffline);
   const requestUrl = new URL(req.url || '/', 'http://localhost');
-  const externalMatch = requestUrl.pathname.match(/^\\/__jsmap_external\\/([^/]+)(\\/.*)?$/);  if (externalMatch) {
+  const externalMatch = requestUrl.pathname.match(/^\\/__jsmap_external\\/([^/]+)(\\/.*)?$/);
+  // A CDN module can import "/dep.js". The browser resolves that against the
+  // harness origin, losing the /__jsmap_external/<host> namespace. A same-origin
+  // module referrer identifies the original CDN unambiguously. Redirect to its
+  // canonical alias so relative imports in the child keep that namespace too.
+  // Never guess from basename or serve a different origin's matching asset.
+  if (!externalMatch && method === 'GET' && req.headers.referer) {
+    let referringHost = null;
+    try {
+      const referrer = new URL(req.headers.referer);
+      const localOrigin = 'http://' + req.headers.host;
+      if (referrer.origin === localOrigin) referringHost = referrer.pathname.match(/^\\/__jsmap_external\\/([^/]+)\\//)?.[1];
+    } catch { /* an invalid referrer cannot establish an asset origin */ }
+    if (referringHost) {
+      const pathQuery = normalizeCapturedPathQuery(req.url || '/');
+      const route = routes.find((candidate) => candidate.origin !== 'primary'
+        && candidate.origin.replace(/^https?:\\/\\//, '') === referringHost
+        && candidate.method === 'GET' && candidate.decodedPathQuery === pathQuery);
+      if (route) {
+        res.statusCode = 307;
+        res.setHeader('Location', '/__jsmap_external/' + referringHost + requestUrl.pathname + requestUrl.search);
+        res.end();
+        return true;
+      }
+      // An unresolved CDN import is an explicit capture gap, not an SPA route.
+      res.statusCode = 404;
+      res.end('Not captured: ' + referringHost + pathQuery);
+      return true;
+    }
+  }
+  if (externalMatch) {
     const host = externalMatch[1];
     const rest = (externalMatch[2] || '/') + requestUrl.search;
     const pathQuery = normalizeCapturedPathQuery(rest);
@@ -434,24 +482,13 @@ async function maybeServeCapturedExchange(req, res) {
     const sameHost = (candidate) =>
       candidate.origin !== 'primary'
       && candidate.origin.replace(/^https?:\\/\\//, '') === host;
-    const route = routes.find((candidate) =>
-      sameHost(candidate) && candidate.method === method && candidate.decodedPathQuery === pathQuery)
-      || routes.find((candidate) =>
-        sameHost(candidate) && candidate.method === method && candidate.decodedPathQuery === pathQuery.split('?')[0])
-      // GET-only captures (e.g. directory-tree imports) never recorded request
-      // bodies, so a runtime POST/PUT to a captured GET endpoint replays the
-      // captured GET response — the human-in-the-middle approximation.
-      || (!strict && routes.find((candidate) => sameHost(candidate) && candidate.decodedPathQuery === pathQuery))
-      || (!strict && routes.find((candidate) => sameHost(candidate) && candidate.decodedPathQuery === pathQuery.split('?')[0]));
+    const candidates = routes.filter((candidate) =>
+      sameHost(candidate) && candidate.method === method && candidate.decodedPathQuery === pathQuery);
+    const origins = new Set(candidates.map((candidate) => candidate.origin));
+    const route = origins.size === 1 ? candidates[0] : null;
     if (!route) {
-      // Uncaptured vector tiles / map imagery: answer with empty 204 so map
-      // renderers treat the tile as empty and finish loading instead of
-      // stalling the boot on a failed request.
-      if (!strict && /\\.(?:pbf|mvt|png|jpe?g|webp)(?:\\?|$)/i.test(pathQuery)) {
-        res.statusCode = 204;
-        res.end();
-        return true;
-      }
+      // Never turn a different method/query/origin or an uncaptured image into
+      // successful evidence. Reviewed synthetic responses belong in replay policy.
       res.statusCode = 404;
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.end('Not captured: ' + host + pathQuery);
@@ -462,7 +499,14 @@ async function maybeServeCapturedExchange(req, res) {
   const pathQuery = normalizeCapturedPathQuery(req.url || '/');
   const route = routes.find((candidate) =>
     candidate.origin === 'primary' && candidate.method === method && candidate.decodedPathQuery === pathQuery);
-  if (!route) return false;
+  if (!route) {
+    const related = routes.some((candidate) => candidate.origin === 'primary'
+      && candidate.decodedPathQuery.split('?')[0] === pathQuery.split('?')[0]);
+    if (!related) return false;
+    res.statusCode = 404;
+    res.end('Method or query was not captured');
+    return true;
+  }
   if (method === 'GET' && !pathQuery.includes('?') && String(route.mimeType || '').toLowerCase().startsWith('text/html')) return false;
   return serveRouteBody(req, res, route);
 }
@@ -686,7 +730,12 @@ async function maybeServeNextDataFallback(req, res) {
 }
 
 async function resolveFile(urlPath) {
-  const primary = safeJoin(urlPath);
+  const normalized = normalizeCapturedPathQuery(urlPath);
+  const captured = (await captureRoutes()).find((route) => route.origin === 'primary'
+    && route.method === 'GET' && route.decodedPathQuery === normalized && route.materializedPath);
+  // Bounded/sanitized filesystem names need not equal the original URL. Use the
+  // recorded mapping for HTML too, so it still receives the normal harness shim.
+  const primary = safeJoin(captured ? '/' + captured.materializedPath : urlPath);
   try {
     const info = await stat(primary);
     if (info.isDirectory()) {
@@ -726,6 +775,10 @@ const server = http.createServer(async (req, res) => {
       res.setHeader('Content-Security-Policy', \"default-src 'self' data: blob:; connect-src 'self'; media-src 'self' blob:; img-src 'self' data: blob:; frame-src 'self' about:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'\");
     }
     const pathname = new URL(req.url || '/', 'http://localhost').pathname;
+    if (pathname === '/__jsmap_uncaptured_redirect') {
+      send(res, 404, 'Redirect target was not captured', 'text/plain; charset=utf-8');
+      return;
+    }
     if (pathname === '/__jsmap_static_shim.js') {
       res.setHeader('Cache-Control', 'no-store, max-age=0');
       const hosts = (await externalOrigins()).map((origin) => origin.replace(/^https?:\\/\\//, ''));
@@ -1094,7 +1147,9 @@ async function commandVerifyStatic(argv) {
     result.playwrightAvailable = true;
   } catch {}
   if (playwright) {
-    const browser = await playwright.chromium.launch({ headless: true });
+    const executablePath = flags.chromiumExecutablePath || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || process.env.CHROMIUM_PATH;
+    const browser = await playwright.chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
+    result.chromiumExecutablePath = executablePath || null;
     const page = await browser.newPage();
     const consoleMessages = [];
     const failedRequests = [];

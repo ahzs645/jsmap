@@ -60,13 +60,14 @@ async function main() {
   const harFile = path.join(tempRoot, 'capture.har');
   const recoveryDir = path.join(tempRoot, 'recovered');
   const appJs = 'globalThis.__MITM_FIXTURE__ = "decoded";\n';
+  const longHtmlPath = '/' + 'long-page-'.repeat(40) + '.html';
   const compressedJs = zlib.gzipSync(appJs).toString('base64');
   const har = {
     log: {
       version: '1.2',
       creator: { name: 'jsmap fixture', version: '1' },
       entries: [
-        entry('GET', 'https://app.test/', response(200, 'text/html', '<!doctype html><html><head></head><body>Captured App<script src="/app.js"></script></body></html>')),
+        entry('GET', 'https://app.test/', response(200, 'text/html', '<!doctype html><html><head><link rel="icon" href="data:,"></head><body>Captured App<span id="external-ready">loading</span><script src="/app.js"></script><script type="module" src="https://esm.test/package/index.mjs"></script></body></html>')),
         entry('GET', 'https://app.test/app.js', response(200, 'text/javascript', compressedJs, [{ name: 'Content-Encoding', value: 'gzip' }], 'base64')),
         entry(
           'GET',
@@ -88,6 +89,18 @@ async function main() {
         entry('GET', 'wss://app.test/live', response(101, 'application/octet-stream', ''), { _webSocketMessages: [{ type: 'send', data: 'hi' }] }),
         entry('GET', 'https://basic_user:TOP_SECRET_BASIC@app.test/basic', response(200, 'application/json', '{"ok":true}')),
         entry('GET', 'https://cdn.test/fonts/local.woff2', response(200, 'font/woff2', 'font-bytes')),
+        entry('GET', 'https://esm.test/package/index.mjs', response(200, 'text/javascript', 'import { message } from "/shared/dep.mjs"; document.querySelector("#external-ready").textContent = message;')),
+        entry('GET', 'https://esm.test/shared/dep.mjs', response(200, 'text/javascript', 'export { message } from "./value.mjs";')),
+        entry('GET', 'https://esm.test/shared/value.mjs', response(200, 'text/javascript', 'export const message = "captured external dependency";')),
+        entry('GET', 'https://other-cdn.test/shared/dep.mjs', response(200, 'text/javascript', 'export const message = "wrong origin";')),
+        entry('GET', 'https://esm.test/query.mjs?v=1', response(200, 'text/javascript', 'export const version = 1;')),
+        entry('GET', 'https://esm.test/query.mjs?v=2', response(200, 'text/javascript', 'export const version = 2;')),
+        entry('GET', 'https://esm.test/redirect.mjs', response(302, 'text/plain', '', [{ name: 'Location', value: '/query.mjs?v=2' }])),
+        entry('GET', 'https://esm.test/package/redirect.mjs', response(302, 'text/plain', '', [{ name: 'Location', value: 'child.mjs?v=2' }])),
+        entry('GET', 'https://esm.test/package/child.mjs?v=2', response(200, 'text/javascript', 'export const childVersion = 2;')),
+        entry('GET', 'https://esm.test/back-home', response(302, 'text/plain', '', [{ name: 'Location', value: 'https://app.test/#access_token=TOP_SECRET_REDIRECT' }])),
+        entry('GET', 'https://app.test/missing-redirect', response(302, 'text/plain', '', [{ name: 'Location', value: '/uncaptured-app-route' }])),
+        entry('GET', 'https://app.test' + longHtmlPath, response(200, 'text/html', '<html><head></head><body>Long captured HTML</body></html>')),
       ],
     },
   };
@@ -119,12 +132,15 @@ async function main() {
   assert(fs.existsSync(path.join(metadataDir, 'MITM_CAPTURE.json')), 'recovery should retain MITM provenance');
   assert(!fs.existsSync(path.join(recoveryDir, 'public/.jsmap-mitm')), 'MITM metadata must stay outside public');
   assert(!fs.existsSync(path.join(recoveryDir, 'recovery/deobfuscated/.jsmap-mitm')), 'MITM metadata must not be deobfuscated');
+  const importedRoutes = JSON.parse(fs.readFileSync(path.join(metadataDir, 'ROUTE_MAP.json'), 'utf8')).routes;
+  assert.equal(importedRoutes.find(route => route.origin === 'primary' && route.pathQuery.startsWith('/api/config')).materializedPath, null, 'primary API JSON must remain in replay metadata rather than public assets');
 
   const manifest = JSON.parse(fs.readFileSync(path.join(metadataDir, 'MITM_CAPTURE.json'), 'utf8'));
   assert.equal(manifest.redactions.requestHeaders, 2);
   assert.equal(manifest.redactions.responseHeaders, 1);
   assert.equal(manifest.redactions.requestBodiesOmitted, 1);
   assert.equal(manifest.redactions.urlCredentials, 1);
+  assert.equal(manifest.redactions.urlFragments, 1);
   assert.equal(manifest.protocols.websocket, 2);
   assert.equal(manifest.protocols.eventStream, 1);
   assert.equal(manifest.protocols.other, 0, 'ws://wss:// handshakes must count as websocket, not other');
@@ -137,7 +153,7 @@ async function main() {
       .map((item) => fsp.readFile(path.join(item.parentPath, item.name)).catch(() => Buffer.alloc(0))),
   );
   const metadataText = Buffer.concat(storedMetadata).toString('utf8');
-  for (const secret of ['TOP_SECRET_QUERY', 'TOP_SECRET_AUTH', 'TOP_SECRET_COOKIE', 'TOP_SECRET_SESSION', 'TOP_SECRET_BODY', 'TOP_SECRET_BASIC', 'basic_user']) {
+  for (const secret of ['TOP_SECRET_QUERY', 'TOP_SECRET_AUTH', 'TOP_SECRET_COOKIE', 'TOP_SECRET_SESSION', 'TOP_SECRET_BODY', 'TOP_SECRET_BASIC', 'TOP_SECRET_REDIRECT', 'basic_user']) {
     assert(!metadataText.includes(secret), `metadata should not contain ${secret}`);
   }
 
@@ -165,6 +181,9 @@ async function main() {
     const html = await fetch(`http://127.0.0.1:${port}/`).then((res) => res.text());
     assert(html.includes('Captured App'));
     assert(html.includes('/__jsmap_static_shim.js'), 'HTML should still receive the static harness shim');
+    const longHtml = await fetch(`http://127.0.0.1:${port}${longHtmlPath}`).then(res => res.text());
+    assert(longHtml.includes('Long captured HTML'));
+    assert(longHtml.includes('/__jsmap_static_shim.js'), 'mapped long HTML paths must preserve normal replay injection');
 
     const replay = await fetch(`http://127.0.0.1:${port}/api/config?token=DIFFERENT_VALUE&mode=full`);
     assert.equal(replay.status, 200);
@@ -174,6 +193,47 @@ async function main() {
     const saved = await fetch(`http://127.0.0.1:${port}/api/save?session=ANOTHER_VALUE`, { method: 'POST', body: 'different body' });
     assert.equal(saved.status, 201);
     assert.equal(await saved.text(), '{"saved":true}');
+
+    const rootedImport = await fetch(`http://127.0.0.1:${port}/shared/dep.mjs`, {
+      headers: { Referer: `http://127.0.0.1:${port}/__jsmap_external/esm.test/package/index.mjs` }, redirect: 'manual',
+    });
+    assert.equal(rootedImport.status, 307);
+    assert.equal(rootedImport.headers.get('location'), '/__jsmap_external/esm.test/shared/dep.mjs');
+    const otherOrigin = await fetch(`http://127.0.0.1:${port}/shared/dep.mjs`, {
+      headers: { Referer: `http://127.0.0.1:${port}/__jsmap_external/other-cdn.test/index.mjs` }, redirect: 'manual',
+    });
+    assert.equal(otherOrigin.headers.get('location'), '/__jsmap_external/other-cdn.test/shared/dep.mjs', 'the importing CDN determines the asset origin');
+    const missingImport = await fetch(`http://127.0.0.1:${port}/uncaptured-module`, {
+      headers: { Referer: `http://127.0.0.1:${port}/__jsmap_external/esm.test/package/index.mjs` },
+    });
+    assert.equal(missingImport.status, 404, 'an uncaptured CDN module must not become a successful SPA fallback');
+    const absentReferrer = await fetch(`http://127.0.0.1:${port}/shared/dep.mjs`);
+    assert.equal(absentReferrer.status, 404, 'missing origin evidence must not select a matching CDN basename');
+    const foreignReferrer = await fetch(`http://127.0.0.1:${port}/shared/dep.mjs`, { headers: { Referer: 'https://outside.test/__jsmap_external/esm.test/index.mjs' } });
+    assert.equal(foreignReferrer.status, 404, 'a remote referrer cannot establish the local importing origin');
+    const queryImport = await fetch(`http://127.0.0.1:${port}/query.mjs?v=2`, { headers: { Referer: `http://127.0.0.1:${port}/__jsmap_external/esm.test/index.mjs` }, redirect: 'manual' });
+    assert.equal(queryImport.headers.get('location'), '/__jsmap_external/esm.test/query.mjs?v=2');
+    const redirected = await fetch(`http://127.0.0.1:${port}/__jsmap_external/esm.test/redirect.mjs`, { redirect: 'manual' });
+    assert.equal(redirected.status, 302);
+    assert.equal(redirected.headers.get('location'), '/__jsmap_external/esm.test/query.mjs?v=2', 'captured redirects must retain origin and query without leaving the local harness');
+    const followed = await fetch(`http://127.0.0.1:${port}` + redirected.headers.get('location'));
+    assert.equal(await followed.text(), 'export const version = 2;');
+    const relative = await fetch(`http://127.0.0.1:${port}/__jsmap_external/esm.test/package/redirect.mjs`, { redirect: 'manual' });
+    assert.equal(relative.headers.get('location'), '/__jsmap_external/esm.test/package/child.mjs?v=2', 'relative redirect paths resolve against the original response URL');
+    const backHome = await fetch(`http://127.0.0.1:${port}/__jsmap_external/esm.test/back-home`, { redirect: 'manual' });
+    assert.equal(backHome.headers.get('location'), '/', 'an external response can redirect to a captured primary route without retaining OAuth fragments');
+    const missingRedirect = await fetch(`http://127.0.0.1:${port}/missing-redirect`);
+    assert.equal(missingRedirect.status, 404, 'an uncaptured redirect target cannot become a successful SPA fallback');
+    const wrongMethodModule = await fetch(`http://127.0.0.1:${port}/__jsmap_external/esm.test/query.mjs?v=2`, { method: 'POST' });
+    assert.equal(wrongMethodModule.status, 404, 'a captured GET cannot satisfy a different method');
+    const wrongQueryModule = await fetch(`http://127.0.0.1:${port}/__jsmap_external/esm.test/query.mjs?v=3`);
+    assert.equal(wrongQueryModule.status, 404, 'uncaptured query values cannot select a different captured response');
+    assert.equal((await fetch(`http://127.0.0.1:${port}/api/config?mode=missing`, { method: 'POST' })).status, 404, 'a primary GET capture cannot become a POST response');
+    assert.equal((await fetch(`http://127.0.0.1:${port}/__jsmap_external/esm.test/missing.png`)).status, 404, 'uncaptured imagery must not become synthetic successful evidence');
+    if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || process.env.CHROMIUM_PATH) {
+      const verified = execFileSync(process.execPath, [path.join(ROOT, 'scripts/jsmap.cjs'), 'verify-static', `http://127.0.0.1:${port}/`, '--expect-text', 'captured external dependency'], { encoding: 'utf8' });
+      assert.equal(JSON.parse(verified).ok, true, 'a real browser must load the root-relative re-export and its relative child');
+    }
   } finally {
     server.kill();
   }

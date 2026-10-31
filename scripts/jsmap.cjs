@@ -108,6 +108,7 @@ Commands:
         packages/*               inferred package boundaries
       Large JS files are preserved by default instead of blocking the pipeline.
       Options: --recovery-mode balanced|inspect-first,
+               --include-captured-asset <exact-external-asset-url> (repeatable),
                --large-js-mode preserve|split-raw|full,
                --module-granularity grouped|declarations,
                --engine webcrack|wakaru|both, --timeout <seconds>,
@@ -361,6 +362,9 @@ Commands:
       Generate recovery/static-ui-shims.json and a browser-side DOM shim starter
       for placeholder examples, collapsed panels, intercepted static controls,
       and active row state.
+
+  feature-coverage <local-url> --plan <reviewed.json> [--out <report.json>]
+      Exercise local preserved-runtime features and inventory dynamic capture gaps.
 
   verify-static <url> [--expect-text <text>] [--expect-selector <selector>] [--click <selector>]
       Smoke-check a preserved static runtime URL. Uses Playwright when available
@@ -836,6 +840,9 @@ function main() {
       break;
     case 'shim-ui':
       runScript('static-runtime-tools.cjs', ['shim-ui', ...subArgs]);
+      break;
+    case 'feature-coverage':
+      runScript('feature-coverage.cjs', subArgs);
       break;
     case 'verify-static':
       runScript('static-runtime-tools.cjs', ['verify-static', ...subArgs]);
