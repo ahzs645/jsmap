@@ -7,13 +7,14 @@ const zlib = require('node:zlib');
 const { spawnSync } = require('node:child_process');
 const { detectFramework } = require('./recovery-contract.cjs');
 const { repairBeautifierDamageIfBroken, ensureParseableJson } = require('./lib/deobfuscation-pipeline.cjs');
+const { safePathname } = require('./lib/capture-paths.cjs');
 
 const SENSITIVE_HEADERS = /^(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token|x-xsrf-token|x-amz-security-token|x-goog-api-key)$/i;
 const SENSITIVE_QUERY_KEYS = /(?:^|[_-])(?:access[_-]?token|api[_-]?key|auth|authorization|code|credential|id[_-]?token|jwt|key|password|refresh[_-]?token|secret|session|signature|token)(?:$|[_-])/i;
 const REPLAY_RESPONSE_HEADERS = /^(?:content-type|content-language|cache-control|etag|last-modified|location|access-control-[\w-]+|accept-ranges)$/i;
 
 function parseArgs(argv) {
-  const flags = { origin: null, force: false, replaceNonJsmapOutput: false, captureDir: null, framework: 'auto', repairWasm: false, allowEmpty: false };
+  const flags = { origin: null, force: false, replaceNonJsmapOutput: false, captureDir: null, framework: 'auto', repairWasm: false, allowEmpty: false, includeCapturedAssets: [] };
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -22,6 +23,7 @@ function parseArgs(argv) {
     else if (arg === '--framework') flags.framework = argv[++i];
     else if (arg === '--repair-wasm') flags.repairWasm = true;
     else if (arg === '--allow-empty') flags.allowEmpty = true;
+    else if (arg === '--include-captured-asset') flags.includeCapturedAssets.push(argv[++i]);
     else if (arg === '--replace-non-jsmap-output') flags.replaceNonJsmapOutput = true;
     else if (arg === '--force') flags.force = true;
     else if (!arg.startsWith('-')) positional.push(arg);
@@ -42,6 +44,9 @@ function headerMap(headers) {
 
 function redactUrl(input) {
   const url = new URL(input);
+  // Fragments are not sent in HTTP requests and can carry OAuth bearer tokens.
+  const fragmentsRedacted = url.hash ? 1 : 0;
+  url.hash = '';
   let redacted = 0;
   let credentialsRedacted = 0;
   if (url.username || url.password) {
@@ -54,7 +59,7 @@ function redactUrl(input) {
     url.searchParams.set(key, '<redacted>');
     redacted++;
   }
-  return { url: url.href, pathQuery: `${url.pathname}${url.search}`, redacted, credentialsRedacted };
+  return { url: url.href, pathQuery: `${url.pathname}${url.search}`, redacted, credentialsRedacted, fragmentsRedacted };
 }
 
 function decodeHarBody(content, responseHeaders) {
@@ -84,11 +89,14 @@ function extensionFor(mimeType, pathname) {
   }[mime] || '.bin';
 }
 
-function safePathname(pathname) {
-  let decoded;
-  try { decoded = decodeURIComponent(pathname); } catch { decoded = pathname; }
-  const segments = decoded.split('/').filter(Boolean).map((segment) => segment.replace(/[<>:"|?*\x00-\x1f]/g, '_')).filter((segment) => segment !== '.' && segment !== '..');
-  return segments.join('/');
+function publicStaticResponse(url, mimeType, buffer) {
+  if (/^(?:text\/(?:html|javascript|css)|application\/(?:javascript|ecmascript|wasm)|image\/|font\/|application\/(?:font-|vnd\.ms-fontobject|x-font-))/i.test(mimeType)) return true;
+  // Source maps are static inspection evidence, unlike API/user JSON. Require
+  // their actual schema instead of promoting arbitrary .map response bodies.
+  if (buffer && /\.map$/i.test(url.pathname) && /json/i.test(mimeType)) {
+    try { const map = JSON.parse(buffer.toString('utf8')); return map.version === 3 && Array.isArray(map.sources) && typeof map.mappings === 'string'; } catch {}
+  }
+  return false;
 }
 
 function materializedPath(url, mimeType) {
@@ -114,7 +122,7 @@ function selectPrimaryOrigin(entries, explicitOrigin) {
   return [...scores].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
 }
 
-function safeResponseHeaders(headers, primaryOrigin) {
+function safeResponseHeaders(headers, sourceUrl, onUrlRedaction = () => {}) {
   const result = {};
   for (const header of headers || []) {
     const name = String(header.name || '').toLowerCase();
@@ -122,9 +130,12 @@ function safeResponseHeaders(headers, primaryOrigin) {
     let value = String(header.value || '');
     if (name === 'location') {
       try {
-        const location = new URL(value, primaryOrigin);
+        const location = new URL(value, sourceUrl);
         const redacted = redactUrl(location.href);
-        value = location.origin === primaryOrigin ? redacted.pathQuery : redacted.url;
+        onUrlRedaction(redacted);
+        // Keep the target origin and relative-path resolution unambiguous. The
+        // generated harness maps this sanitized absolute URL to a local alias.
+        value = redacted.url;
       } catch {}
     }
     result[name] = value;
@@ -206,7 +217,7 @@ function importHar(harFile, outputDir, flags) {
   const materialized = new Map();
   const warnings = [];
   const resolver = createConflictResolver(outputDir);
-  const redactions = { requestHeaders: 0, responseHeaders: 0, queryValues: 0, urlCredentials: 0, requestBodiesOmitted: 0 };
+  const redactions = { requestHeaders: 0, responseHeaders: 0, queryValues: 0, urlCredentials: 0, urlFragments: 0, requestBodiesOmitted: 0 };
   const protocols = { http: 0, websocket: 0, eventStream: 0, other: 0 };
 
   entries.forEach((entry, index) => {
@@ -246,6 +257,7 @@ function importHar(harFile, outputDir, flags) {
     const redactedUrl = redactUrl(originalUrl.href);
     redactions.queryValues += redactedUrl.redacted;
     redactions.urlCredentials += redactedUrl.credentialsRedacted;
+    redactions.urlFragments += redactedUrl.fragmentsRedacted;
     const responseHeaders = headerMap(response.headers);
     const decoded = decodeHarBody(response.content, responseHeaders);
     if (decoded.decodeError) warnings.push({ entry: index, code: 'content-decode-failed', detail: decoded.decodeError });
@@ -292,7 +304,8 @@ function importHar(harFile, outputDir, flags) {
     }
 
     let publicFile = null;
-    if (decoded.buffer && originalUrl.origin === primaryOrigin && request.method === 'GET' && response.status >= 200 && response.status < 400) {
+    if (decoded.buffer && originalUrl.origin === primaryOrigin && request.method === 'GET' && response.status >= 200 && response.status < 400
+      && publicStaticResponse(originalUrl, mimeType, decoded.buffer)) {
       publicFile = materializedPath(originalUrl, mimeType);
       const collisionKey = publicFile.toLowerCase();
       if (!materialized.has(collisionKey)) {
@@ -314,7 +327,11 @@ function importHar(harFile, outputDir, flags) {
       status: response.status || 0,
       statusText: response.statusText || '',
       mimeType,
-      responseHeaders: safeResponseHeaders(response.headers, primaryOrigin),
+      responseHeaders: safeResponseHeaders(response.headers, originalUrl.href, (redacted) => {
+        redactions.queryValues += redacted.redacted;
+        redactions.urlCredentials += redacted.credentialsRedacted;
+        redactions.urlFragments += redacted.fragmentsRedacted;
+      }),
       bodyFile,
       bodyHash,
       bodyBytes: decoded.buffer?.length || 0,
@@ -347,6 +364,8 @@ function importHar(harFile, outputDir, flags) {
 
   const manifest = {
     tool: 'jsmap mitm-import', version: 1, sourceFormat: 'HAR 1.2',
+    pathEncoding: 'bounded-sha256-v1',
+    redirectEncoding: 'absolute-sanitized-v1',
     sourceFile: path.basename(harFile), sourceSha256: sha256(raw),
     importedAt: new Date().toISOString(), primaryOrigin,
     authorizationNotice: 'Only import traffic you are authorized to inspect. jsmap does not install certificates or initiate interception.',
@@ -385,6 +404,7 @@ function main() {
   const action = process.argv[2];
   const { flags, positional } = parseArgs(process.argv.slice(3));
   if (action === 'import') {
+    if (flags.includeCapturedAssets.length) throw new Error('--include-captured-asset is an analysis selection; use recover or mitm-recover, not mitm-import.');
     if (!positional[0] || !positional[1]) throw new Error('Usage: jsmap mitm-import <capture.har> <capture-output-dir> [--origin <url>] [--force] [--replace-non-jsmap-output]');
     importHar(path.resolve(positional[0]), path.resolve(positional[1]), flags);
     return;
@@ -400,6 +420,7 @@ function main() {
     if (flags.force) recoverArgs.push('--force');
     if (flags.repairWasm) recoverArgs.push('--repair-wasm');
     if (flags.allowEmpty) recoverArgs.push('--allow-empty');
+    for (const url of flags.includeCapturedAssets) recoverArgs.push('--include-captured-asset', url);
     runJsmap(recoverArgs, process.cwd());
     const harnessArgs = ['harness', recoveryDir];
     if (detectedFramework === 'next') harnessArgs.push('--framework', 'next');

@@ -33,6 +33,7 @@ const {
   repairBeautifierDamageIfBroken,
 } = require('./lib/deobfuscation-pipeline.cjs');
 const { hasWasmMagic, looksLikeWat, assembleWat } = require('./lib/wat-repair.cjs');
+const { selectCapturedAppAssets, stageCapturedAppAssets } = require('./lib/captured-app-assets.cjs');
 
 const SCRIPTS_DIR = __dirname;
 const DEFAULT_MAX_TRANSFORM_BYTES = 5 * 1024 * 1024;
@@ -40,11 +41,12 @@ const DEFAULT_MIN_SPLIT_BYTES = 300 * 1024;
 const DEFAULT_MAX_SPLIT_BYTES = 3 * 1024 * 1024;
 const LARGE_JS_MODES = new Set(['preserve', 'split-raw', 'full']);
 const MODULE_GRANULARITIES = new Set(['grouped', 'declarations']);
+const shellQuote = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'";
 const RECOVERY_MODES = new Set(['balanced', 'inspect-first']);
 
 function printUsage() {
   console.error(
-    'Usage: jsmap recover <input-dir> [output-dir] [--force] [--repair-wasm] [--allow-empty] [--recovery-mode balanced|inspect-first] [--large-js-mode preserve|split-raw|full] [--module-granularity grouped|declarations] [--engine webcrack|wakaru|both] [--timeout seconds] [--concurrency N] [--max-transform-mb N] [--min-split-kb N] [--max-split-mb N]\n' +
+    'Usage: jsmap recover <input-dir> [output-dir] [--force] [--repair-wasm] [--allow-empty] [--include-captured-asset <exact-url>] [--recovery-mode balanced|inspect-first] [--large-js-mode preserve|split-raw|full] [--module-granularity grouped|declarations] [--engine webcrack|wakaru|both] [--timeout seconds] [--concurrency N] [--max-transform-mb N] [--min-split-kb N] [--max-split-mb N]\n' +
       '  Optional community-tool passes: [--restringer] [--lebab] [--putout] [--humanify] [--jscodeshift <transform.js>] [--ast-grep <rules.json>]',
   );
 }
@@ -69,6 +71,7 @@ function parseArgs(argv) {
     humanify: false,
     jscodeshift: null,
     astGrep: null,
+    includeCapturedAssets: [],
   };
   const positional = [];
 
@@ -77,6 +80,7 @@ function parseArgs(argv) {
     if (arg === '--force') flags.force = true;
     else if (arg === '--repair-wasm') flags.repairWasm = true;
     else if (arg === '--allow-empty') flags.allowEmpty = true;
+    else if (arg === '--include-captured-asset') flags.includeCapturedAssets.push(argv[++i]);
     else if (arg === '--recovery-mode') flags.recoveryMode = argv[++i];
     else if (arg === '--large-js-mode') flags.largeJsMode = argv[++i];
     else if (arg === '--timeout') flags.timeoutSeconds = Number(argv[++i]);
@@ -2022,7 +2026,7 @@ async function writeWorkspace(outputDir, boundaries, dependencies, options, extr
   await fsp.writeFile(
     path.join(outputDir, 'scripts/refresh-recovery.mjs'),
     [
-      `console.log(${JSON.stringify(`Run this from the jsmap repo to refresh:\nnode scripts/jsmap.cjs recover ${options.inputDir} ${outputDir} --force${options.repairWasm ? ' --repair-wasm' : ''} --recovery-mode ${options.recoveryMode || 'balanced'} --large-js-mode ${options.largeJsMode || 'preserve'} --module-granularity ${options.moduleGranularity || 'declarations'} --engine ${options.engine || 'both'}`)});`,
+      `console.log(${JSON.stringify(`Run this from the jsmap repo to refresh:\nnode scripts/jsmap.cjs recover ${shellQuote(options.inputDir)} ${shellQuote(outputDir)} --force${options.repairWasm ? ' --repair-wasm' : ''} --recovery-mode ${options.recoveryMode || 'balanced'} --large-js-mode ${options.largeJsMode || 'preserve'} --module-granularity ${options.moduleGranularity || 'declarations'} --engine ${options.engine || 'both'}${(options.includeCapturedAssets || []).map((url) => ` --include-captured-asset ${shellQuote(url)}`).join('')}`)});`,
       '',
     ].join('\n'),
     'utf8',
@@ -2518,6 +2522,10 @@ async function main() {
   const absoluteInputDir = path.resolve(inputDir);
   const outputDir = path.resolve(positional[1] || `${absoluteInputDir.replace(/[\\/]+$/, '')}-recovered`);
   if (!await pathExists(absoluteInputDir)) throw new Error(`Input directory not found: ${absoluteInputDir}`);
+  const mitmMetadataDir = path.join(absoluteInputDir, '.jsmap-mitm');
+  // Resolve and hash-check explicit selections before replacing any output.
+  const selectedAssets = flags.includeCapturedAssets.length
+    ? await selectCapturedAppAssets(mitmMetadataDir, flags.includeCapturedAssets) : [];
 
   await copyProjectFiles(absoluteInputDir, outputDir, flags.force);
 
@@ -2526,14 +2534,15 @@ async function main() {
   const origin = await inferOriginFromHtml(absoluteInputDir);
   const wasmRepairs = flags.repairWasm ? await repairWasmAssets(publicDir, origin) : [];
 
-  const mitmMetadataDir = path.join(absoluteInputDir, '.jsmap-mitm');
-  const inputFiles = (await walkDirectory(absoluteInputDir))
+  const staged = selectedAssets.length ? await stageCapturedAppAssets(publicDir, outputDir, selectedAssets, mitmMetadataDir) : null;
+  const analysisInputDir = staged?.inputDir || absoluteInputDir;
+  const inputFiles = (await walkDirectory(analysisInputDir))
     .filter((file) => !path.resolve(file).startsWith(`${path.resolve(mitmMetadataDir)}${path.sep}`));
   const excludedLargeJs = [];
   const excludedLargeJsDetails = [];
   const transformRiskFiles = [];
   for (const file of inputFiles) {
-    const rel = toPosix(path.relative(absoluteInputDir, file));
+    const rel = toPosix(path.relative(analysisInputDir, file));
     const stat = await fsp.stat(file);
     if (!isJavaScript(rel)) continue;
     const isOverTransformLimit = stat.size > flags.maxTransformBytes;
@@ -2565,7 +2574,7 @@ async function main() {
   const sanitizedInputByRel = new Map();
   const htmlWrappedCaptures = [];
   for (const file of inputFiles) {
-    const rel = toPosix(path.relative(absoluteInputDir, file));
+    const rel = toPosix(path.relative(analysisInputDir, file));
     if (!isJavaScript(rel)) continue;
     const content = await fsp.readFile(file, 'utf8').catch(() => null);
     if (content == null || !looksLikeHtmlDocument(content)) continue;
@@ -2589,9 +2598,9 @@ async function main() {
   // skipping them. extractPackageCoordinate-style evidence is gathered later;
   // here we only flag maps that are not usable as source maps at all.
   const invalidSourceMaps = [];
-  const inputRelSet = new Set(inputFiles.map((file) => toPosix(path.relative(absoluteInputDir, file))));
+  const inputRelSet = new Set(inputFiles.map((file) => toPosix(path.relative(analysisInputDir, file))));
   for (const file of inputFiles) {
-    const rel = toPosix(path.relative(absoluteInputDir, file));
+    const rel = toPosix(path.relative(analysisInputDir, file));
     if (!/\.map$/i.test(rel)) continue;
     const content = await fsp.readFile(file, 'utf8').catch(() => null);
     if (content == null) continue;
@@ -2602,7 +2611,7 @@ async function main() {
         reason: verdict.reason,
         // Best-effort URL to re-fetch a genuine map from: the sibling bundle's
         // //# sourceMappingURL comment if present, else origin + map path.
-        refetchUrl: await suggestMapRefetchUrl(absoluteInputDir, rel, inputRelSet, origin),
+        refetchUrl: await suggestMapRefetchUrl(analysisInputDir, rel, inputRelSet, origin),
       });
     }
   }
@@ -2610,7 +2619,7 @@ async function main() {
   const deobfuscatedDir = path.join(outputDir, 'recovery/deobfuscated');
   // MITM metadata contains duplicate response bodies and privacy/provenance
   // records. Analyze the materialized public capture, never the metadata tree.
-  const deobfuscationInputDir = await pathExists(mitmMetadataDir) ? publicDir : absoluteInputDir;
+  const deobfuscationInputDir = staged?.inputDir || (await pathExists(mitmMetadataDir) ? publicDir : absoluteInputDir);
   const deobfuscateArgs = [deobfuscationInputDir, deobfuscatedDir, '--force', '--verbose'];
   if (flags.timeoutSeconds !== null) deobfuscateArgs.push('--timeout', String(flags.timeoutSeconds));
   if (flags.concurrency !== null) deobfuscateArgs.push('--concurrency', String(flags.concurrency));
@@ -2692,14 +2701,15 @@ async function main() {
     for (const rel of excludedLargeJs) {
       // Prefer a sanitized copy when the captured bundle was HTML-wrapped, so we
       // split real JavaScript rather than an HTML document.
-      const inputFile = sanitizedInputByRel.get(rel) || path.join(absoluteInputDir, rel);
+      const inputFile = sanitizedInputByRel.get(rel) || path.join(analysisInputDir, rel);
       const stat = await fsp.stat(inputFile);
       const splitName = splitDirName(rel, '-raw', splitNameCollisions);
       const out = path.join(outputDir, 'src/recovered-chunks', splitName);
       const code = await fsp.readFile(inputFile, 'utf8').catch(() => '');
       const strategy = splitBundleForInspection(inputFile, out, {
         code,
-        astArgs: ['--force', '--summary', '--deep-huge-nodes'],
+        astArgs: ['--force', '--summary', '--deep-huge-nodes',
+          ...(selectedAssets.some((asset) => asset.analysisPath === rel) ? ['--module-granularity', flags.moduleGranularity] : [])],
       });
       const baseMode = flags.recoveryMode === 'inspect-first' ? 'raw-inspect-first' : 'raw-large';
       splitOutputs.push({ source: rel, output: toPosix(path.relative(outputDir, out)), bytes: stat.size, mode: strategy === 'webpack-modules' ? `${baseMode}-webpack-modules` : baseMode });
@@ -2708,7 +2718,7 @@ async function main() {
 
   const splitManifestData = await readSplitManifests(outputDir, splitOutputs);
   const sourceMapEvidence = dedupeSourceMapEvidence([
-    ...await collectSourceMapEvidence(absoluteInputDir),
+    ...await collectSourceMapEvidence(analysisInputDir),
     ...await collectSourceMapEvidence(deobfuscatedDir),
   ]);
   const dependencies = detectDependencies(filesByRel, sourceMapEvidence);
@@ -2727,6 +2737,8 @@ async function main() {
   const extractionPlan = createExtractionPlan(boundaries, splitManifestData.manifests, splitManifestData.entries, sourceMapEvidence, recoveryAudit);
   await writeWorkspace(outputDir, boundaries, dependencies, {
     inputDir: absoluteInputDir,
+    includeCapturedAssets: flags.includeCapturedAssets,
+    capturedAppAssetSelection: staged?.manifest || null,
     origin,
     repairWasm: flags.repairWasm,
     recoveryMode: flags.recoveryMode,

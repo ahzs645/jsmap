@@ -42,6 +42,8 @@
     "test:custom-element-naming": "node scripts/test-custom-element-naming.cjs",
     "test:embedded-assets": "node scripts/test-embedded-assets.cjs",
     "test:capture-coverage": "node scripts/test-capture-coverage.cjs",
+    "test:capture-paths": "node scripts/test-capture-paths.cjs",
+    "test:captured-app-assets": "node scripts/test-captured-app-assets.cjs",
     "split:bundle": "node scripts/split-bundle-ast.cjs",
     "test:wasm-wat-repair": "node scripts/test-wasm-wat-repair.cjs",
     "test:framework-detection": "node scripts/test-framework-detection.cjs",
@@ -53,7 +55,9 @@
     "test:dependency-fingerprints": "node scripts/test-dependency-fingerprints.cjs",
     "test:binding-graph": "node scripts/test-binding-graph.cjs",
     "test:module-partition": "node scripts/test-module-partition.cjs",
-    "test:promotion-roundtrip": "node scripts/test-promotion-roundtrip.cjs"
+    "test:promotion-roundtrip": "node scripts/test-promotion-roundtrip.cjs",
+    "test:feature-coverage": "node scripts/test-feature-coverage.cjs",
+    "test:capture-replay": "node scripts/test-capture-replay.cjs"
   },
   "dependencies": {
     "@wakaru/unminify": "^0.2.2",
@@ -64,6 +68,7 @@
     "eslint-scope": "^8.4.0",
     "file-saver": "^2.0.5",
     "googlevideo": "^4.1.1",
+    "isolated-vm": "file:vendor/isolated-vm-stub",
     "jszip": "^3.10.1",
     "prettier": "^3.8.1",
     "react": "^19.2.4",
@@ -72,7 +77,7 @@
     "webcrack": "^2.15.1"
   },
   "overrides": {
-    "isolated-vm": "file:vendor/isolated-vm-stub"
+    "isolated-vm": "$isolated-vm"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
@@ -86,6 +91,7 @@
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.4.0",
     "javascript-obfuscator": "^5.3.0",
+    "playwright": "1.62.1",
     "rollup": "^4.59.0",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.56.1",

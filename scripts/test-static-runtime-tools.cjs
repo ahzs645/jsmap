@@ -23,7 +23,7 @@ async function createFixture(root) {
   await write(
     path.join(root, 'public/index.html'),
     [
-      '<!doctype html><html><head><title>Fixture</title>',
+      '<!doctype html><html><head><title>Fixture</title><link rel="icon" href="data:,">',
       '<script defer src="/_next/static/chunks/main.js"></script>',
       '<script defer src="/_next/static/chunks/pages/index.js"></script>',
       '</head><body><div id="__next">Fixture App</div></body></html>',
@@ -129,14 +129,17 @@ async function main() {
     await waitForServer(server);
     const shimSource = await (await fetch('http://127.0.0.1:51873/__jsmap_static_shim.js')).text();
     assert.doesNotThrow(() => new Function(shimSource), 'generated browser shim should be valid JavaScript');
+    const existingChromium = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || process.env.CHROMIUM_PATH;
     const verifyOutput = execFileSync(
       process.execPath,
-      [path.join(ROOT, 'scripts/jsmap.cjs'), 'verify-static', 'http://127.0.0.1:51873/', '--expect-text', 'Fixture App'],
-      { encoding: 'utf8' },
+      [path.join(ROOT, 'scripts/jsmap.cjs'), 'verify-static', 'http://127.0.0.1:51873/', '--expect-text', 'Fixture App',
+        ...(existingChromium ? ['--chromium-executable-path', existingChromium] : [])],
+      { encoding: 'utf8', ...(existingChromium ? { env: { ...process.env, PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: '/unused/flag-has-priority' } } : {}) },
     );
     const verify = JSON.parse(verifyOutput);
     assert.equal(verify.ok, true);
-    assert(verify.checks.some((check) => check.name === 'http-load' && check.ok));
+    if (existingChromium && verify.playwrightAvailable) assert.equal(verify.chromiumExecutablePath, existingChromium, 'explicit Chromium flag must override the environment');
+    assert(verify.checks.some((check) => ['http-load', 'browser-load'].includes(check.name) && check.ok));
 
     const replayResponse = await fetch('http://127.0.0.1:51873/__jsmap_external/api.example.test/pre-sign', { method: 'POST' });
     assert.equal(replayResponse.status, 200);

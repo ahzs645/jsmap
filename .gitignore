@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 
+# Authorized capture/replay evidence can contain private response bodies.
+*.har
+.jsmap-mitm/
+**/recovery/mitm-capture/
+**/recovery/analysis-input/
+private-evidence/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

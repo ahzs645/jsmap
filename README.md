@@ -214,13 +214,95 @@ node scripts/jsmap.cjs mitm-import authorized-capture.har ./captured-site
 node scripts/jsmap.cjs mitm-recover authorized-capture.har ./recovered-site --allow-empty
 ```
 
+Application bundles served by a storage/CDN origin remain in replay metadata by
+default. To include a reviewed application-owned bundle in source inspection,
+select its exact captured URL explicitly (repeat the flag for multiple assets):
+
+```bash
+node scripts/jsmap.cjs recover ./captured-site ./recovered-site \
+  --include-captured-asset https://storage.example.test/app/build.js \
+  --recovery-mode inspect-first --large-js-mode split-raw
+```
+
+This accepts successful captured JavaScript, HTML or CSS GET responses, verifies
+their recorded SHA-256, and stages only those response bytes beside the primary
+static code in `recovery/analysis-input/`. Selection provenance is written to
+`recovery/APP_ASSET_SELECTION.json`. Authentication/user JSON, unrelated external
+responses and route/replay metadata do not enter this analysis input. The
+preserved `public/` runtime is not changed by selection. Copies of primary API
+responses in older captures are excluded from this inspection input as well;
+the exclusion count is recorded. The flag is also accepted by
+`mitm-recover`; selection does not establish a higher recovery level.
+
+HAR materialization bounds UTF-8 filename components and deep paths using stable
+hashes, while retaining the original URL and its materialized path in the route
+map. The preserved harness resolves root-relative CDN module imports using the
+importing module's local external-origin referrer and redirects to the canonical
+captured alias. It does not guess from matching basenames or fetch missing code.
+
+When Playwright's pinned browser is not installed, `verify-static` can use an
+existing Chromium with `--chromium-executable-path /path/to/chromium`,
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`, or `CHROMIUM_PATH` (in that priority order).
+
+For interaction-dependent coverage, use a reviewed feature plan against the
+local harness. Boot success does not establish that lazy features were captured:
+
+```json
+{"version":1,"features":[{"id":"stl-dialog","path":"/","steps":[{"click":"#stl-button","expectSelector":"#stl-dialog"}]}]}
+```
+
+```sh
+node scripts/jsmap.cjs feature-coverage http://127.0.0.1:4173/ \
+  --plan reviewed-features.json --out private-evidence/feature-coverage.json \
+  --chromium-executable-path /usr/bin/chromium
+```
+
+Each feature gets a fresh browser context and requires an observable text or
+selector assertion. The manifest records module/request URLs, HTTP failures,
+blocked external traffic, assertion counts, runtime/console error counts and
+whether the DOM changed. Every query value is redacted; request/response bodies,
+headers, page content and console text are omitted. Keep reports private until
+reviewed because URL paths can identify private resources. The command requires
+Playwright 1.48 or newer (the development dependency is pinned), allows only a
+localhost harness, blocks requests leaving that origin including popups, disables
+service workers and closes all WebSockets. Synthetic replay responses are reported
+as gaps rather than captured evidence. The command returns nonzero for incomplete
+features. It does not establish live cloud,
+authentication, pixel or physical export parity, nor a higher recovery level.
+
+Captured redirect responses retain their status and sanitized query while
+targeting local origin aliases. Relative locations resolve against the original
+response URL, including external-to-primary redirects. URL fragments are omitted
+because they can carry OAuth tokens. Missing targets, unmatched methods/queries,
+ambiguous origins and uncaptured imagery remain explicit gaps; the harness does
+not substitute another captured response or send a redirect to the original
+external service. Use a reviewed replay policy for deliberately synthetic data.
+
+Run the capture/replay regression group with a browser installed:
+
+```sh
+npm ci --ignore-scripts --include=optional
+npx playwright install chromium
+npm run test:capture-replay
+```
+
+This runs 17 suites, including real Chromium checks. An installed system Chromium
+can be selected with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` or `CHROMIUM_PATH`.
+The pull-request workflow repeats the locked installation, suite and app build.
+
 `mitm-import` infers one primary origin (or accepts `--origin`), materializes
-successful primary-origin GET responses, decodes HAR/base64 and compressed
+successful primary-origin static GET responses, decodes HAR/base64 and compressed
 bodies, and records status, safe response headers, timing, redirects, and
 query-shaped variants in `.jsmap-mitm/`. It removes authorization/cookie/token
 headers, redacts URL user-info and sensitive query values, and omits request bodies and their
 hashes. Response bodies are retained and may contain private application data,
 so review the capture before sharing or committing it.
+
+Primary non-static responses, including API JSON, stay in replay metadata; the harness can
+serve them locally without promoting them into `public/` or source inspection.
+Validated version-3 source maps remain available for inspection. Re-import older
+HARs to apply this public-asset boundary and retain unambiguous sanitized redirect
+origins. Existing preserved directories are not silently rewritten.
 
 `mitm-recover --capture-dir <capture-output-dir>` selects a disposable
 intermediate destination; it is never the saved-resource input. `--force`
