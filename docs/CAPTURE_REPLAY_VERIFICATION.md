@@ -1,6 +1,6 @@
 # Capture and replay verification
 
-Verified on 2026-10-31 against base `0b28735bc6974a8047a913c389139620748caf6c`, using Node 24.19.0, the locked Playwright 1.62.1 dependency and system Chromium 154.0.8037.57 on Linux.
+Verified on 2026-10-31 and 2026-11-01 against base `0b28735bc6974a8047a913c389139620748caf6c`, using Node 24.19.0, npm 11.9.0 and 11.19.1, the locked Playwright 1.62.1 dependency and system Chromium 154.0.8037.57 on Linux.
 
 ## Reproduce
 
@@ -13,6 +13,8 @@ npm run build
 ```
 
 For an installed browser, set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` or `CHROMIUM_PATH`. All 17 suites, lint and the TypeScript/Vite application build passed after the clean installation. The pull-request workflow repeats the locked installation, browser setup, regression group and build.
+
+The existing local `isolated-vm` stub is declared as a root dependency and reused through the `$isolated-vm` override. This gives npm's optional peer resolver an explicit package/version entry and keeps clean installs compatible with both tested npm versions. Its deliberate disabled-native-sandbox behavior is unchanged.
 
 The regression group covers bounded Unicode/deep capture paths; reviewed static-asset selection and hashes; primary/external data isolation; HAR import and replay; redirect origin/path/query handling and fragment redaction; method/query mismatches; static runtime checks; capture sanitization; evidence isolation; framework detection; coverage; recovery heuristics; source-app workflow gates; rebuilds; directory captures; boot readiness; embedded assets; split seams; and browser feature coverage.
 
